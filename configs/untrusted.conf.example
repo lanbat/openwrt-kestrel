@@ -11,6 +11,6 @@ SSID=BTHub6-3K7P
 ENCRYPTION=psk+psk2        # WPA/WPA2 mixed — required for legacy devices
 
 SUBNET=192.168.2           # router gets .1, clients .100–.249
-RATE_LIMIT=1mbit           # 0 to disable
+RATE_LIMIT=500kbit         # 0 to disable; supports mbit and kbit
 DNS_SERVER=1.1.1.3         # Cloudflare for Families (blocks malware + adult content)
 ALLOWLIST=yes              # only listed MACs get internet; see /etc/untrusted-allowed-macs

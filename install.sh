@@ -108,8 +108,11 @@ uci commit wireless
 mkdir -p /etc/nftables.d
 
 if [ "${RATE_LIMIT:-0}" != "0" ]; then
-    _rate_kbps=$(echo "$RATE_LIMIT" | sed 's/[Mm]bit$//')
-    _rate_kbytes=$(( _rate_kbps * 125 ))
+    case "$RATE_LIMIT" in
+        *[Mm]bit) _rate_kbytes=$(( $(echo "$RATE_LIMIT" | sed 's/[Mm]bit$//') * 125 )) ;;
+        *[Kk]bit) _rate_kbytes=$(( $(echo "$RATE_LIMIT" | sed 's/[Kk]bit$//') / 8 )) ;;
+        *) echo "ERROR: RATE_LIMIT must be in mbit or kbit (e.g. 1mbit, 500kbit)"; exit 1 ;;
+    esac
     # Files in /etc/nftables.d/ are included inside table inet fw4 by fw4.
     cat >/etc/nftables.d/20-${IFACE}-ratelimit.nft <<EOF
 chain ${IFACE}_ratelimit {
