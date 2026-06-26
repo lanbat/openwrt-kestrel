@@ -8,7 +8,7 @@ IFACE=guest
 RADIO=radio0               # radio0 = 2.4GHz, radio1 = 5GHz
 WIFI_UCI=guest             # UCI wireless section (created automatically if absent)
 SSID=                      # your guest network name
-ENCRYPTION=psk2+psk3       # WPA2+WPA3
+ENCRYPTION=sae             # WPA3 only
 
 SUBNET=192.168.3           # router gets .1, clients .100–.249
 RATE_LIMIT=10mbit          # 0 to disable
