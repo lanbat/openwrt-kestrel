@@ -45,7 +45,8 @@ uci set dhcp."$IFACE".start=100
 uci set dhcp."$IFACE".limit=150
 uci set dhcp."$IFACE".leasetime=12h
 # Give clients the filtered DNS server directly — they never talk to the router's dnsmasq.
-uci set dhcp."$IFACE".dhcp_option="6,$DNS_SERVER"
+uci -q delete dhcp."$IFACE".dhcp_option || true
+uci add_list dhcp."$IFACE".dhcp_option="6,$DNS_SERVER"
 
 uci commit dhcp
 
