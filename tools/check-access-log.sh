@@ -57,18 +57,19 @@ while IFS= read -r line; do
     src_label=$([ -n "$src_name" ] && echo "${src_name} (${src})" || echo "$src")
     dst_label=$([ -n "$dst_name" ] && echo "${dst_name} (${dst})" || echo "$dst")
 
-    allow_cmd=""
-    [ -n "$REPO_DIR" ] && \
-        allow_cmd="sh ${REPO_DIR}/tools/allow-service.sh ${iface} ${dst} ${proto} ${port} 24h"
+    ROUTER_IP=$(ip addr show br-lan 2>/dev/null \
+                | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+    APPROVE_URL="http://${ROUTER_IP}/cgi-bin/approve-access?net=${iface}&src=${src}&dst=${dst}&proto=${proto}&port=${port}"
 
     curl -sf -X POST "$NOTIFY_URL" \
         -H "Title: Access request — ${iface}" \
         -H "Priority: default" \
         -H "Tags: lock" \
+        -H "Actions: view, Approve, ${APPROVE_URL}" \
         -d "${src_label} → ${dst_label}:${port}/${proto}
 
-To allow for 24h, run on router:
-${allow_cmd}" >/dev/null &
+Tap Approve or open from your LAN:
+${APPROVE_URL}" >/dev/null &
 
 done < "$TMPLOG"
 

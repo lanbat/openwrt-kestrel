@@ -382,6 +382,16 @@ NOTIFYEOF
     uci set dhcp.@dnsmasq[0].dhcpscript="${BASE_DIR}/dhcp-notify"
     uci commit dhcp
 
+    # Install approval CGI and enable uhttpd CGI support
+    mkdir -p /www/cgi-bin
+    cp "${SCRIPT_DIR}/tools/approve-access.cgi" /www/cgi-bin/approve-access
+    chmod 0755 /www/cgi-bin/approve-access
+    if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
+        uci set uhttpd.main.cgi_prefix=/cgi-bin
+        uci commit uhttpd
+        /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+    fi
+
     # Cron: check access log every minute for blocked LAN→zone attempts
     ( crontab -l 2>/dev/null | grep -v '# extra-networks-monitor' ) | crontab -
     ( crontab -l 2>/dev/null
