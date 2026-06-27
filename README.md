@@ -28,7 +28,8 @@ Each network is a config file. Add a new one by copying an example.
 - **MAC allowlist** — for IoT networks: unlisted devices get no lease and are blocked from forwarding
 - **LAN → isolated access** — optionally let LAN devices reach isolated devices, never the reverse
 - **mDNS reflection** — let guests discover shared services (Chromecast, AirPrint) via avahi
-- **Device notifications** — push alert to your phone when a new device joins, via ntfy.sh
+- **Device notifications** — push alert when a new device joins, via ntfy.sh
+- **LAN access approval** — when a LAN device tries to reach something on an isolated network, you get a push notification with an Approve button; tapping it opens a web form on the router to grant temporary access for a chosen duration
 - **Traffic counters** — bytes in/out per network since last firewall reload, shown in status
 - **Access schedule** — restrict internet to specific hours; auto-blocked outside the window
 - **Temporary port forwarding** — expose a LAN host to guests for a fixed time; auto-removed via cron
@@ -149,7 +150,11 @@ mDNS multicast packets are confined to a single subnet — a guest on `192.168.3
 
 ## Device notifications
 
-Set `NOTIFY_URL` to an [ntfy.sh](https://ntfy.sh) topic URL. When a new device gets a DHCP lease on this network, a push notification is sent with the device's hostname, MAC, and IP.
+Set `NOTIFY_URL` to an [ntfy.sh](https://ntfy.sh) topic URL. Two types of notifications are sent automatically:
+
+**New device joined** — when a device gets a DHCP lease, you get a push with its hostname, MAC, and IP.
+
+**LAN access request** — when a LAN device tries to reach something on an isolated network (and is blocked), you get a push with an **Approve** button. Tapping it opens a page on the router where you pick how long to allow access. The rule is temporary and removed automatically when it expires.
 
 ```sh
 # In configs/guest.conf:
@@ -157,6 +162,8 @@ NOTIFY_URL=https://ntfy.sh/my-unique-topic-name
 ```
 
 Subscribe to the topic in the ntfy app on your phone. Each isolated network can have its own topic.
+
+The approval page (`http://192.168.1.1/cgi-bin/approve-access`) is only reachable from your home LAN — isolated zones have `INPUT=REJECT` so guests cannot access it.
 
 ## Tools
 
@@ -199,6 +206,32 @@ sh tools/access-schedule.sh configs/guest.conf always
 # Show current schedule and state
 sh tools/access-schedule.sh configs/guest.conf status
 ```
+
+### Allow LAN access to a guest device
+
+When `NOTIFY_URL` is set, blocked LAN→isolated connection attempts trigger a push notification with an **Approve** button. Tapping it opens a browser form on the router. You pick the duration and submit — the rule is added immediately and removed automatically when it expires.
+
+You can also grant access directly from the command line:
+
+```sh
+# Allow LAN to reach a guest device on port 22 for 24 hours
+sh tools/allow-service.sh guest 192.168.3.105 tcp 22 24h
+
+# List all active temporary allowances
+sh tools/allow-service.sh list
+
+# Remove one manually
+sh tools/allow-service.sh remove allow_lan_guest_192_168_3_105_22_tcp
+```
+
+```
+Arguments: <network> <guest-ip> <proto> <port> <duration>
+
+  duration   1h, 6h, 12h, 24h, 2d, 7d, 30d — auto-removed via cron, survives reboots
+  proto      tcp or udp
+```
+
+Rules are stored in UCI (persist across reboots). If the router reboots after the scheduled removal time has passed, remove the rule manually with `sh tools/allow-service.sh list` then `remove`.
 
 ### Expose a port
 
