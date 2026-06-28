@@ -640,5 +640,6 @@ fi
 [ -n "$ALLOWED_PORTS" ] && echo "  Ports:     restricted to $ALLOWED_PORTS + NTP"
 [ -n "$VLAN_ID" ] && echo "  VLAN:      ${VLAN_TRUNK}.${VLAN_ID} bridged into br-${IFACE}"
 [ -n "$NOTIFY_URL" ] && echo "  Notify:    new devices → ntfy"
+[ "${JOIN_APPROVAL:-no}" = yes ] && echo "  Join gate: new devices blocked until approved via push notification"
 [ "$MDNS" = yes ] && echo "  mDNS:      reflecting between LAN and $IFACE"
 true

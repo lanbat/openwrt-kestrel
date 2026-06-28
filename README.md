@@ -26,6 +26,7 @@ Each network is a config file. Add a new one by copying an example.
 - **Rate limiting** — aggregate cap + optional per-device cap via nftables; no kernel modules required
 - **Port restriction** — limit outbound ports (e.g. web-only guests)
 - **MAC allowlist** — for IoT networks: unlisted devices get no lease and are blocked from forwarding
+- **Join approval** — optionally block all new devices from internet access until you approve them; a push notification fires with an **Approve** button the moment they connect; approvals persist across reboots and are reset when the password is rotated
 - **LAN ↔ isolated access** — optionally let LAN devices reach isolated network devices (`LAN_ACCESS=yes`); separately, isolated devices that try to reach LAN services trigger a push notification with an **Approve** button so you can grant temporary per-service access
 - **mDNS reflection** — let guests discover shared services (Chromecast, AirPrint) via avahi
 - **Push notifications** — 12 event types via ntfy.sh: new device joined, LAN access request (isolated→LAN)/approval/expiry, allowlist rejection, bandwidth alert, port forwarded/removed, password rotated, daily digest, VPN state change, router reboot
@@ -108,11 +109,16 @@ Config files live in `configs/` and are gitignored — they never leave the rout
 | `VLAN_ID` | — | 802.1Q VLAN ID — bridge a tagged wired port into this network alongside WiFi, e.g. `20` |
 | `VLAN_TRUNK` | — | Physical interface carrying the VLAN trunk, e.g. `eth0` — required when `VLAN_ID` is set |
 | `MDNS` | `no` | Reflect mDNS between LAN and this network; installs avahi-daemon if absent |
-| `NOTIFY_URL` | — | ntfy.sh URL — push alert when a new device joins, e.g. `https://ntfy.sh/my-topic` |
-| `DEFAULT_DURATION` | `24h` | Pre-selected duration in the approval form (`1h` `6h` `12h` `24h` `2d` `7d` `30d`) |
-| `MAX_DURATION` | `30d` | Longest duration available in the approval form — options above this are hidden |
-| `REASON_REQUIRED` | `no` | `yes` — approver must enter a reason before access is granted |
+| `NOTIFY_URL` | — | ntfy.sh URL for push notifications, e.g. `https://ntfy.sh/my-topic` |
+| `NOTIFY_JOIN` | `no` | Send a push notification each time a device gets a DHCP lease |
+| `JOIN_APPROVAL` | `no` | Block internet for new devices until you approve them via push notification (requires `NOTIFY_URL`) |
+| `DEFAULT_DURATION` | `24h` | Pre-selected duration in the LAN access approval form (`1h` `6h` `12h` `24h` `2d` `7d` `30d`) |
+| `MAX_DURATION` | `30d` | Longest duration available in the LAN access approval form — options above this are hidden |
+| `REASON_REQUIRED` | `no` | `yes` — approver must enter a reason before LAN access is granted |
 | `BANDWIDTH_THRESHOLD_MB` | `0` | Alert when a device transfers this many MB in a session; `0` to disable |
+| `SHOW_QR` | `no` | Show WiFi QR code and password in the status dashboard |
+| `ROTATE_PASSWORD` | `no` | Show a "Rotate password" button in the status dashboard |
+| `DESCRIPTION` | — | Label shown in the status dashboard header for this network |
 
 > `ACCESS_HOURS` is set via `tools/access-schedule.sh`, not in the config file.
 
@@ -166,7 +172,9 @@ All notifications include a link to the status dashboard. LAN access requests in
 
 | Event | Trigger | Priority |
 |---|---|---|
-| New device joined | Device gets a DHCP lease | Low |
+| New device joined | Device gets a DHCP lease (when `NOTIFY_JOIN=yes`) | Low |
+| Join request | New device needs internet approval (when `JOIN_APPROVAL=yes`) | Default |
+| Join approved | Device internet access approved via web form | Default |
 | LAN access request | Isolated device blocked from reaching a LAN service | Default |
 | LAN access approved | Access granted via web form or `allow-service.sh` | Default |
 | LAN access expired | Temporary rule removed by cron | Low |
@@ -186,6 +194,22 @@ When an isolated device tries to reach a service on your LAN (192.168.1.x or its
 `DEFAULT_DURATION` pre-selects a duration in the form (default `24h`). `MAX_DURATION` hides longer options. Set `REASON_REQUIRED=yes` to make the reason field mandatory — enforced both client-side and server-side.
 
 The approval page (`/cgi-bin/approve-access`) is only reachable from your home LAN — isolated zones have `INPUT=REJECT`. Both IPv4 and IPv6 source/destination addresses are supported in the approval flow.
+
+### Join approval
+
+When `JOIN_APPROVAL=yes`, every device that connects to the network is initially **blocked from internet access** until you approve it. This lets you control exactly which devices can use the network even if they know the WiFi password.
+
+How it works:
+
+1. Device connects and gets a DHCP lease → its IP is added to an nftables block set; internet traffic is dropped immediately
+2. A push notification fires: *"unknown (aa:bb:cc:dd:ee:ff) joined guest at 192.168.3.105 and needs internet approval"* with an **Approve** button
+3. Tap **Approve** → opens `/cgi-bin/approve-join` showing the device's hostname, IP, and MAC — two buttons: **Approve internet access** or **Keep blocked**
+4. Approving records the device's MAC in `/etc/extra-networks/${IFACE}-join-approved` and unblocks it immediately
+5. On all future joins (same MAC, any IP) the device passes straight through with no notification
+
+The approved list is cleared automatically when the WiFi password is rotated — everyone must reconnect with the new password and be re-approved.
+
+The block set is rebuilt from the pending state file on `fw4 reload` and reboot, so blocked devices stay blocked across restarts until explicitly approved.
 
 ### Bandwidth alerts
 
@@ -373,7 +397,7 @@ Generate a new random password, apply it immediately, and print a QR code.
 sh tools/rotate-password.sh configs/guest.conf
 ```
 
-Updates the config file in place and reloads wireless. Guests on the old password are disconnected.
+Updates the config file in place and reloads wireless. Guests on the old password are disconnected. When `JOIN_APPROVAL=yes`, all previously approved devices are cleared — everyone must be re-approved after reconnecting with the new password.
 
 ### Guest info page
 
