@@ -28,7 +28,7 @@ echo "$total" > "$CHECKPOINT"
 
 # Extract only new lines from this run
 new=$(( total - last ))
-logread 2>/dev/null | tail -"$new" | grep 'EXTNET-LAN2\|EXTNET-DENY' > "$TMPLOG" || true
+logread 2>/dev/null | tail -"$new" | grep 'EXTNET-2LAN\|EXTNET-DENY' > "$TMPLOG" || true
 
 [ -s "$TMPLOG" ] || { rm -f "$TMPLOG"; exit 0; }
 
@@ -65,11 +65,11 @@ ${src_label}${src_mac:+ [${src_mac}]} tried to use the ${iface} network but is n
         continue
         ;;
     # ── LAN access request ────────────────────────────────────────────────────
-    *EXTNET-LAN2*) ;;
+    *EXTNET-2LAN*) ;;
     *) continue ;;
     esac
 
-    _t="${line##*EXTNET-LAN2}"; iface="${_t%%[: ]*}"
+    _t="${line##*EXTNET-2LAN-}"; iface="${_t%%[: ]*}"
     [ -z "$iface" ] && continue
 
     conf="${BASE_DIR}/${iface}-notify.conf"

@@ -39,6 +39,7 @@ REASON_REQUIRED="${REASON_REQUIRED:-no}"
 BANDWIDTH_THRESHOLD_MB="${BANDWIDTH_THRESHOLD_MB:-0}"
 SHOW_QR="${SHOW_QR:-no}"
 NOTIFY_JOIN="${NOTIFY_JOIN:-no}"
+JOIN_APPROVAL="${JOIN_APPROVAL:-no}"
 ROTATE_PASSWORD="${ROTATE_PASSWORD:-no}"
 DESCRIPTION="${DESCRIPTION:-}"
 MDNS="${MDNS:-no}"
@@ -382,6 +383,55 @@ chain ${IFACE}_lan_monitor {
 EOF
 fi
 
+# ── join approval gate ────────────────────────────────────────────────────────
+# When JOIN_APPROVAL=yes, new devices are blocked from forwarding until approved
+# via the approve-join CGI. Approved MACs are stored in ${IFACE}-join-approved;
+# pending (blocked) IPs are stored in ${IFACE}-join-pending for rehydration on
+# fw4 reload.
+
+if [ "${JOIN_APPROVAL:-no}" = yes ]; then
+    cat >/etc/nftables.d/23-${IFACE}-joingate.nft <<EOF
+set ${IFACE}_join_pending {
+    type ipv4_addr
+}
+
+chain ${IFACE}_join_gate {
+    type filter hook forward priority -3; policy accept;
+    iifname "br-${IFACE}" ip saddr @${IFACE}_join_pending drop
+}
+EOF
+
+    cat >/etc/hotplug.d/iface/52-${IFACE}-joingate <<EOF
+#!/bin/sh
+[ "\$ACTION" = ifup ] || exit 0
+[ "\$INTERFACE" = ${IFACE} ] || exit 0
+
+BASE_DIR=/etc/extra-networks
+PENDING_FILE="\${BASE_DIR}/${IFACE}-join-pending"
+APPROVED_FILE="\${BASE_DIR}/${IFACE}-join-approved"
+
+[ -f "\$PENDING_FILE" ] || exit 0
+
+nft flush set inet fw4 ${IFACE}_join_pending 2>/dev/null || true
+
+while IFS= read -r _line; do
+    case "\$_line" in '#'*|'') continue ;; esac
+    _mac="\${_line%% *}"
+    _ip="\${_line##* }"
+    if grep -qF "\$_mac" "\$APPROVED_FILE" 2>/dev/null; then
+        grep -v "^\${_mac} " "\$PENDING_FILE" >"\${PENDING_FILE}.tmp" 2>/dev/null \
+            && mv "\${PENDING_FILE}.tmp" "\$PENDING_FILE" || true
+        continue
+    fi
+    nft add element inet fw4 ${IFACE}_join_pending "{ \$_ip }" 2>/dev/null || true
+done <"\$PENDING_FILE"
+EOF
+    chmod 0755 /etc/hotplug.d/iface/52-${IFACE}-joingate
+else
+    rm -f /etc/nftables.d/23-${IFACE}-joingate.nft
+    rm -f /etc/hotplug.d/iface/52-${IFACE}-joingate
+fi
+
 # ── traffic counters ──────────────────────────────────────────────────────────
 # Always create — status.sh reads these to show bytes transferred since last fw4 reload.
 
@@ -425,11 +475,11 @@ fi
 # NOTIFY_URL is unset. NOTIFY_URL-dependent features (dhcp hook, CGIs, crons)
 # are only set up when NOTIFY_URL is provided.
 
-{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nDNS_SERVER_V6=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\nNOTIFY_JOIN=%s\nROTATE_PASSWORD=%s\n' \
+{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nDNS_SERVER_V6=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\nNOTIFY_JOIN=%s\nJOIN_APPROVAL=%s\nROTATE_PASSWORD=%s\n' \
     "$SUBNET" "$NOTIFY_URL" "$IFACE" \
     "$DEFAULT_DURATION" "$MAX_DURATION" "$REASON_REQUIRED" "$BANDWIDTH_THRESHOLD_MB" \
     "${RATE_LIMIT:-}" "${RATE_LIMIT_PER_DEVICE:-}" "$DNS_SERVER" "${DNS_SERVER_V6:-}" \
-    "$ISOLATE" "${LAN_ACCESS:-no}" "$DOT" "$SHOW_QR" "$NOTIFY_JOIN" "$ROTATE_PASSWORD"
+    "$ISOLATE" "${LAN_ACCESS:-no}" "$DOT" "$SHOW_QR" "$NOTIFY_JOIN" "$JOIN_APPROVAL" "$ROTATE_PASSWORD"
   # DESCRIPTION may contain spaces so it must be single-quoted in the conf file.
   printf "DESCRIPTION='%s'\n" "${DESCRIPTION:-}"; } \
     >"${BASE_DIR}/${IFACE}-notify.conf"
@@ -445,22 +495,46 @@ if [ -n "$NOTIFY_URL" ]; then
 #!/bin/sh
 [ "$ACTION" = add ] || exit 0
 
+BASE_DIR=/etc/extra-networks
+
 # Record join time (mac → timestamp) for the status dashboard
 _jfile=/tmp/extra-networks-joins
 { grep -v "^${MACADDR}	" "$_jfile" 2>/dev/null
   printf '%s\t%s\n' "$MACADDR" "$(date '+%d %b %H:%M')"; } > "${_jfile}.tmp" \
     && mv "${_jfile}.tmp" "$_jfile" || true
 
+_router_ip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+
 . /etc/extra-networks/_lib.sh
 for _conf in /etc/extra-networks/*-notify.conf; do
     [ -f "$_conf" ] || continue
-    unset SUBNET NOTIFY_URL IFACE_NAME NOTIFY_JOIN
+    unset SUBNET NOTIFY_URL IFACE_NAME NOTIFY_JOIN JOIN_APPROVAL
     . "$_conf"
-    [ -n "${NOTIFY_URL:-}" ] || continue
-    [ "${NOTIFY_JOIN:-no}" = yes ] || continue
     case "$IPADDR" in "$SUBNET".*) ;; *) continue ;; esac
-    _ntfy "Device joined — $IFACE_NAME" low "" \
+
+    if [ "${JOIN_APPROVAL:-no}" = yes ] && [ -n "${NOTIFY_URL:-}" ]; then
+        _approved="${BASE_DIR}/${IFACE_NAME}-join-approved"
+        _pending="${BASE_DIR}/${IFACE_NAME}-join-pending"
+        if grep -qF "$MACADDR" "$_approved" 2>/dev/null; then
+            [ "${NOTIFY_JOIN:-no}" = yes ] && \
+                _ntfy "Device joined — $IFACE_NAME" low "" \
 "${HOSTNAME:-unknown} ($MACADDR) joined $IFACE_NAME at $IPADDR."
+        else
+            nft add element inet fw4 ${IFACE_NAME}_join_pending "{ $IPADDR }" 2>/dev/null || true
+            { grep -v "^${MACADDR} " "$_pending" 2>/dev/null
+              printf '%s %s\n' "$MACADDR" "$IPADDR"; } >"${_pending}.tmp" \
+                && mv "${_pending}.tmp" "$_pending" || true
+            _approve_url="http://${_router_ip}/cgi-bin/approve-join?net=${IFACE_NAME}&ip=${IPADDR}&mac=${MACADDR}&host=${HOSTNAME:-}"
+            _ntfy "Join request — ${IFACE_NAME}" default wifi \
+"${HOSTNAME:-unknown} ($MACADDR) joined ${IFACE_NAME} at $IPADDR and needs internet approval." \
+                "view, Approve, ${_approve_url}"
+        fi
+    else
+        [ "${NOTIFY_JOIN:-no}" = yes ] || continue
+        [ -n "${NOTIFY_URL:-}" ] || continue
+        _ntfy "Device joined — $IFACE_NAME" low "" \
+"${HOSTNAME:-unknown} ($MACADDR) joined $IFACE_NAME at $IPADDR."
+    fi
 done
 NOTIFYEOF
     chmod 0755 /etc/hotplug.d/dhcp/50-extra-networks
@@ -471,11 +545,12 @@ NOTIFYEOF
     # Install CGIs and enable uhttpd CGI support
     mkdir -p /www/cgi-bin
     cp "${SCRIPT_DIR}/tools/approve-access.cgi"    /www/cgi-bin/approve-access
+    cp "${SCRIPT_DIR}/tools/approve-join.cgi"      /www/cgi-bin/approve-join
     cp "${SCRIPT_DIR}/tools/status.cgi"            /www/cgi-bin/status
     cp "${SCRIPT_DIR}/tools/rotate-password.cgi"   /www/cgi-bin/rotate-password
     cp "${SCRIPT_DIR}/tools/qr.cgi"               /www/cgi-bin/qr
-    chmod 0755 /www/cgi-bin/approve-access /www/cgi-bin/status \
-               /www/cgi-bin/rotate-password /www/cgi-bin/qr
+    chmod 0755 /www/cgi-bin/approve-access /www/cgi-bin/approve-join \
+               /www/cgi-bin/status /www/cgi-bin/rotate-password /www/cgi-bin/qr
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
         uci set uhttpd.main.cgi_prefix=/cgi-bin
         uci commit uhttpd
