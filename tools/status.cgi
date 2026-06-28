@@ -74,7 +74,9 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 .net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
 .qr{display:flex;align-items:stretch;gap:1rem}
 .qr-info{font-size:.9rem;display:flex;flex-direction:column;flex:1;min-width:0}
-.qr-info strong{display:block;margin-bottom:.3rem}
+.qr-info strong{margin-bottom:.2rem}
+.q-lbl{font-size:.72rem;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-top:.4rem}
+.q-lbl:first-child{margin-top:0}
 .qr-info code{background:#e8e8e8;padding:.2rem .45rem;border-radius:4px;
               word-break:break-all;font-size:.85rem;align-self:flex-start}
 .qr-info form{margin-top:auto;padding-top:.6rem;text-align:right}
@@ -129,6 +131,9 @@ if [ -f "$VPN_CFG" ]; then
 fi
 
 # ── Networks ───────────────────────────────────────────────────────────────────
+
+_domain=$(uci -q get dhcp.@dnsmasq[0].domain 2>/dev/null || true)
+_domain="${_domain:-lan}"
 
 for _conf in "${BASE_DIR}"/*-notify.conf; do
     [ -f "$_conf" ] || continue
@@ -203,7 +208,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
         case "$_enc" in sae*|psk*) _wtype=WPA ;; wep*) _wtype=WEP ;; *) _wtype=nopass ;; esac
         _qrdata=$(qrencode -t ASCII -m 2 -o - \
             "WIFI:S:${_ssid};T:${_wtype};P:${_key};;" 2>/dev/null | tr '\n' '|')
-        printf '<div class="card qr"><div class="qr-canvas" data-qr="%s"></div><div class="qr-info"><strong>%s</strong><code>%s</code>' \
+        printf '<div class="card qr"><div class="qr-canvas" data-qr="%s"></div><div class="qr-info"><span class="q-lbl">SSID</span><strong>%s</strong><span class="q-lbl">Password</span><code>%s</code>' \
             "$_qrdata" "$(_html "$_ssid")" "$(_html "$_key")"
         [ "${ROTATE_PASSWORD:-no}" = yes ] && \
             printf '<form method="POST" action="/cgi-bin/rotate-password"><input type="hidden" name="net" value="%s"><button class="btn-danger" type="submit" onclick="return confirm('\''Rotate the WiFi password for %s? All connected devices will need to reconnect with the new password.'\'')">Rotate password</button></form>' \
@@ -220,7 +225,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
         _hdr_sig=$([ -n "$_assoc" ] && echo yes || echo no)
         _hdr_ip6=$([ -n "$_neigh6" ] && echo yes || echo no)
 
-        printf '<table><tr><th>Hostname</th><th>IPv4</th>'
+        printf '<table><tr><th>Hostname</th><th>DNS</th><th>IPv4</th>'
         [ "$_hdr_ip6" = yes ] && printf '<th>IPv6</th>'
         printf '<th>MAC</th>'
         [ "$_hdr_sig" = yes ] && printf '<th>Signal</th>'
@@ -249,7 +254,10 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 [ "$_total" -gt 0 ] && _bw=$(_human "$_total")
             fi
 
-            printf '<tr><td>%s</td><td>%s</td>' "$(_html "$_hn")" "$_ip"
+            _hn_disp="$(_html "$_hn")"; [ "$_hn" = "*" ] && _hn_disp="—"
+            _dns="—"
+            [ "$_hn" != "*" ] && [ -n "$_hn" ] && _dns="$(_html "${_hn}.${_domain}")"
+            printf '<tr><td>%s</td><td class="dim">%s</td><td>%s</td>' "$_hn_disp" "$_dns" "$_ip"
             [ "$_hdr_ip6" = yes ] && printf '<td class="dim">%s</td>' "${_ipv6:----}"
             printf '<td class="dim">%s</td>' "$_mac"
             [ "$_hdr_sig" = yes ] && printf '<td>%s</td>' "${_sig:----}"
