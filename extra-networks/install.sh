@@ -47,6 +47,10 @@ MDNS="${MDNS:-no}"
 VLAN_ID="${VLAN_ID:-}"
 VLAN_TRUNK="${VLAN_TRUNK:-}"
 
+if [ "$IFACE" = untrusted ]; then
+    SHOW_QR=no
+fi
+
 if [ -n "$VLAN_ID" ]; then
     printf '%s' "$VLAN_ID" | grep -qE '^[1-9][0-9]{0,3}$' \
         && [ "$VLAN_ID" -le 4094 ] 2>/dev/null \

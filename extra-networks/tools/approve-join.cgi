@@ -8,6 +8,16 @@ BASE_DIR=/etc/extra-networks
 
 _get_param() { printf '%s' "$1" | tr '&' '\n' | grep "^${2}=" | head -1 | sed "s/^${2}=//"; }
 _html()      { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
+_urldecode() {
+    printf '%s' "$1" | sed 's/+/ /g' | awk '
+    BEGIN { for(i=0;i<256;i++) h[sprintf("%02X",i)]=h[sprintf("%02x",i)]=sprintf("%c",i) }
+    { s=$0; out=""
+      while(match(s,/%[0-9A-Fa-f][0-9A-Fa-f]/)) {
+        out=out substr(s,1,RSTART-1) h[substr(s,RSTART+1,2)]
+        s=substr(s,RSTART+RLENGTH)
+      }
+      print out s }'
+}
 _valid_ip()  {
     case "$1" in
         *.*.*.*)  printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' ;;
@@ -36,10 +46,10 @@ else
     _params="${QUERY_STRING:-}"
 fi
 
-NET=$(_get_param "$_params" net)
-IP=$(_get_param  "$_params" ip)
-MAC=$(_get_param "$_params" mac)
-HOST=$(_get_param "$_params" host)
+NET=$(_urldecode "$(_get_param "$_params" net)")
+IP=$(_urldecode "$(_get_param  "$_params" ip)")
+MAC=$(_urldecode "$(_get_param "$_params" mac)" | tr 'ABCDEF' 'abcdef')
+HOST=$(_urldecode "$(_get_param "$_params" host)")
 
 printf 'Content-Type: text/html\r\n\r\n'
 
@@ -65,6 +75,12 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
     case "$_action" in approve|deny) ;; *) printf '<h1>Invalid action</h1>'; exit 0 ;; esac
 
     if [ "$_action" = approve ]; then
+        _approver_ip="${REMOTE_ADDR:-unknown}"
+        _approver_name=$(_name_for_ip "$_approver_ip")
+        _approver_mac=$(_mac_for_ip "$_approver_ip")
+        _approver="${_approver_name:-$_approver_ip}"
+        [ "$_approver" = "*" ] && _approver="$_approver_ip"
+        [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
         { grep -vF "$MAC" "$APPROVED_FILE" 2>/dev/null; printf '%s\n' "$MAC"; } \
             >"${APPROVED_FILE}.tmp" && mv "${APPROVED_FILE}.tmp" "$APPROVED_FILE" || true
         { grep -v "^${MAC} " "$PENDING_FILE" 2>/dev/null; } \
@@ -82,7 +98,10 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
         _ntfy "Access approved — ${NET}" default white_check_mark \
 "Type: Internet access approved
 
-${HOST:+$HOST }($MAC) can now use the internet on ${NET}."
+Approved device: ${HOST:+$HOST }($MAC), ${IP}
+Approved by: ${_approver}
+
+The approved device can now use the internet on ${NET}."
         _msg="$(_html "${HOST:-$IP}") ($MAC) can now use the internet on ${NET}."
         _cls=ok
     else
