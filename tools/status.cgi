@@ -72,7 +72,8 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
        color:#fff;border:none;border-radius:4px}
 .net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
 .qr{display:flex;align-items:center;gap:1rem}
-.qr svg{width:120px;height:120px;flex-shrink:0}
+.qr svg{width:120px;height:120px;flex-shrink:0;background:#fff}
+@media(prefers-color-scheme:dark){.qr svg{filter:invert(1)}}
 .qr-info{font-size:.9rem}
 .qr-info strong{display:block;margin-bottom:.3rem}
 .qr-info code{background:#e8e8e8;padding:.2rem .45rem;border-radius:4px;
