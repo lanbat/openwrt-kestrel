@@ -40,7 +40,7 @@ else
 fi
 
 NET=$(_get_param "$_params" net)
-MAC=$(_get_param "$_params" mac | tr '[:upper:]' '[:lower:]')
+MAC=$(_get_param "$_params" mac | tr 'ABCDEF' 'abcdef')
 
 printf '%s' "$NET" | grep -qE '^[a-z][a-z0-9_]*$' \
     || { printf 'Content-Type: text/html\r\n\r\n<h1>Invalid network</h1>'; exit 0; }
@@ -77,7 +77,7 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
 
     set_label)
         _new=$(printf '%s' "$(_get_param "$_params" label)" \
-            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 40)
+            | sed 's/+/ /g;s/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 40)
         _safe=$(printf '%s' "$_new" | sed "s/[^a-zA-Z0-9 _.'-]//g")
         [ -n "$_safe" ] && { mkdir -p "$BASE_DIR"; _upsert "$_labels_f" "$MAC" "$_safe"; }
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
@@ -97,7 +97,8 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
 
     approve_domain)
         _dom=$(printf '%s' "$(_get_param "$_params" domain)" \
-            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
         printf '%s' "$_dom" | grep -qE '^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$' \
             || { printf '<h1>Invalid domain</h1>'; exit 0; }
         _entry="${MAC}	${_dom}	allow		"
