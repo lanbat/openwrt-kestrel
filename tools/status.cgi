@@ -73,7 +73,7 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 .btn-danger{background:#c62828}
 .net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
 .qr{display:flex;align-items:center;gap:1rem}
-.qr svg{width:120px;height:120px;flex-shrink:0;color-scheme:light;background:#fff}
+.qr img{width:120px;height:120px;flex-shrink:0;border-radius:4px}
 .qr-info{font-size:.9rem}
 .qr-info strong{display:block;margin-bottom:.3rem}
 .qr-info code{background:#e8e8e8;padding:.2rem .45rem;border-radius:4px;
@@ -195,27 +195,16 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
             "$BANDWIDTH_THRESHOLD_MB"
     printf '</div>\n'
 
-    # ── WiFi QR code ──────────────────────────────────────────────────────────
+    # ── WiFi QR code + rotate button ─────────────────────────────────────────
 
     _key=$(uci -q get wireless."$_iface".key 2>/dev/null || true)
     if [ "${SHOW_QR:-no}" = yes ] && [ -n "$_key" ] && [ -n "$_ssid" ] && command -v qrencode >/dev/null 2>&1; then
-        _enc=$(uci -q get wireless."$_iface".encryption 2>/dev/null || true)
-        case "$_enc" in sae*|psk*) _wtype=WPA ;; wep*) _wtype=WEP ;; *) _wtype=nopass ;; esac
-        _qrsvg=$(qrencode -t SVG -s 4 -m 2 -o - \
-            "WIFI:S:${_ssid};T:${_wtype};P:${_key};;" 2>/dev/null | sed '1,2d')
-        [ -n "$_qrsvg" ] && printf '<div class="card qr">%s<div class="qr-info"><strong>%s</strong><code>%s</code></div></div>\n' \
-            "$_qrsvg" "$(_html "$_ssid")" "$(_html "$_key")"
-    fi
-
-    # ── Rotate password button ────────────────────────────────────────────────
-
-    if [ "${ROTATE_PASSWORD:-no}" = yes ]; then
-        printf '<div style="text-align:right;margin:.4rem 0">'
-        printf '<form method="POST" action="/cgi-bin/rotate-password">'
-        printf '<input type="hidden" name="net" value="%s">' "$(_html "$_iface")"
-        printf '<button class="btn-danger" type="submit" onclick="return confirm('\''Rotate the WiFi password for %s? All connected devices will need to reconnect with the new password.'\'')">Rotate password</button>' \
-            "$(_html "$_iface")"
-        printf '</form></div>\n'
+        printf '<div class="card qr"><img src="/cgi-bin/qr?net=%s" width="120" height="120"><div class="qr-info"><strong>%s</strong><code>%s</code>' \
+            "$_iface" "$(_html "$_ssid")" "$(_html "$_key")"
+        [ "${ROTATE_PASSWORD:-no}" = yes ] && \
+            printf '<form method="POST" action="/cgi-bin/rotate-password" style="margin-top:.6rem;text-align:right"><input type="hidden" name="net" value="%s"><button class="btn-danger" type="submit" onclick="return confirm('\''Rotate the WiFi password for %s? All connected devices will need to reconnect with the new password.'\'')">Rotate password</button></form>' \
+                "$(_html "$_iface")" "$(_html "$_iface")"
+        printf '</div></div>\n'
     fi
 
     # ── Device table ──────────────────────────────────────────────────────────

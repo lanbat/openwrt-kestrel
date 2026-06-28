@@ -466,7 +466,9 @@ NOTIFYEOF
     cp "${SCRIPT_DIR}/tools/approve-access.cgi"    /www/cgi-bin/approve-access
     cp "${SCRIPT_DIR}/tools/status.cgi"            /www/cgi-bin/status
     cp "${SCRIPT_DIR}/tools/rotate-password.cgi"   /www/cgi-bin/rotate-password
-    chmod 0755 /www/cgi-bin/approve-access /www/cgi-bin/status /www/cgi-bin/rotate-password
+    cp "${SCRIPT_DIR}/tools/qr.cgi"               /www/cgi-bin/qr
+    chmod 0755 /www/cgi-bin/approve-access /www/cgi-bin/status \
+               /www/cgi-bin/rotate-password /www/cgi-bin/qr
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
         uci set uhttpd.main.cgi_prefix=/cgi-bin
         uci commit uhttpd
