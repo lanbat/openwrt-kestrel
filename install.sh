@@ -79,7 +79,7 @@ uci set network."$IFACE".ipaddr="${SUBNET}.1"
 uci set network."$IFACE".netmask=255.255.255.0
 
 if [ "$IPV6" = yes ]; then
-    uci set network."$IFACE".ip6assign=60
+    uci set network."$IFACE".ip6assign=64
 else
     uci -q delete network."$IFACE".ip6assign || true
 fi
@@ -539,7 +539,7 @@ wifi reload
 echo "Installed: $IFACE"
 echo "  Network:   ${SUBNET}.1/24, DHCP ${SUBNET}.100–${SUBNET}.249"
 if [ "$IPV6" = yes ]; then
-    echo "  IPv6:      enabled (ip6assign /60, DHCPv6 + RA)"
+    echo "  IPv6:      enabled (ip6assign /64, DHCPv6 + RA)"
 fi
 if [ "$DOT" = yes ]; then
     echo "  DNS:       DoT via https-dns-proxy → ${DNS_SERVER}$([ "$IPV6" = yes ] && [ -n "${DNS_SERVER_V6:-}" ] && echo " / $DNS_SERVER_V6")"
