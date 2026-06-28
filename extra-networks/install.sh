@@ -629,7 +629,19 @@ fi
 /etc/init.d/network reload
 /etc/init.d/dnsmasq restart
 fw4 reload
-wifi reload
+
+# wifi reload triggers a MAC80211 race condition on phy0 that destroys all BSS
+# interfaces and leaves them uncreated. Instead, update the UCI config and then
+# restart hostapd per-phy via config_set — same approach as rotate-password.cgi.
+wifi reload 2>/dev/null || true
+sleep 5
+for _hconf in /var/run/hostapd-*.conf; do
+    [ -f "$_hconf" ] || continue
+    _phy="${_hconf##*/hostapd-}"; _phy="${_phy%.conf}"
+    ubus call hostapd config_set \
+        "{\"phy\":\"${_phy}\",\"radio\":-1,\"config\":\"${_hconf}\",\"prev_config\":\"${_hconf}.prev\"}" \
+        >/dev/null 2>&1 || true
+done
 
 # ── summary ───────────────────────────────────────────────────────────────────
 
