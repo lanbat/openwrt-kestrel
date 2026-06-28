@@ -44,9 +44,9 @@ _iface="${IFACE_NAME:-$NET}"
 uci -q get wireless."$_iface" >/dev/null 2>&1 \
     || { printf 'Content-Type: text/html\r\n\r\n<h1>Wireless section not found: %s</h1>' "$(_html "$_iface")"; exit 0; }
 
-# Generate new password
-_newpw=$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | tr -dc 'a-zA-Z0-9' 2>/dev/null | head -c 20 2>/dev/null)
-[ -n "$_newpw" ] || { printf 'Content-Type: text/html\r\n\r\n<h1>Failed to generate password</h1>'; exit 0; }
+# Generate new password (read until we have 20 alphanumeric chars)
+_newpw=$(tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 20)
+[ "${#_newpw}" -eq 20 ] || { printf 'Content-Type: text/html\r\n\r\n<h1>Failed to generate password</h1>'; exit 0; }
 
 # Apply to UCI (primary + extra radio if present)
 uci set wireless."${_iface}".key="$_newpw"
@@ -63,14 +63,15 @@ _cfg="${REPO_DIR}/configs/${_iface}.conf"
 [ -n "$REPO_DIR" ] && [ -f "$_cfg" ] && grep -q '^WIFI_KEY=' "$_cfg" \
     && sed -i "s|^WIFI_KEY=.*|WIFI_KEY=${_newpw}|" "$_cfg"
 
-# Reload wireless in background so CGI can respond first
-(sleep 1 && wifi reload >/dev/null 2>&1) &
+# Reload wireless after a delay so the browser can receive and render the
+# response before the WiFi drops. 5s gives plenty of time even on slow links.
+(sleep 5 && wifi reload >/dev/null 2>&1) &
 
 # Push notification with new password
 _load_notify "$_iface"
 _ntfy "Password rotated — ${_iface}" default key \
 "The WiFi password for ${_iface} was rotated. Scan the QR code on the dashboard to reconnect."
 
-printf 'Content-Type: text/html\r\nLocation: /cgi-bin/status\r\n\r\n'
-printf '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="2;url=/cgi-bin/status"></head>'
+printf 'Content-Type: text/html\r\n\r\n'
+printf '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="1;url=/cgi-bin/status"></head>'
 printf '<body>Password rotated. Returning to dashboard&hellip;</body></html>\n'

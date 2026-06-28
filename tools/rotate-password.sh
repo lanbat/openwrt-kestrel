@@ -20,7 +20,7 @@ WIFI_UCI="${WIFI_UCI:-$IFACE}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . /etc/extra-networks/_lib.sh
 
-NEW_KEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
+NEW_KEY=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 20)
 
 # Update config file
 if grep -q '^WIFI_KEY=' "$CONFIG"; then
