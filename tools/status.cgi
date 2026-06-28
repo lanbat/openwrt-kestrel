@@ -51,8 +51,9 @@ cat <<HTML
 <meta http-equiv="refresh" content="60">
 <title>Status — ${hostname}</title>
 <style>
+:root{color-scheme:light}
 *{box-sizing:border-box}
-body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:1rem;color:#111}
+body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:1rem;color:#111;background:#fff}
 h1{font-size:1.4rem;margin-bottom:.15rem}
 .sub{color:#888;font-size:.85rem;margin-bottom:2rem}
 h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:#888;
@@ -131,7 +132,7 @@ fi
 for _conf in "${BASE_DIR}"/*-notify.conf; do
     [ -f "$_conf" ] || continue
     unset NOTIFY_URL SUBNET IFACE_NAME BANDWIDTH_THRESHOLD_MB \
-          RATE_LIMIT RATE_LIMIT_PER_DEVICE DNS_SERVER ISOLATE LAN_ACCESS DOT SHOW_QR DESCRIPTION
+          RATE_LIMIT RATE_LIMIT_PER_DEVICE DNS_SERVER ISOLATE LAN_ACCESS DOT SHOW_QR DESCRIPTION NOTIFY_JOIN
     . "$_conf"
     _iface="${IFACE_NAME:-}"
     [ -z "$_iface" ] && continue
@@ -185,6 +186,8 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
         "$([ "${LAN_ACCESS:-no}" = yes ] && echo yes || echo no)"
     printf '<div class="row"><span class="lbl">Isolation</span><span class="val">%s</span></div>' \
         "$([ "${ISOLATE:-no}" = yes ] && echo on || echo off)"
+    printf '<div class="row"><span class="lbl">Join alerts</span><span class="val">%s</span></div>' \
+        "$([ "${NOTIFY_JOIN:-no}" = yes ] && echo on || echo off)"
     [ "${BANDWIDTH_THRESHOLD_MB:-0}" != 0 ] && \
         printf '<div class="row"><span class="lbl">Bandwidth alert</span><span class="val">%s MB/h</span></div>' \
             "$BANDWIDTH_THRESHOLD_MB"

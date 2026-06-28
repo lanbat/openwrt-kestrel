@@ -29,6 +29,7 @@ MAX_DURATION=30d                 # hide longer durations from the form (1h 6h 12
 REASON_REQUIRED=no               # yes = approver must enter a reason before granting access
 BANDWIDTH_THRESHOLD_MB=0         # alert when a device transfers this many MB in a session; 0 = disabled
 SHOW_QR=yes                      # yes = show WiFi QR code and password in the status dashboard
+NOTIFY_JOIN=yes                  # yes = send a push notification each time a device joins
 DESCRIPTION=Guest WiFi           # optional label shown in the status dashboard
 MDNS=no                          # yes = reflect mDNS from LAN (enables casting, AirPrint, etc.)
 ACCESS_HOURS=                    # restrict internet to hours e.g. "8-23"; blank = always on (set via access-schedule.sh)
