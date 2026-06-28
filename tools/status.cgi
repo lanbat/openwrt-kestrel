@@ -153,8 +153,8 @@ if command -v wg >/dev/null 2>&1; then
         [ "$_wgs_is_server" = no ] && continue
 
         _wgs_dump=$(wg show "$_wgs" dump 2>/dev/null | tail -n +2)
-        printf '<h2>WireGuard — %s</h2>\n' "$(_html "$_wgs")"
-        printf '<table><tr><th>Peer</th><th>Endpoint</th><th>Allowed IPs</th><th>Last seen</th><th>Traffic ↓/↑</th></tr>\n'
+        _wgs_tmp="/tmp/status_cgi_wg_${_wgs}"
+        rm -f "$_wgs_tmp"
 
         _pi=0
         while true; do
@@ -172,15 +172,13 @@ if command -v wg >/dev/null 2>&1; then
             _drx=$(printf '%s\n' "$_wgs_peer" | cut -f6)
             _dtx=$(printf '%s\n' "$_wgs_peer" | cut -f7)
 
-            _hs_str="never"
-            if [ "${_dhs:-0}" -gt 0 ] 2>/dev/null; then
-                _ago=$(( now_ts - _dhs ))
-                if   [ "$_ago" -lt 60 ];    then _hs_str="${_ago}s ago"
-                elif [ "$_ago" -lt 3600 ];  then _hs_str="$(( _ago / 60 ))m ago"
-                elif [ "$_ago" -lt 86400 ]; then _hs_str="$(( _ago / 3600 ))h $(( (_ago % 3600) / 60 ))m ago"
-                else                             _hs_str="$(( _ago / 86400 ))d ago"
-                fi
-            fi
+            # Skip peers with no recent handshake (not currently connected)
+            [ "${_dhs:-0}" -gt 0 ] 2>/dev/null || continue
+            _ago=$(( now_ts - _dhs ))
+            [ "$_ago" -lt 180 ] || continue
+
+            _hs_str="${_ago}s ago"
+            [ "$_ago" -ge 60 ] && _hs_str="$(( _ago / 60 ))m ago"
 
             _ep_disp="—"; [ -n "$_dep" ] && [ "$_dep" != "(none)" ] && _ep_disp="$(_html "$_dep")"
             _tr_disp="—"
@@ -192,8 +190,15 @@ if command -v wg >/dev/null 2>&1; then
                 "$(_html "$(printf '%s' "$_aips" | tr ' ' ',')")" \
                 "$_hs_str" \
                 "$_tr_disp"
-        done
-        printf '</table>\n'
+        done >> "$_wgs_tmp" 2>/dev/null
+
+        if [ -s "$_wgs_tmp" ]; then
+            printf '<h2>WireGuard — %s</h2>\n' "$(_html "$_wgs")"
+            printf '<table><tr><th>Peer</th><th>Endpoint</th><th>Allowed IPs</th><th>Last seen</th><th>Traffic ↓/↑</th></tr>\n'
+            cat "$_wgs_tmp"
+            printf '</table>\n'
+        fi
+        rm -f "$_wgs_tmp"
     done
 fi
 
@@ -351,16 +356,15 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     fi
 
     # ── Pending LAN access requests ───────────────────────────────────────────
-    # Show LAN→network attempts with no active allow rule; inline Grant form.
-    # LAN2 monitor is only installed when LAN_ACCESS≠yes, so this is only
-    # meaningful for networks with restricted LAN access.
+    # Show attempts from this network TO the LAN with no active allow rule.
+    # The 2LAN monitor is installed when LAN_ACCESS≠yes.
 
-    _lan2_lines=$(printf '%s\n' "$_logdata" | grep "EXTNET-LAN2${_iface}:")
-    if [ -n "$_lan2_lines" ]; then
+    _2lan_lines=$(printf '%s\n' "$_logdata" | grep "EXTNET-2LAN-${_iface}:")
+    if [ -n "$_2lan_lines" ]; then
         _tmp_pending="/tmp/status_cgi_pending_${_iface}"
         rm -f "$_tmp_pending"
 
-        printf '%s\n' "$_lan2_lines" \
+        printf '%s\n' "$_2lan_lines" \
             | awk '{
                 src=""; dst=""; port=""; proto=""
                 for(i=1;i<=NF;i++){
@@ -376,30 +380,31 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
             | tail -10 \
             | while IFS=$(printf '\t') read -r _ts _src _dst _port _proto; do
                 [ -z "$_dst" ] && continue
-                _dst_slug=$(printf '%s' "$_dst" | tr '.' '_')
-                _rule_key="allow_lan_${_iface}_${_dst_slug}_${_port}_${_proto}"
+                _dst_slug=$(printf '%s' "$_dst" | sed 's/[.:]/\_/g')
+                _rule_key="allow_${_iface}_lan_${_dst_slug}_${_port}_${_proto}"
                 uci -q get firewall."$_rule_key" >/dev/null 2>&1 && continue
-                _src_name=$(awk -v i="$_src" '$3==i{print $4;exit}' /tmp/dhcp.leases 2>/dev/null)
-                _dst_name=$(awk -v i="$_dst" '$3==i{print $4;exit}' /tmp/dhcp.leases 2>/dev/null)
+                _src_name=$(_name_for_ip "$_src")
+                _dst_name=$(_name_for_ip "$_dst")
                 printf '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s/%s</td><td>' \
                     "$_ts" \
                     "$(_html "${_src_name:-$_src}")" \
                     "$(_html "${_dst_name:-$_dst}")" \
                     "$_port" "$_proto"
                 printf '<form method="POST" action="/cgi-bin/approve-access">'
-                printf '<input type="hidden" name="net" value="%s">'   "$(_html "$_iface")"
-                printf '<input type="hidden" name="src" value="%s">'   "$_src"
-                printf '<input type="hidden" name="dst" value="%s">'   "$_dst"
-                printf '<input type="hidden" name="proto" value="%s">' "$_proto"
-                printf '<input type="hidden" name="port" value="%s">'  "$_port"
-                printf '<input type="hidden" name="duration" value="%s">' "${DEFAULT_DURATION:-24h}"
+                printf '<input type="hidden" name="net" value="%s">'        "$(_html "$_iface")"
+                printf '<input type="hidden" name="src" value="%s">'        "$_src"
+                printf '<input type="hidden" name="dst" value="%s">'        "$_dst"
+                printf '<input type="hidden" name="proto" value="%s">'      "$_proto"
+                printf '<input type="hidden" name="port" value="%s">'       "$_port"
+                printf '<input type="hidden" name="dest_zone" value="lan">'
+                printf '<input type="hidden" name="duration" value="%s">'   "${DEFAULT_DURATION:-24h}"
                 printf '<button type="submit">Grant</button>'
                 printf '</form></td></tr>\n'
             done >> "$_tmp_pending" 2>/dev/null
 
         if [ -s "$_tmp_pending" ]; then
             printf '<h2 style="margin-top:1.25rem">Pending — %s</h2>' "$(_html "$_iface")"
-            printf '<table><tr><th>Time</th><th>From (LAN)</th><th>To (device)</th><th>Port/Proto</th><th></th></tr>\n'
+            printf '<table><tr><th>Time</th><th>From (guest)</th><th>To (LAN)</th><th>Port/Proto</th><th></th></tr>\n'
             cat "$_tmp_pending"
             printf '</table>\n'
         fi
@@ -410,7 +415,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
 
     _rules=""
     for _s in $(uci show firewall 2>/dev/null \
-                | awk -F= '/^firewall\.allow_lan_'"$_iface"'/ {gsub(/\..*/,"",$1);print $1}' \
+                | awk -F= '/^firewall\.allow_(lan_'"$_iface"'|'"$_iface"'_lan)/ {gsub(/\..*/,"",$1);print $1}' \
                 | sort -u | sed 's/^firewall\.//'); do
         _di=$(uci -q get firewall."$_s".dest_ip   2>/dev/null || true)
         _dp=$(uci -q get firewall."$_s".dest_port 2>/dev/null || true)

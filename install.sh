@@ -369,14 +369,15 @@ fi
 
 # ── LAN access monitor ────────────────────────────────────────────────────────
 # When NOTIFY_URL is set and LAN_ACCESS is not fully open, log new connection
-# attempts from LAN so check-access-log.sh can notify and allow-service.sh can grant.
+# attempts FROM the isolated network TO the LAN so the dashboard can surface
+# them and allow-service.sh can grant per-service access.
 
 rm -f /etc/nftables.d/25-${IFACE}-lanmonitor.nft
 if [ -n "$NOTIFY_URL" ] && [ "${LAN_ACCESS:-no}" != yes ]; then
     cat >/etc/nftables.d/25-${IFACE}-lanmonitor.nft <<EOF
 chain ${IFACE}_lan_monitor {
     type filter hook forward priority -2; policy accept;
-    iifname "br-lan" oifname "br-${IFACE}" ct state new log prefix "EXTNET-LAN2${IFACE}: " level info
+    iifname "br-${IFACE}" oifname "br-lan" ct state new log prefix "EXTNET-2LAN-${IFACE}: " level info
 }
 EOF
 fi

@@ -74,9 +74,11 @@ fi
 # ── add ───────────────────────────────────────────────────────────────────────
 
 [ $# -lt 5 ] && {
-    echo "Usage: sh allow-service.sh <network> <guest-ip> <proto> <port> <duration>"
+    echo "Usage: sh allow-service.sh <network> <dest-ip> <proto> <port> <duration> [dest-zone]"
     echo "       sh allow-service.sh remove <rule-name>"
     echo "       sh allow-service.sh list"
+    echo ""
+    echo "  dest-zone: 'lan' to allow <network>→LAN access (default: allow LAN→<network>)"
     exit 1
 }
 
@@ -85,6 +87,7 @@ DEST_IP="$2"
 PROTO="$3"
 PORT="$4"
 DURATION="$5"
+DEST_ZONE="${6:-}"   # empty = LAN→IFACE; 'lan' = IFACE→LAN
 
 # Validate proto
 case "$PROTO" in tcp|udp) ;; *) echo "ERROR: proto must be tcp or udp"; exit 1 ;; esac
@@ -99,16 +102,26 @@ esac
 
 # Build a stable rule name from the parameters (works for both IPv4 and IPv6)
 _ip_slug=$(printf '%s' "$DEST_IP" | sed 's/[.:]/\_/g')
-RULE_NAME="allow_lan_${IFACE}_${_ip_slug}_${PORT}_${PROTO}"
+if [ "${DEST_ZONE:-}" = lan ]; then
+    RULE_NAME="allow_${IFACE}_lan_${_ip_slug}_${PORT}_${PROTO}"
+else
+    RULE_NAME="allow_lan_${IFACE}_${_ip_slug}_${PORT}_${PROTO}"
+fi
 
 # Idempotent: remove existing rule with same name first
 uci -q delete firewall."$RULE_NAME" 2>/dev/null || true
 ( crontab -l 2>/dev/null | grep -v "# $RULE_NAME" ) | crontab -
 
 uci set firewall."$RULE_NAME"=rule
-uci set firewall."$RULE_NAME".name="Temp-LAN-to-${IFACE}-${DEST_IP}-${PORT}"
-uci set firewall."$RULE_NAME".src=lan
-uci set firewall."$RULE_NAME".dest="$IFACE"
+if [ "${DEST_ZONE:-}" = lan ]; then
+    uci set firewall."$RULE_NAME".name="Temp-${IFACE}-to-LAN-${DEST_IP}-${PORT}"
+    uci set firewall."$RULE_NAME".src="$IFACE"
+    uci set firewall."$RULE_NAME".dest=lan
+else
+    uci set firewall."$RULE_NAME".name="Temp-LAN-to-${IFACE}-${DEST_IP}-${PORT}"
+    uci set firewall."$RULE_NAME".src=lan
+    uci set firewall."$RULE_NAME".dest="$IFACE"
+fi
 uci set firewall."$RULE_NAME".dest_ip="$DEST_IP"
 uci set firewall."$RULE_NAME".proto="$PROTO"
 uci set firewall."$RULE_NAME".dest_port="$PORT"
@@ -140,13 +153,25 @@ _exp_human=$(date -d "@$_exp" '+%H:%M on %d/%m/%Y' 2>/dev/null \
              || printf '%02d:%02d on %s/%s' "$_chour" "$_cmin" "$_cday" "$_cmon")
 
 dst_name=$(_name_for_ip "$DEST_IP")
-echo "Allowed:  LAN → ${dst_name:+$dst_name (}${DEST_IP}${dst_name:+)}:${PORT}/${PROTO}"
+if [ "${DEST_ZONE:-}" = lan ]; then
+    echo "Allowed:  ${IFACE} → ${dst_name:+$dst_name (}${DEST_IP}${dst_name:+)}:${PORT}/${PROTO}"
+else
+    echo "Allowed:  LAN → ${dst_name:+$dst_name (}${DEST_IP}${dst_name:+)}:${PORT}/${PROTO}"
+fi
 echo "Expires:  $_exp_human"
 echo "Remove:   sh $SCRIPT_DIR/allow-service.sh remove $RULE_NAME"
 
 _load_notify "$IFACE"
-_ntfy "Access granted — ${IFACE}" default white_check_mark \
+if [ "${DEST_ZONE:-}" = lan ]; then
+    _ntfy "Access granted — ${IFACE}" default white_check_mark \
+"Type: Access granted
+
+${IFACE} → ${dst_name:+$dst_name (}${DEST_IP}${dst_name:+)}:${PORT}/${PROTO}
+Duration: ${DURATION} (expires ${_exp_human})"
+else
+    _ntfy "Access granted — ${IFACE}" default white_check_mark \
 "Type: Access granted
 
 LAN → ${dst_name:+$dst_name (}${DEST_IP}${dst_name:+)}:${PORT}/${PROTO}
 Duration: ${DURATION} (expires ${_exp_human})"
+fi

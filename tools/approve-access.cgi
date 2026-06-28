@@ -144,7 +144,9 @@ HTML
         exit 0
     fi
 
-    result=$("$ALLOW_SCRIPT" "$NET" "$DST" "$PROTO" "$PORT" "$DURATION" 2>&1)
+    _dest_zone=""
+    [ "$(_get_param "$_params" dest_zone)" = lan ] && _dest_zone=lan
+    result=$("$ALLOW_SCRIPT" "$NET" "$DST" "$PROTO" "$PORT" "$DURATION" ${_dest_zone:+lan} 2>&1)
     ok=$?
 
     if [ "$ok" -eq 0 ]; then
