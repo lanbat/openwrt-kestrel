@@ -76,7 +76,7 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 .qr-info{font-size:.9rem;display:flex;flex-direction:column;flex:1;min-width:0}
 .qr-info strong{display:block;margin-bottom:.3rem}
 .qr-info code{background:#e8e8e8;padding:.2rem .45rem;border-radius:4px;
-              word-break:break-all;font-size:.85rem}
+              word-break:break-all;font-size:.85rem;align-self:flex-start}
 .qr-info form{margin-top:auto;padding-top:.6rem;text-align:right}
 </style></head><body>
 <h1>${hostname}</h1>
