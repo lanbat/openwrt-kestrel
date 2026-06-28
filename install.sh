@@ -39,6 +39,7 @@ REASON_REQUIRED="${REASON_REQUIRED:-no}"
 BANDWIDTH_THRESHOLD_MB="${BANDWIDTH_THRESHOLD_MB:-0}"
 SHOW_QR="${SHOW_QR:-no}"
 NOTIFY_JOIN="${NOTIFY_JOIN:-no}"
+ROTATE_PASSWORD="${ROTATE_PASSWORD:-no}"
 DESCRIPTION="${DESCRIPTION:-}"
 MDNS="${MDNS:-no}"
 VLAN_ID="${VLAN_ID:-}"
@@ -423,11 +424,11 @@ fi
 # NOTIFY_URL is unset. NOTIFY_URL-dependent features (dhcp hook, CGIs, crons)
 # are only set up when NOTIFY_URL is provided.
 
-{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\nNOTIFY_JOIN=%s\n' \
+{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\nNOTIFY_JOIN=%s\nROTATE_PASSWORD=%s\n' \
     "$SUBNET" "$NOTIFY_URL" "$IFACE" \
     "$DEFAULT_DURATION" "$MAX_DURATION" "$REASON_REQUIRED" "$BANDWIDTH_THRESHOLD_MB" \
     "${RATE_LIMIT:-}" "${RATE_LIMIT_PER_DEVICE:-}" "$DNS_SERVER" "$ISOLATE" "${LAN_ACCESS:-no}" "$DOT" "$SHOW_QR" \
-    "$NOTIFY_JOIN"
+    "$NOTIFY_JOIN" "$ROTATE_PASSWORD"
   # DESCRIPTION may contain spaces so it must be single-quoted in the conf file.
   printf "DESCRIPTION='%s'\n" "${DESCRIPTION:-}"; } \
     >"${BASE_DIR}/${IFACE}-notify.conf"
@@ -462,9 +463,10 @@ NOTIFYEOF
 
     # Install CGIs and enable uhttpd CGI support
     mkdir -p /www/cgi-bin
-    cp "${SCRIPT_DIR}/tools/approve-access.cgi" /www/cgi-bin/approve-access
-    cp "${SCRIPT_DIR}/tools/status.cgi"         /www/cgi-bin/status
-    chmod 0755 /www/cgi-bin/approve-access /www/cgi-bin/status
+    cp "${SCRIPT_DIR}/tools/approve-access.cgi"    /www/cgi-bin/approve-access
+    cp "${SCRIPT_DIR}/tools/status.cgi"            /www/cgi-bin/status
+    cp "${SCRIPT_DIR}/tools/rotate-password.cgi"   /www/cgi-bin/rotate-password
+    chmod 0755 /www/cgi-bin/approve-access /www/cgi-bin/status /www/cgi-bin/rotate-password
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
         uci set uhttpd.main.cgi_prefix=/cgi-bin
         uci commit uhttpd
