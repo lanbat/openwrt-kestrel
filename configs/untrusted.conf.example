@@ -28,4 +28,6 @@ DEFAULT_DURATION=24h             # pre-selected duration in the approval form (1
 MAX_DURATION=30d                 # hide longer durations from the form (1h 6h 12h 24h 2d 7d 30d)
 REASON_REQUIRED=no               # yes = approver must enter a reason before granting access
 BANDWIDTH_THRESHOLD_MB=0         # alert when a device transfers this many MB in a session; 0 = disabled
+SHOW_QR=no                       # yes = show WiFi QR code and password in the status dashboard
+DESCRIPTION=IoT / untrusted devices  # optional label shown in the status dashboard
 MDNS=no                          # yes = reflect mDNS from LAN

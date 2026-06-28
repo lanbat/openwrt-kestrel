@@ -69,6 +69,7 @@ a{color:#1976d2;text-decoration:none}
 form{display:inline}
 button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
        color:#fff;border:none;border-radius:4px}
+.net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
 .qr{display:flex;align-items:center;gap:1rem}
 .qr svg{width:120px;height:120px;flex-shrink:0}
 .qr-info{font-size:.9rem}
@@ -130,7 +131,7 @@ fi
 for _conf in "${BASE_DIR}"/*-notify.conf; do
     [ -f "$_conf" ] || continue
     unset NOTIFY_URL SUBNET IFACE_NAME BANDWIDTH_THRESHOLD_MB \
-          RATE_LIMIT RATE_LIMIT_PER_DEVICE DNS_SERVER ISOLATE LAN_ACCESS DOT
+          RATE_LIMIT RATE_LIMIT_PER_DEVICE DNS_SERVER ISOLATE LAN_ACCESS DOT SHOW_QR DESCRIPTION
     . "$_conf"
     _iface="${IFACE_NAME:-}"
     [ -z "$_iface" ] && continue
@@ -155,6 +156,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
 
     printf '<h2>%s%s</h2>' "$(_html "$_iface")" \
         "${_ssid:+ — $(_html "$_ssid")}"
+    [ -n "${DESCRIPTION:-}" ] && printf '<div class="net-desc">%s</div>\n' "$(_html "$DESCRIPTION")"
     printf '<div class="card">'
     printf '<div class="row"><span class="lbl">State</span><span class="val %s">%s</span></div>' \
         "$([ "$_up" = yes ] && echo ok || echo warn)" \
@@ -191,7 +193,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     # ── WiFi QR code ──────────────────────────────────────────────────────────
 
     _key=$(uci -q get wireless."$_iface".key 2>/dev/null || true)
-    if [ -n "$_key" ] && [ -n "$_ssid" ] && command -v qrencode >/dev/null 2>&1; then
+    if [ "${SHOW_QR:-no}" = yes ] && [ -n "$_key" ] && [ -n "$_ssid" ] && command -v qrencode >/dev/null 2>&1; then
         _enc=$(uci -q get wireless."$_iface".encryption 2>/dev/null || true)
         case "$_enc" in sae*|psk*) _wtype=WPA ;; wep*) _wtype=WEP ;; *) _wtype=nopass ;; esac
         _qrsvg=$(qrencode -t SVG -s 4 -m 2 -o - \

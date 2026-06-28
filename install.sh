@@ -37,6 +37,8 @@ DEFAULT_DURATION="${DEFAULT_DURATION:-24h}"
 MAX_DURATION="${MAX_DURATION:-30d}"
 REASON_REQUIRED="${REASON_REQUIRED:-no}"
 BANDWIDTH_THRESHOLD_MB="${BANDWIDTH_THRESHOLD_MB:-0}"
+SHOW_QR="${SHOW_QR:-no}"
+DESCRIPTION="${DESCRIPTION:-}"
 MDNS="${MDNS:-no}"
 VLAN_ID="${VLAN_ID:-}"
 VLAN_TRUNK="${VLAN_TRUNK:-}"
@@ -420,10 +422,12 @@ fi
 # NOTIFY_URL is unset. NOTIFY_URL-dependent features (dhcp hook, CGIs, crons)
 # are only set up when NOTIFY_URL is provided.
 
-printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\n' \
+{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\n' \
     "$SUBNET" "$NOTIFY_URL" "$IFACE" \
     "$DEFAULT_DURATION" "$MAX_DURATION" "$REASON_REQUIRED" "$BANDWIDTH_THRESHOLD_MB" \
-    "${RATE_LIMIT:-}" "${RATE_LIMIT_PER_DEVICE:-}" "$DNS_SERVER" "$ISOLATE" "${LAN_ACCESS:-no}" "$DOT" \
+    "${RATE_LIMIT:-}" "${RATE_LIMIT_PER_DEVICE:-}" "$DNS_SERVER" "$ISOLATE" "${LAN_ACCESS:-no}" "$DOT" "$SHOW_QR"
+  # DESCRIPTION may contain spaces so it must be single-quoted in the conf file.
+  printf "DESCRIPTION='%s'\n" "${DESCRIPTION:-}"; } \
     >"${BASE_DIR}/${IFACE}-notify.conf"
 
 # Idempotently set a cron entry identified by tag (remove old, add new).
