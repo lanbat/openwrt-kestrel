@@ -70,9 +70,10 @@ a{color:#1976d2;text-decoration:none}
 form{display:inline}
 button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
        color:#fff;border:none;border-radius:4px}
+.btn-danger{background:#c62828}
 .net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
 .qr{display:flex;align-items:center;gap:1rem}
-.qr svg{width:120px;height:120px;flex-shrink:0}
+.qr svg{width:120px;height:120px;flex-shrink:0;color-scheme:light;background:#fff}
 .qr-info{font-size:.9rem}
 .qr-info strong{display:block;margin-bottom:.3rem}
 .qr-info code{background:#e8e8e8;padding:.2rem .45rem;border-radius:4px;
@@ -200,13 +201,8 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     if [ "${SHOW_QR:-no}" = yes ] && [ -n "$_key" ] && [ -n "$_ssid" ] && command -v qrencode >/dev/null 2>&1; then
         _enc=$(uci -q get wireless."$_iface".encryption 2>/dev/null || true)
         case "$_enc" in sae*|psk*) _wtype=WPA ;; wep*) _wtype=WEP ;; *) _wtype=nopass ;; esac
-        # Pre-invert fills so that dark-mode browser inversion restores black-on-white.
         _qrsvg=$(qrencode -t SVG -s 4 -m 2 -o - \
-            "WIFI:S:${_ssid};T:${_wtype};P:${_key};;" 2>/dev/null \
-            | sed '1,2d
-                   s/fill="#ffffff"/fill="__I__"/g
-                   s/fill="#000000"/fill="#ffffff"/g
-                   s/fill="__I__"/fill="#000000"/g')
+            "WIFI:S:${_ssid};T:${_wtype};P:${_key};;" 2>/dev/null | sed '1,2d')
         [ -n "$_qrsvg" ] && printf '<div class="card qr">%s<div class="qr-info"><strong>%s</strong><code>%s</code></div></div>\n' \
             "$_qrsvg" "$(_html "$_ssid")" "$(_html "$_key")"
     fi
@@ -214,11 +210,12 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     # ── Rotate password button ────────────────────────────────────────────────
 
     if [ "${ROTATE_PASSWORD:-no}" = yes ]; then
-        printf '<form method="POST" action="/cgi-bin/rotate-password" style="margin:.4rem 0">'
+        printf '<div style="text-align:right;margin:.4rem 0">'
+        printf '<form method="POST" action="/cgi-bin/rotate-password">'
         printf '<input type="hidden" name="net" value="%s">' "$(_html "$_iface")"
-        printf '<button type="submit" onclick="return confirm('\''Rotate the WiFi password for %s? All connected devices will need to reconnect with the new password.'\'')">Rotate password</button>' \
+        printf '<button class="btn-danger" type="submit" onclick="return confirm('\''Rotate the WiFi password for %s? All connected devices will need to reconnect with the new password.'\'')">Rotate password</button>' \
             "$(_html "$_iface")"
-        printf '</form>\n'
+        printf '</form></div>\n'
     fi
 
     # ── Device table ──────────────────────────────────────────────────────────
