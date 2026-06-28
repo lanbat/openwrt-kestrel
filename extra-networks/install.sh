@@ -41,6 +41,7 @@ SHOW_QR="${SHOW_QR:-no}"
 NOTIFY_JOIN="${NOTIFY_JOIN:-no}"
 JOIN_APPROVAL="${JOIN_APPROVAL:-no}"
 ROTATE_PASSWORD="${ROTATE_PASSWORD:-no}"
+DEVICE_CONTROL="${DEVICE_CONTROL:-no}"
 DESCRIPTION="${DESCRIPTION:-}"
 MDNS="${MDNS:-no}"
 VLAN_ID="${VLAN_ID:-}"
@@ -432,6 +433,25 @@ else
     rm -f /etc/hotplug.d/iface/52-${IFACE}-joingate
 fi
 
+# ── device control inspect chain ─────────────────────────────────────────────
+# When DEVICE_CONTROL=yes, new outbound connections from approved devices are
+# inspected per-device. regen-inspect.sh generates the nftables chain; it is
+# also called from approve-join.cgi when a device is approved.
+
+if [ "${DEVICE_CONTROL:-no}" = yes ]; then
+    cp "${SCRIPT_DIR}/tools/regen-inspect.sh" "${BASE_DIR}/_regen-inspect.sh"
+    cp "${SCRIPT_DIR}/tools/device.cgi"       /www/cgi-bin/device
+    chmod 0755 "${BASE_DIR}/_regen-inspect.sh" /www/cgi-bin/device
+    if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
+        uci set uhttpd.main.cgi_prefix=/cgi-bin
+        uci commit uhttpd
+        /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+    fi
+    sh "${BASE_DIR}/_regen-inspect.sh" "$IFACE" || true
+else
+    rm -f /etc/nftables.d/25-${IFACE}-inspect.nft
+fi
+
 # ── traffic counters ──────────────────────────────────────────────────────────
 # Always create — status.sh reads these to show bytes transferred since last fw4 reload.
 
@@ -475,11 +495,12 @@ fi
 # NOTIFY_URL is unset. NOTIFY_URL-dependent features (dhcp hook, CGIs, crons)
 # are only set up when NOTIFY_URL is provided.
 
-{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nDNS_SERVER_V6=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\nNOTIFY_JOIN=%s\nJOIN_APPROVAL=%s\nROTATE_PASSWORD=%s\n' \
+{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nDNS_SERVER_V6=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\nNOTIFY_JOIN=%s\nJOIN_APPROVAL=%s\nROTATE_PASSWORD=%s\nDEVICE_CONTROL=%s\n' \
     "$SUBNET" "$NOTIFY_URL" "$IFACE" \
     "$DEFAULT_DURATION" "$MAX_DURATION" "$REASON_REQUIRED" "$BANDWIDTH_THRESHOLD_MB" \
     "${RATE_LIMIT:-}" "${RATE_LIMIT_PER_DEVICE:-}" "$DNS_SERVER" "${DNS_SERVER_V6:-}" \
-    "$ISOLATE" "${LAN_ACCESS:-no}" "$DOT" "$SHOW_QR" "$NOTIFY_JOIN" "$JOIN_APPROVAL" "$ROTATE_PASSWORD"
+    "$ISOLATE" "${LAN_ACCESS:-no}" "$DOT" "$SHOW_QR" "$NOTIFY_JOIN" "$JOIN_APPROVAL" \
+    "$ROTATE_PASSWORD" "$DEVICE_CONTROL"
   # DESCRIPTION may contain spaces so it must be single-quoted in the conf file.
   printf "DESCRIPTION='%s'\n" "${DESCRIPTION:-}"; } \
     >"${BASE_DIR}/${IFACE}-notify.conf"
@@ -548,7 +569,7 @@ NOTIFYEOF
     cp "${SCRIPT_DIR}/tools/approve-join.cgi"      /www/cgi-bin/approve-join
     cp "${SCRIPT_DIR}/tools/status.cgi"            /www/cgi-bin/status
     cp "${SCRIPT_DIR}/tools/rotate-password.cgi"   /www/cgi-bin/rotate-password
-    cp "${SCRIPT_DIR}/tools/qr.cgi"               /www/cgi-bin/qr
+    cp "${SCRIPT_DIR}/tools/qr.cgi"                /www/cgi-bin/qr
     chmod 0755 /www/cgi-bin/approve-access /www/cgi-bin/approve-join \
                /www/cgi-bin/status /www/cgi-bin/rotate-password /www/cgi-bin/qr
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
@@ -641,5 +662,6 @@ fi
 [ -n "$VLAN_ID" ] && echo "  VLAN:      ${VLAN_TRUNK}.${VLAN_ID} bridged into br-${IFACE}"
 [ -n "$NOTIFY_URL" ] && echo "  Notify:    new devices → ntfy"
 [ "${JOIN_APPROVAL:-no}" = yes ] && echo "  Join gate: new devices blocked until approved via push notification"
+[ "${DEVICE_CONTROL:-no}" = yes ] && echo "  Device control: per-device outbound inspect chain enabled"
 [ "$MDNS" = yes ] && echo "  mDNS:      reflecting between LAN and $IFACE"
 true

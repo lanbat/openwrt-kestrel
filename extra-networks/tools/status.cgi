@@ -4,6 +4,7 @@
 # Only reachable from LAN — isolated zones have INPUT=REJECT.
 
 BASE_DIR=/etc/extra-networks
+[ -f "${BASE_DIR}/_lib.sh" ] && . "${BASE_DIR}/_lib.sh"
 
 printf 'Content-Type: text/html\r\n\r\n'
 
@@ -353,7 +354,12 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
             printf '<tr><td>%s</td><td class="dim">%s</td><td>%s</td><td class="dim">%s</td>' \
                 "$_hn_disp" "$(_html "$_dns")" "$_ip" "$_joined"
             [ "$_hdr_ip6" = yes ] && printf '<td class="dim">%s</td>' "${_ipv6:----}"
-            printf '<td class="dim">%s</td>' "$_mac"
+            _dlabel=$(awk -v m="$_mac" \
+                'tolower($1)==tolower(m){sub(/^[^\t]+\t/,""); print; exit}' \
+                "${BASE_DIR}/${_iface}-device-labels" 2>/dev/null || true)
+            printf '<td class="dim"><a href="/cgi-bin/device?net=%s&mac=%s">%s</a></td>' \
+                "$(_html "$_iface")" "$(_html "$_mac")" \
+                "$(_html "${_dlabel:-$_mac}")"
             [ "$_hdr_sig" = yes ] && printf '<td>%s</td>' "${_sig:----}"
             [ "$_hdr_bw"  = yes ] && printf '<td>%s</td>' "${_bw:----}"
             printf '<td>%s</td></tr>\n' "$(_exp_str "$_exp_ts")"

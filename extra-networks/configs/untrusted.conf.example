@@ -31,6 +31,8 @@ BANDWIDTH_THRESHOLD_MB=0         # alert when a device transfers this many MB in
 SHOW_QR=no                       # yes = show WiFi QR code and password in the status dashboard
 NOTIFY_JOIN=no                   # yes = send a push notification each time a device joins
 JOIN_APPROVAL=no                 # yes = block internet until owner approves each new device (requires NOTIFY_URL)
+DEVICE_CONTROL=no                # yes = per-device outbound inspection: approve/deny connections per device
+                                 #       requires JOIN_APPROVAL=yes; device page at /cgi-bin/device?net=untrusted&mac=...
 ROTATE_PASSWORD=no               # yes = show a "Rotate password" button in the status dashboard
 DESCRIPTION=IoT / untrusted devices  # optional label shown in the status dashboard
 MDNS=no                          # yes = reflect mDNS from LAN

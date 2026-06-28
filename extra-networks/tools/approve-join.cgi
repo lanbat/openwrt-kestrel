@@ -70,6 +70,15 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
         { grep -v "^${MAC} " "$PENDING_FILE" 2>/dev/null; } \
             >"${PENDING_FILE}.tmp" && mv "${PENDING_FILE}.tmp" "$PENDING_FILE" || true
         nft delete element inet fw4 ${NET}_join_pending "{ $IP }" 2>/dev/null || true
+        if [ "${DEVICE_CONTROL:-no}" = yes ]; then
+            _ips_f="${BASE_DIR}/${NET}-device-ips"
+            _lbl_f="${BASE_DIR}/${NET}-device-labels"
+            { grep -v "^${MAC}	" "$_ips_f" 2>/dev/null; printf '%s\t%s\n' "$MAC" "$IP"; } \
+                >"${_ips_f}.tmp" && mv "${_ips_f}.tmp" "$_ips_f" || true
+            grep -qF "$MAC" "$_lbl_f" 2>/dev/null \
+                || printf '%s\t%s\n' "$MAC" "$MAC" >> "$_lbl_f"
+            setsid sh /etc/extra-networks/_regen-inspect.sh "$NET" >/dev/null 2>&1 &
+        fi
         _ntfy "Access approved — ${NET}" default white_check_mark \
 "Type: Internet access approved
 

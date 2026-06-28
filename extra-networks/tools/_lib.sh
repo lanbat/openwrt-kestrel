@@ -4,7 +4,7 @@
 
 # Load NOTIFY_URL (and other fields) from a network's notify.conf.
 _load_notify() {
-    unset NOTIFY_URL
+    unset NOTIFY_URL DEVICE_CONTROL
     _ln_c="/etc/extra-networks/${1}-notify.conf"
     [ -f "$_ln_c" ] && . "$_ln_c"
     true
@@ -46,4 +46,19 @@ _ntfy() {
         -H "Actions: ${5:+${5}; }view, Dashboard, ${_ntfy_dash}" \
         -d "$4
 Dashboard: ${_ntfy_dash}" >/dev/null &
+}
+
+# Resolve a device label for a MAC from {iface}-device-labels; falls back to MAC.
+_label_for_mac() {
+    _lf="/etc/extra-networks/${2}-device-labels"
+    [ -f "$_lf" ] || { printf '%s' "$1"; return; }
+    _l=$(awk -v m="$1" 'tolower($1)==tolower(m){sub(/^[^\t]+\t/,""); print; exit}' "$_lf")
+    printf '%s' "${_l:-$1}"
+}
+
+# Return the static IP for a MAC from {iface}-device-ips, or empty.
+_ip_for_mac() {
+    _if="/etc/extra-networks/${2}-device-ips"
+    [ -f "$_if" ] || return 0
+    awk -v m="$1" 'tolower($1)==tolower(m){print $2; exit}' "$_if"
 }
