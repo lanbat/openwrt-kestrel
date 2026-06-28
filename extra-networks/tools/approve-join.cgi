@@ -65,6 +65,7 @@ _load_notify "$NET"
 
 APPROVED_FILE="${BASE_DIR}/${NET}-join-approved"
 PENDING_FILE="${BASE_DIR}/${NET}-join-pending"
+DENIED_FILE="${BASE_DIR}/${NET}-join-denied"
 
 _label=$([ -n "$HOST" ] && printf '%s (%s)' "$(_html "$HOST")" "$IP" || printf '%s' "$IP")
 QS="net=${NET}&ip=${IP}&mac=${MAC}&host=${HOST}"
@@ -74,17 +75,20 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
     _action=$(_get_param "$_params" action)
     case "$_action" in approve|deny) ;; *) printf '<h1>Invalid action</h1>'; exit 0 ;; esac
 
+    _approver_ip="${REMOTE_ADDR:-unknown}"
+    _approver_name=$(_name_for_ip "$_approver_ip")
+    _approver_mac=$(_mac_for_ip "$_approver_ip")
+    _approver="${_approver_name:-$_approver_ip}"
+    [ "$_approver" = "*" ] && _approver="$_approver_ip"
+    [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
+
     if [ "$_action" = approve ]; then
-        _approver_ip="${REMOTE_ADDR:-unknown}"
-        _approver_name=$(_name_for_ip "$_approver_ip")
-        _approver_mac=$(_mac_for_ip "$_approver_ip")
-        _approver="${_approver_name:-$_approver_ip}"
-        [ "$_approver" = "*" ] && _approver="$_approver_ip"
-        [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
         { grep -vF "$MAC" "$APPROVED_FILE" 2>/dev/null; printf '%s\n' "$MAC"; } \
             >"${APPROVED_FILE}.tmp" && mv "${APPROVED_FILE}.tmp" "$APPROVED_FILE" || true
         { grep -v "^${MAC} " "$PENDING_FILE" 2>/dev/null; } \
             >"${PENDING_FILE}.tmp" && mv "${PENDING_FILE}.tmp" "$PENDING_FILE" || true
+        { grep -vF "$MAC" "$DENIED_FILE" 2>/dev/null; } \
+            >"${DENIED_FILE}.tmp" && mv "${DENIED_FILE}.tmp" "$DENIED_FILE" || true
         nft delete element inet fw4 ${NET}_join_pending "{ $IP }" 2>/dev/null || true
         if [ "${DEVICE_CONTROL:-no}" = yes ]; then
             _ips_f="${BASE_DIR}/${NET}-device-ips"
@@ -105,6 +109,18 @@ The approved device can now use the internet on ${NET}."
         _msg="$(_html "${HOST:-$IP}") ($MAC) can now use the internet on ${NET}."
         _cls=ok
     else
+        { grep -vF "$MAC" "$DENIED_FILE" 2>/dev/null; printf '%s\n' "$MAC"; } \
+            >"${DENIED_FILE}.tmp" && mv "${DENIED_FILE}.tmp" "$DENIED_FILE" || true
+        { grep -v "^${MAC} " "$PENDING_FILE" 2>/dev/null; printf '%s %s\n' "$MAC" "$IP"; } \
+            >"${PENDING_FILE}.tmp" && mv "${PENDING_FILE}.tmp" "$PENDING_FILE" || true
+        nft add element inet fw4 ${NET}_join_pending "{ $IP }" 2>/dev/null || true
+        _ntfy "Access denied — ${NET}" default no_entry \
+"Type: Internet access denied
+
+Denied device: ${HOST:+$HOST }($MAC), ${IP}
+Denied by: ${_approver}
+
+The denied device remains blocked from internet access on ${NET}."
         _msg="$(_html "${HOST:-$IP}") ($MAC) remains blocked from internet access on ${NET}."
         _cls=err
     fi
@@ -150,14 +166,14 @@ button{font-size:1rem;padding:.65rem 1rem;border-radius:6px;border:none;cursor:p
   <div class="label">MAC address</div>
   <div class="value">${MAC}</div>
 </div>
-<div class="note">This device joined <strong>${NET}</strong> and is waiting for internet access approval. Approving permanently allows this device.</div>
+<div class="note">This device joined <strong>${NET}</strong> and is waiting for internet access approval. Approving allows this device; denying keeps it blocked until you approve it later.</div>
 <form method="POST" action="/cgi-bin/approve-join?${QS}">
   <input type="hidden" name="action" value="approve">
   <button class="btn-ok" type="submit">Approve internet access</button>
 </form>
 <form method="POST" action="/cgi-bin/approve-join?${QS}">
   <input type="hidden" name="action" value="deny">
-  <button class="btn-deny" type="submit">Keep blocked</button>
+  <button class="btn-deny" type="submit">Deny internet access</button>
 </form>
 </body></html>
 HTML

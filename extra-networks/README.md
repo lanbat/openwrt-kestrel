@@ -203,13 +203,15 @@ How it works:
 
 1. Device connects and gets a DHCP lease → its IP is added to an nftables block set; internet traffic is dropped immediately
 2. A push notification fires: *"unknown (aa:bb:cc:dd:ee:ff) joined guest at 192.168.3.105 and needs internet approval"* with an **Approve** button
-3. Tap **Approve** → opens `/cgi-bin/approve-join` showing the device's hostname, IP, and MAC — two buttons: **Approve internet access** or **Keep blocked**
+3. Tap **Approve** → opens `/cgi-bin/approve-join` showing the device's hostname, IP, and MAC — two buttons: **Approve internet access** or **Deny internet access**
 4. Approving records the device's MAC in `/etc/extra-networks/${IFACE}-join-approved` and unblocks it immediately
 5. On all future joins (same MAC, any IP) the device passes straight through with no notification
 
-The approved list is cleared automatically when the WiFi password is rotated — everyone must reconnect with the new password and be re-approved.
+The dashboard shows join state in the connected-device table: pending, approved, or denied. Denied devices stay blocked and can be approved later from the same row. Approval and denial both send a push notification naming the device and the LAN client that made the decision.
 
-The block set is rebuilt from the pending state file on `fw4 reload` and reboot, so blocked devices stay blocked across restarts until explicitly approved. Pending approvals also appear in the status dashboard with an inline **Approve** button.
+When the WiFi password is rotated, labeled approved devices stay approved; unlabeled approvals, pending requests, and denied requests are cleared because those devices must reconnect with the new password.
+
+The block set is rebuilt from the pending state file on `fw4 reload` and reboot, so blocked devices stay blocked across restarts until explicitly approved.
 
 ### Bandwidth alerts
 
@@ -248,8 +250,7 @@ The page auto-refreshes every 60 seconds and shows:
 - **System** — uptime, memory, load, WAN IPv4/IPv6
 - **VPN** — interface and state (up / down / routing fault)
 - **WireGuard server peers** — auto-detected for any WireGuard interface in server mode (no outbound peers); shows all configured peers with an online indicator (● / ○), endpoint IP, last handshake, and bytes transferred
-- **Networks** — state, subnet, traffic (↓/↑), connected devices with hostname, IP, MAC, and per-device traffic. An IPv6 column appears automatically when the network has IPv6 configured or clients have IPv6 addresses.
-- **Pending join approvals** — devices blocked from internet until approved, with an inline **Approve** button (shown when `JOIN_APPROVAL=yes`)
+- **Networks** — state, subnet, traffic (↓/↑), connected devices with hostname, IP, MAC, join approval state, and per-device traffic. An IPv6 column appears automatically when the network has IPv6 configured or clients have IPv6 addresses.
 - **Pending LAN access** — blocked isolated→LAN connection attempts logged since the last check, with **Approve** buttons linking directly to the approval form
 - **Active LAN access** — temporary allowances in both directions (LAN→isolated and isolated→LAN) with destination, port, protocol, and time remaining
 - **Port forwards** — active redirects with zone, port, destination, and expiry
@@ -399,7 +400,7 @@ Generate a new random password, apply it immediately, and print a QR code.
 sh tools/rotate-password.sh configs/guest.conf
 ```
 
-Updates the config file in place, applies the new key to the active WiFi network, and disconnects clients still using the old password. When `JOIN_APPROVAL=yes`, all previously approved devices are cleared — everyone must be re-approved after reconnecting with the new password.
+Updates the config file in place, applies the new key to the active WiFi network, and disconnects clients still using the old password. When `JOIN_APPROVAL=yes`, labeled approved devices stay approved; unlabeled approvals, pending requests, and denied requests are cleared.
 
 ### Guest info page
 

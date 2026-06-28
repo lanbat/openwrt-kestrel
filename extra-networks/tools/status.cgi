@@ -309,6 +309,9 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     if [ -n "$_devs" ]; then
         _bw_data=$(nft list set inet fw4 "${_iface}_device_bytes"  2>/dev/null)
         _bw_data6=$(nft list set inet fw4 "${_iface}_device_bytes6" 2>/dev/null)
+        _join_pending="${BASE_DIR}/${_iface}-join-pending"
+        _join_approved="${BASE_DIR}/${_iface}-join-approved"
+        _join_denied="${BASE_DIR}/${_iface}-join-denied"
         _hdr_bw=$([ -n "$_bw_data$_bw_data6" ] && echo yes || echo no)
         _hdr_sig=$([ -n "$_assoc" ] && echo yes || echo no)
         _hdr_ip6=no
@@ -317,6 +320,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
 
         printf '<table><tr><th>Hostname</th><th>DNS</th><th>IPv4</th><th>Joined</th>'
         [ "$_hdr_ip6" = yes ] && printf '<th>IPv6</th>'
+        [ "${JOIN_APPROVAL:-no}" = yes ] && printf '<th>Join access</th>'
         printf '<th>MAC</th>'
         [ "$_hdr_sig" = yes ] && printf '<th>Signal</th>'
         [ "$_hdr_bw"  = yes ] && printf '<th>Traffic</th>'
@@ -355,6 +359,28 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
             printf '<tr><td>%s</td><td class="dim">%s</td><td>%s</td><td class="dim">%s</td>' \
                 "$_hn_disp" "$(_html "$_dns")" "$_ip" "$_joined"
             [ "$_hdr_ip6" = yes ] && printf '<td class="dim">%s</td>' "${_ipv6:----}"
+            if [ "${JOIN_APPROVAL:-no}" = yes ]; then
+                _join_state="Untracked"
+                grep -qixF "$_mac" "$_join_approved" 2>/dev/null && _join_state="Approved"
+                grep -qixF "$_mac" "$_join_denied" 2>/dev/null && _join_state="Denied"
+                grep -qi "^${_mac} " "$_join_pending" 2>/dev/null && [ "$_join_state" = Untracked ] && _join_state="Pending"
+                printf '<td><strong>%s</strong>' "$_join_state"
+                if [ "$_join_state" != Approved ]; then
+                    _jhost=$([ "$_hn" != "*" ] && printf '%s' "$_hn" || true)
+                    printf '<form method="POST" action="/cgi-bin/approve-join" style="display:inline;margin-left:.5rem">'
+                    printf '<input type="hidden" name="net" value="%s"><input type="hidden" name="ip" value="%s"><input type="hidden" name="mac" value="%s"><input type="hidden" name="host" value="%s"><input type="hidden" name="action" value="approve">' \
+                        "$(_html "$_iface")" "$(_html "$_ip")" "$(_html "$_mac")" "$(_html "$_jhost")"
+                    printf '<button type="submit">Approve</button></form>'
+                fi
+                if [ "$_join_state" != Approved ] && [ "$_join_state" != Denied ]; then
+                    _jhost=$([ "$_hn" != "*" ] && printf '%s' "$_hn" || true)
+                    printf '<form method="POST" action="/cgi-bin/approve-join" style="display:inline;margin-left:.25rem">'
+                    printf '<input type="hidden" name="net" value="%s"><input type="hidden" name="ip" value="%s"><input type="hidden" name="mac" value="%s"><input type="hidden" name="host" value="%s"><input type="hidden" name="action" value="deny">' \
+                        "$(_html "$_iface")" "$(_html "$_ip")" "$(_html "$_mac")" "$(_html "$_jhost")"
+                    printf '<button type="submit">Deny</button></form>'
+                fi
+                printf '</td>'
+            fi
             _dlabel=$(awk -v m="$_mac" \
                 'tolower($1)==tolower(m){sub(/^[^\t]+\t/,""); print; exit}' \
                 "${BASE_DIR}/${_iface}-device-labels" 2>/dev/null || true)
@@ -366,39 +392,6 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
             printf '<td>%s</td></tr>\n' "$(_exp_str "$_exp_ts")"
         done
         printf '</table>\n'
-    fi
-
-    # ── Pending join approvals ────────────────────────────────────────────────
-
-    if [ "${JOIN_APPROVAL:-no}" = yes ]; then
-        _join_pending="${BASE_DIR}/${_iface}-join-pending"
-        if [ -s "$_join_pending" ]; then
-            _tmp_joins="/tmp/status_cgi_joins_${_iface}"
-            rm -f "$_tmp_joins"
-            while IFS= read -r _jline; do
-                case "$_jline" in '#'*|'') continue ;; esac
-                _jmac="${_jline%% *}"
-                _jip="${_jline##* }"
-                [ -z "$_jmac" ] || [ "$_jmac" = "$_jip" ] && continue
-                _jname=$(awk -v ip="$_jip" '$3==ip{print $4;exit}' /tmp/dhcp.leases 2>/dev/null)
-                printf '<tr><td>%s</td><td class="dim">%s</td><td class="dim">%s</td><td>' \
-                    "$(_html "${_jname:-unknown}")" "$_jip" "$_jmac"
-                printf '<form method="POST" action="/cgi-bin/approve-join">'
-                printf '<input type="hidden" name="net"    value="%s">' "$(_html "$_iface")"
-                printf '<input type="hidden" name="ip"     value="%s">' "$(_html "$_jip")"
-                printf '<input type="hidden" name="mac"    value="%s">' "$(_html "$_jmac")"
-                printf '<input type="hidden" name="host"   value="%s">' "$(_html "${_jname:-}")"
-                printf '<input type="hidden" name="action" value="approve">'
-                printf '<button type="submit">Approve</button></form></td></tr>\n'
-            done < "$_join_pending" >> "$_tmp_joins" 2>/dev/null
-            if [ -s "$_tmp_joins" ]; then
-                printf '<h2 style="margin-top:1.25rem">Pending join — %s</h2>' "$(_html "$_iface")"
-                printf '<table><tr><th>Device</th><th>IP</th><th>MAC</th><th></th></tr>\n'
-                cat "$_tmp_joins"
-                printf '</table>\n'
-            fi
-            rm -f "$_tmp_joins"
-        fi
     fi
 
     # ── Pending LAN access requests ───────────────────────────────────────────

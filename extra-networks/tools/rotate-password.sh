@@ -35,8 +35,18 @@ uci set wireless."$WIFI_UCI".key="$NEW_KEY"
     && uci set wireless."${WIFI_UCI}_extra".key="$NEW_KEY"
 uci commit wireless
 
-# Clear join approvals — everyone re-connects with the new password and needs re-approval
-rm -f "/etc/extra-networks/${IFACE}-join-approved" "/etc/extra-networks/${IFACE}-join-pending"
+# Keep approved devices that have a user label; clear everything else.
+# Labeled devices are intentional household devices, not one-off guests.
+_approved="/etc/extra-networks/${IFACE}-join-approved"
+_labels="/etc/extra-networks/${IFACE}-device-labels"
+if [ -s "$_approved" ] && [ -s "$_labels" ]; then
+    awk 'NR==FNR { labeled[tolower($1)]=1; next } labeled[tolower($1)]' \
+        "$_labels" "$_approved" > "${_approved}.tmp" \
+        && mv "${_approved}.tmp" "$_approved"
+else
+    rm -f "$_approved"
+fi
+rm -f "/etc/extra-networks/${IFACE}-join-pending" "/etc/extra-networks/${IFACE}-join-denied"
 
 for _hconf in /var/run/hostapd-*.conf; do
     grep -q "^bridge=br-${IFACE}$" "$_hconf" 2>/dev/null || continue
