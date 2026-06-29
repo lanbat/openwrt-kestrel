@@ -460,10 +460,11 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 [ -z "$_hlabel" ] && { [ -n "$_host" ] && [ "$_host" != unknown ] \
                     && _hlabel="$_host" || _hlabel="$_mac"; }
                 _hip="${_ip4:-${_ip6:----}}"
-                printf '<tr><td class="dim">%s</td><td><span class="badge badge-%s">%s</span></td><td><a href="/cgi-bin/device?net=%s&mac=%s">%s</a></td><td>%s</td><td class="dim">%s</td><td class="dim">%s</td></tr>\n' \
+                printf '<tr><td class="dim">%s</td><td><span class="badge badge-%s">%s</span></td><td><a href="/cgi-bin/device?net=%s&mac=%s">%s</a></td><td>%s</td><td class="dim"><a href="/cgi-bin/device?net=%s&mac=%s">%s</a></td><td class="dim">%s</td></tr>\n' \
                     "$(_html "$_when")" "$_cls" "$_badge" \
                     "$(_html "$_iface")" "$(_html "$_mac")" "$(_html "$_hlabel")" \
-                    "$(_html "$_hip")" "$(_html "$_mac")" \
+                    "$(_html "$_hip")" \
+                    "$(_html "$_iface")" "$(_html "$_mac")" "$(_html "$_mac")" \
                     "$(_html "${_actor:-unknown}")"
             done
             printf '</table>\n'
