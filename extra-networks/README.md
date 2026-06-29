@@ -27,9 +27,10 @@ Each network is a config file. Add a new one by copying an example.
 - **Port restriction** — limit outbound ports (e.g. web-only guests)
 - **MAC allowlist** — for IoT networks: unlisted devices get no lease and are blocked from forwarding
 - **Join approval** — optionally block all new devices from internet access until you approve them; a push notification fires with an **Approve** button the moment they connect; approvals persist across reboots and are reset when the password is rotated
+- **Per-device control** — when enabled, each approved device must explicitly allow every outbound domain or IP it tries to reach; blocked attempts accumulate on a per-device management page; approved rules persist across reboots
 - **LAN ↔ isolated access** — optionally let LAN devices reach isolated network devices (`LAN_ACCESS=yes`); separately, isolated devices that try to reach LAN services trigger a push notification with an **Approve** button so you can grant temporary per-service access
 - **mDNS reflection** — let guests discover shared services (Chromecast, AirPrint) via avahi
-- **Push notifications** — 12 event types via ntfy.sh: new device joined, LAN access request (isolated→LAN)/approval/expiry, allowlist rejection, bandwidth alert, port forwarded/removed, password rotated, daily digest, VPN state change, router reboot
+- **Push notifications** — event-driven alerts via ntfy.sh: new device joined, join approved/denied/revoked, LAN access request/approval/expiry, allowlist rejection, bandwidth alert, port forwarded/removed, password rotated, daily digest, VPN state change, router reboot
 - **Live status dashboard** — web page on the router showing all networks, connected devices with per-device traffic (IPv4 and IPv6), VPN status, WireGuard server peers, pending LAN access requests, active LAN access rules, and port forwards
 - **Traffic counters** — bytes in/out per network since last firewall reload, shown in status
 - **Access schedule** — restrict internet to specific hours; auto-blocked outside the window
@@ -97,7 +98,8 @@ Config files live in `configs/` and are gitignored — they never leave the rout
 | `RATE_LIMIT_PER_DEVICE` | `0` | Per-device cap; both limits apply simultaneously when set |
 | `DNS_SERVER` | `1.1.1.3` | DNS given to clients — `1.1.1.3` filtered, `1.1.1.1` plain |
 | `DOT` | `no` | Route DNS through `https-dns-proxy` for encrypted DoT/DoH; requires it to be installed and configured |
-| `IPV6` | `no` | Enable IPv6 (DHCPv6 + RA); IPv6 DNS auto-derived from `DNS_SERVER` |
+| `IPV6` | `no` | Enable IPv6 (DHCPv6 + RA); IPv6 DNS auto-derived from `DNS_SERVER` for Cloudflare and Google addresses; set `DNS_SERVER_V6` explicitly for any other resolver |
+| `DNS_SERVER_V6` | auto | IPv6 DNS server handed to clients via DHCPv6; derived automatically from `DNS_SERVER` when possible; without it the IPv6 DNS bypass-prevention rule is not created |
 | `ALLOWED_PORTS` | — | Restrict outbound TCP/UDP ports, e.g. `"80 443"`; NTP (123) always allowed |
 
 ### Access and isolation
@@ -113,6 +115,7 @@ Config files live in `configs/` and are gitignored — they never leave the rout
 | `NOTIFY_JOIN` | `no` | Send a push notification each time a device gets a DHCP lease |
 | `JOIN_APPROVAL` | `no` | Block internet for new devices until you approve them via push notification (requires `NOTIFY_URL`) |
 | `JOIN_HISTORY_RETENTION` | `90d` | Keep join approval, denial, and revocation history this long; plain numbers mean days |
+| `DEVICE_CONTROL` | `no` | Per-device outbound control — each approved device must explicitly allow every destination domain or IP it tries to reach; requires `JOIN_APPROVAL=yes`; see [Per-device control](#per-device-control) |
 | `DEFAULT_DURATION` | `24h` | Pre-selected duration in the LAN access approval form (`1h` `6h` `12h` `24h` `2d` `7d` `30d`) |
 | `MAX_DURATION` | `30d` | Longest duration available in the LAN access approval form — options above this are hidden |
 | `REASON_REQUIRED` | `no` | `yes` — approver must enter a reason before LAN access is granted |
@@ -176,6 +179,10 @@ All notifications include a link to the status dashboard. LAN access requests in
 | New device joined | Device gets a DHCP lease (when `NOTIFY_JOIN=yes`) | Low |
 | Join request | New device needs internet approval (when `JOIN_APPROVAL=yes`) | Default |
 | Join approved | Device internet access approved via web form | Default |
+| Join denied | Device internet access denied via web form | Default |
+| Access revoked | Previously approved device's internet access revoked via device page | Default |
+| Device removed | Device fully removed from the network via device page | Default |
+| Rule added | Domain or IP allow rule added for a device (when `DEVICE_CONTROL=yes`) | Default |
 | LAN access request | Isolated device blocked from reaching a LAN service | Default |
 | LAN access approved | Access granted via web form or `allow-service.sh` | Default |
 | LAN access expired | Temporary rule removed by cron | Low |
@@ -215,6 +222,48 @@ Join decisions are also written to `/etc/extra-networks/${IFACE}-join-history` a
 When the WiFi password is rotated, labeled approved devices stay approved; unlabeled approvals, pending requests, and denied requests are cleared because those devices must reconnect with the new password.
 
 The block set is rebuilt from the pending state file on `fw4 reload` and reboot, so blocked devices stay blocked across restarts until explicitly approved.
+
+### Per-device control
+
+`DEVICE_CONTROL=yes` places each approved device under its own nftables inspect chain. All new outbound connections are **blocked by default** and logged. The device can only reach destinations you've explicitly approved — by domain or by IP. Best suited for IoT devices that should only contact known servers.
+
+Requires `JOIN_APPROVAL=yes` — the approval step records each device's IP, which the inspect chain needs to generate per-device rules. Set both in the config file and re-run `install.sh`.
+
+**Approving connections**
+
+When a device's outbound connection is blocked, it appears in the **Pending connections** table on that device's page. Open the page by clicking the device's MAC address in the status dashboard:
+
+1. Find the device in the dashboard's network table
+2. Click its MAC address link → opens `/cgi-bin/device?net=<iface>&mac=<mac>`
+3. The **Pending connections** table lists each blocked destination (IP, port, protocol, reverse DNS)
+4. Click **Allow** to permit that destination, or **Deny** to dismiss it without approving
+
+Use **Approve domain** to allow a hostname: the router adds a dnsmasq `nftset=` rule so all IPs that domain resolves to are automatically allowed for this device going forward.
+
+Approved rules are written to `/etc/extra-networks/<iface>-device-rules` and survive reboots. Domains are written to `/etc/dnsmasq.d/<iface>-device-<mac>.conf`.
+
+**Device page**
+
+Every device with a label has a dedicated management page — not just DEVICE_CONTROL networks. Click any MAC address in the status dashboard to open it.
+
+| Section | Available when | What it shows |
+|---|---|---|
+| Device | Always | MAC, tracked IPv4/IPv6, network, DNS name, join approval state and actions |
+| Connection rate limit | Always | New-connection cap per minute (default 120); configurable per device |
+| Approve domain | `DEVICE_CONTROL=yes` | Add a hostname allow rule |
+| Pending connections | `DEVICE_CONTROL=yes` | Blocked outbound attempts — Allow / Deny each |
+| Rules | `DEVICE_CONTROL=yes` | Active domain and IP allow rules — revoke individually |
+| History | Always | Last 20 join decisions (approve/deny/revoke) for this device, with timestamp, IP, and approver |
+| Approval activity | Always | Join decisions where this device was the approver on another device |
+| Danger zone | Always | Remove device — deletes label, rules, approval, and DNS entry; takes effect immediately |
+
+**Connection rate limit**
+
+Every device's new-connection rate is capped to prevent port scans and misbehaving apps from flooding the network. The default is 120 new connections/minute. Adjust it per device on the device page — takes effect immediately without reloading the firewall. The limit applies whether or not `DEVICE_CONTROL` is enabled.
+
+**Per-device DNS names**
+
+When a device is labeled — either at approval time or later via the device page — its label is slugified and registered in dnsmasq. A device labeled "Alice's Phone" becomes reachable at `alices-phone.lan` from the rest of the LAN. The DNS entry is written to `/etc/dnsmasq.d/<iface>-dns-<mac>.conf` and survives reboots. Re-labeling a device updates the entry immediately.
 
 ### Bandwidth alerts
 
@@ -316,7 +365,15 @@ sh tools/access-schedule.sh configs/guest.conf always
 
 # Show current schedule and state
 sh tools/access-schedule.sh configs/guest.conf status
+
+# Force internet off right now, regardless of schedule
+sh tools/access-schedule.sh configs/guest.conf block
+
+# Re-enable internet right now, regardless of schedule
+sh tools/access-schedule.sh configs/guest.conf unblock
 ```
+
+`block` and `unblock` are one-off manual overrides — they don't modify the schedule. The next scheduled transition will resume normal operation.
 
 ### Temporary LAN access
 
@@ -429,4 +486,7 @@ Re-run after rotating the password to update the page.
 - **Rate limiting** uses `nft limit rate` (drop) rather than `tc tbf` — `kmod-sched-core` is not packaged on all platforms. Packets exceeding the cap are dropped rather than queued; for IoT and guest traffic this is acceptable.
 - **Traffic counters** reset on `fw4 reload` (which happens on every `install.sh` run). For persistent usage stats, consider `vnstat`.
 - **Re-running** `install.sh` on an existing network is safe — it updates all settings cleanly.
-- **Wireless sections** are created automatically if they don't exist in UCI. `WIFI_UCI` can be set to reuse a pre-existing section with a different name; omit it for new networks.
+- **Wireless sections** are created automatically if they don't exist in UCI. `WIFI_UCI` can be set to reuse a pre-existing UCI wireless section with a different name than `IFACE` — useful when migrating an existing setup; omit it for new networks.
+- **DEVICE_CONTROL requires JOIN_APPROVAL** — without join approval, device IPs are never recorded and the per-device nft rules can't be generated. Set both in the config and re-run `install.sh`.
+- **DHCP pool** is fixed at `.100`–`.249` (150 addresses) with a 12-hour lease time. To change these, edit the UCI directly after install: `uci set dhcp.<iface>.start=100`, `uci set dhcp.<iface>.limit=150`, `uci set dhcp.<iface>.leasetime=12h`, then `uci commit dhcp && /etc/init.d/dnsmasq restart`.
+- **Join history** is stored in `/etc/extra-networks/<iface>-join-history` as a tab-delimited file and is included in `sysupgrade.conf` — it survives reboots and normal OpenWrt upgrades. `JOIN_HISTORY_RETENTION` controls how long entries are kept (default 90 days).

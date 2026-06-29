@@ -8,10 +8,11 @@ Before going through the steps, it helps to know what you don't need to do manua
 
 | Automatic | What it does |
 |---|---|
-| `/etc/hotplug.d/iface/99-mullvad-routing` | Recreates nft sets and mark rules every time the VPN interface comes up, including after `fw4` reloads |
+| `/etc/nftables.d/30-split-routing.nft` | nft sets and mark chain — loaded by `fw4` on every reload, so they survive `fw4 reload` automatically |
+| `/etc/hotplug.d/iface/99-mullvad-routing` | Restores policy routing rules (`ip rule`, `ip route`) whenever the VPN interface comes up or `fw4` reloads |
 | `/etc/capabilities/dnsmasq.json` | Grants dnsmasq `CAP_NET_ADMIN` so it can write to nft sets |
 | Cron entry | Refreshes all blocklists nightly at 03:17 |
-| nft sets + mark rules | Applied immediately when install.sh runs (via the hotplug script) |
+| nft sets + mark rules | Applied immediately when `install.sh` runs |
 
 The remaining steps are things you configure once on the router.
 
@@ -51,6 +52,20 @@ The only value you **must** change is `VPN_IFACE`. Everything else has working d
 sh install.sh
 ```
 
+## Configuration options
+
+`/etc/split-routing/config` is created by `install.sh` the first time. The only value you must change is `VPN_IFACE`. Re-run `install.sh` after any change to apply it.
+
+| Option | Default | Description |
+|---|---|---|
+| `VPN_IFACE` | — | WireGuard interface name, e.g. `wg0` or `mullvad` |
+| `ROUTE_IPV6` | `yes` | Route marked IPv6 traffic through the VPN; set `no` if the VPN endpoint doesn't carry IPv6 (otherwise marked IPv6 is silently dropped) |
+| `DNS_TIMEOUT` | `24h` | How long dnsmasq-populated IPs stay in the `dns` nft sets; shorter = faster cleanup of stale entries after a domain's IPs change |
+| `FWMARK` | `0x1` | Firewall mark applied to VPN-destined packets; change if another tool (OpenVPN, mwan3) already uses `0x1` |
+| `ROUTE_TABLE` | `100` | Policy routing table number; change if another tool already uses table `100` |
+| `DNS_CATS` | `torrentsites pornsites sites` | Space-separated list of `dns` routing categories (dnsmasq-based) |
+| `RESOLVE_CATS` | `torrenttrackers sites` | Space-separated list of `resolve` routing categories (nslookup-based) |
+
 ## Step 2 — Firewall zone
 
 `fw4` needs a zone for the Mullvad interface so it allows forwarded LAN traffic through it. Replace `mullvad` with your UCI network name for the WireGuard interface:
@@ -70,7 +85,7 @@ uci set firewall.@forwarding[-1].dest='mullvad'
 uci commit firewall && fw4 reload
 ```
 
-> After `fw4 reload`, the hotplug script automatically restores the mark rules. You should see the nft sets reappear within a second.
+> After `fw4 reload`, the nft sets and mark chain are restored automatically by fw4 (they live in `/etc/nftables.d/30-split-routing.nft`). The hotplug script also fires to restore the policy routing rules (`ip rule` / `ip route`).
 
 ## Step 3 — dnsmasq setup
 
@@ -172,6 +187,68 @@ nslookup thepiratebay.org 127.0.0.1 > /dev/null
 nft list set inet fw4 dns_torrentsites4
 ```
 
+## Customizing what gets routed
+
+### Adding individual domains or IPs
+
+Each category has a local file in `/etc/split-routing/` that you can edit directly:
+
+- `local-dns-sites.txt` — domains routed via the `dns` mechanism (dnsmasq `nftset=`)
+- `local-resolve-sites.txt` — domains or IPs routed via the `resolve` mechanism (batch DNS lookup)
+- `local-dns-torrentsites.txt`, `local-resolve-torrenttrackers.txt` — same for the torrent categories
+- `local-dns-pornsites.txt` — adult content category
+
+These files accept any format supported by `nft-resolve` — one domain per line is simplest. After editing, run:
+
+```sh
+/usr/sbin/update-routing-sets
+```
+
+The local files are created once by `install.sh` and **never overwritten** by subsequent runs, so your changes persist across re-installs.
+
+### Adding remote sources
+
+`/usr/sbin/update-routing-sets` is also written once and never overwritten. Open it and add `dns()` or `resolve()` calls with remote URLs:
+
+```sh
+# Route all domains from a remote blocklist through the VPN
+dns torrentsites "https://example.com/torrent-domains.txt"
+
+# Resolve and route IPs from a remote list
+resolve torrenttrackers "https://example.com/tracker-ips.txt"
+```
+
+Each function accepts any number of URLs and local files. Any [supported format](supported-formats.md) works.
+
+### Adding a new category
+
+1. Add the category name to `DNS_CATS` or `RESOLVE_CATS` in `/etc/split-routing/config`
+2. Re-run `sh install.sh` — this creates the nft sets and mark rules for the new category
+3. Add `dns <name> ...` or `resolve <name> ...` calls to `update-routing-sets`
+4. Run `/usr/sbin/update-routing-sets` to populate the new sets
+
+> Renaming a category in config and re-running `install.sh` will delete the old nft set. If you rename mid-session without re-running, the old set is still marked and routes traffic; the new name won't work until `install.sh` runs.
+
+### Using nft-resolve directly
+
+`nft-resolve` is a standalone tool you can call independently of `update-routing-sets`:
+
+```sh
+# Load a domain list into specific nft sets
+nft-resolve -4 my_set4 -6 my_set6 domain=/etc/split-routing/local-dns-sites.txt
+
+# Load from a URL (format auto-detected)
+nft-resolve -4 resolve_sites4 -6 resolve_sites6 https://example.com/domains.txt
+
+# Load IP-only list (skip DNS resolution)
+nft-resolve -4 my_set4 -6 my_set6 --no-resolve ip=/path/to/iplist.txt
+
+# Print the normalized domain list without loading into nft
+nft-resolve -4 - -6 - -d /tmp/domains.txt domain=/etc/split-routing/local-dns-sites.txt
+```
+
+See `supported-formats.md` for all accepted input formats.
+
 ## IPv6 considerations
 
 If your Mullvad endpoint doesn't carry IPv6, set `ROUTE_IPV6=no` in `/etc/split-routing/config` and re-run `install.sh`. This removes the IPv6 policy rule and route, and the hotplug script will only add IPv4 mark rules going forward.
@@ -180,34 +257,15 @@ Without this, marked IPv6 traffic is silently dropped rather than routed.
 
 ## Hotplug script reference
 
-For reference, here is what the generated `/etc/hotplug.d/iface/99-mullvad-routing` looks like. It sources the config at runtime, so editing the config and re-running install.sh is all that's needed to change categories or routing parameters.
+For reference, here is what the generated `/etc/hotplug.d/iface/99-mullvad-routing` looks like. It fires on `ifup` and `ifupdate` — both when the VPN interface first comes up and when it reconnects after a brief interruption.
+
+The nft sets and mark chain are **not** managed here — they live in `/etc/nftables.d/30-split-routing.nft` and are loaded automatically by `fw4` on every reload. The hotplug script's only job is to restore the policy routing rules (`ip rule` / `ip route`) that `fw4 reload` clears.
 
 ```sh
 #!/bin/sh
-[ "$ACTION" = ifup ] || exit 0
+[ "$ACTION" = ifup ] || [ "$ACTION" = ifupdate ] || exit 0
 . /etc/split-routing/config
 ip link show "$VPN_IFACE" 2>/dev/null | grep -q "LOWER_UP" || exit 0
-
-for cat in $DNS_CATS; do
-  nft add set inet fw4 dns_${cat}4 "{ type ipv4_addr; flags dynamic, timeout; timeout $DNS_TIMEOUT; }" 2>/dev/null || true
-  nft add set inet fw4 dns_${cat}6 "{ type ipv6_addr; flags dynamic, timeout; timeout $DNS_TIMEOUT; }" 2>/dev/null || true
-done
-for cat in $RESOLVE_CATS; do
-  nft add set inet fw4 resolve_${cat}4 '{ type ipv4_addr; flags interval; }' 2>/dev/null || true
-  nft add set inet fw4 resolve_${cat}6 '{ type ipv6_addr; flags interval; }' 2>/dev/null || true
-done
-
-nft flush chain inet fw4 mangle_prerouting
-for cat in $DNS_CATS; do
-  nft add rule inet fw4 mangle_prerouting ip  daddr @dns_${cat}4 meta mark set "$FWMARK"
-  [ "$ROUTE_IPV6" = yes ] && \
-    nft add rule inet fw4 mangle_prerouting ip6 daddr @dns_${cat}6 meta mark set "$FWMARK"
-done
-for cat in $RESOLVE_CATS; do
-  nft add rule inet fw4 mangle_prerouting ip  daddr @resolve_${cat}4 meta mark set "$FWMARK"
-  [ "$ROUTE_IPV6" = yes ] && \
-    nft add rule inet fw4 mangle_prerouting ip6 daddr @resolve_${cat}6 meta mark set "$FWMARK"
-done
 
 ip    rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null || true
 ip    rule add fwmark "$FWMARK" lookup "$ROUTE_TABLE"
@@ -219,7 +277,7 @@ if [ "$ROUTE_IPV6" = yes ]; then
 fi
 ```
 
-To trigger it manually after a `fw4 reload`:
+To trigger it manually (e.g. to restore routing rules after a `fw4 reload` without rebooting):
 
 ```sh
 ACTION=ifup sh /etc/hotplug.d/iface/99-mullvad-routing
