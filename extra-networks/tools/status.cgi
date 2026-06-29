@@ -341,7 +341,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
         [ -n "$_ipv6_prefixes" ] && _hdr_ip6=yes
         uci -q get dhcp."$_iface".dhcpv6 2>/dev/null | grep -q server && _hdr_ip6=yes || true
 
-        printf '<table><tr><th>Hostname</th><th>Label</th><th>DNS</th><th>IPv4</th><th>Joined</th>'
+        printf '<table><tr><th>Label</th><th>DNS</th><th>IPv4</th><th>Joined</th>'
         [ "$_hdr_ip6" = yes ] && printf '<th>IPv6</th>'
         [ "${JOIN_APPROVAL:-no}" = yes ] && printf '<th>Join access</th>'
         printf '<th>MAC</th>'
@@ -371,7 +371,6 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 [ "$_total" -gt 0 ] && _bw=$(_human "$_total")
             fi
 
-            _hn_disp="—"; [ "$_hn" != "*" ] && [ -n "$_hn" ] && _hn_disp="$(_html "$_hn")"
             _lookup_ip="$_ip"; [ "$_lookup_ip" = "-" ] && _lookup_ip="$_ipv6"
             _dns=$(nslookup "$_lookup_ip" 2>/dev/null \
                 | awk '/name =/{gsub(/\.$/,"",$NF); print $NF; exit}')
@@ -391,8 +390,8 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
             else
                 _label_cell="—"
             fi
-            printf '<tr><td>%s</td><td>%s</td><td class="dim">%s</td><td>%s</td><td class="dim">%s</td>' \
-                "$_hn_disp" "$_label_cell" "$(_html "$_dns")" \
+            printf '<tr><td>%s</td><td class="dim">%s</td><td>%s</td><td class="dim">%s</td>' \
+                "$_label_cell" "$(_html "$_dns")" \
                 "$([ "$_ip" = "-" ] && echo "—" || _html "$_ip")" "$_joined"
             [ "$_hdr_ip6" = yes ] && printf '<td class="dim">%s</td>' "${_ipv6:----}"
             if [ "${JOIN_APPROVAL:-no}" = yes ]; then
