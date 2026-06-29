@@ -460,12 +460,19 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 [ -z "$_hlabel" ] && { [ -n "$_host" ] && [ "$_host" != unknown ] \
                     && _hlabel="$_host" || _hlabel="$_mac"; }
                 _hip="${_ip4:-${_ip6:----}}"
+                if [ -n "$_actor_mac" ]; then
+                    _by_cell="<a href=\"/cgi-bin/device?net=lan&mac=$(_html "$_actor_mac")\">$(_html "$_actor_mac")</a>"
+                    [ -n "$_actor_ip4" ] && _by_cell="${_by_cell} <span class=\"dim\">$(_html "$_actor_ip4")</span>"
+                    [ -n "$_actor_ip6" ] && _by_cell="${_by_cell}<br><span class=\"dim\">$(_html "$_actor_ip6")</span>"
+                else
+                    _by_cell="$(_html "${_actor:-unknown}")"
+                fi
                 printf '<tr><td class="dim">%s</td><td><span class="badge badge-%s">%s</span></td><td><a href="/cgi-bin/device?net=%s&mac=%s">%s</a></td><td>%s</td><td class="dim"><a href="/cgi-bin/device?net=%s&mac=%s">%s</a></td><td class="dim">%s</td></tr>\n' \
                     "$(_html "$_when")" "$_cls" "$_badge" \
                     "$(_html "$_iface")" "$(_html "$_mac")" "$(_html "$_hlabel")" \
                     "$(_html "$_hip")" \
                     "$(_html "$_iface")" "$(_html "$_mac")" "$(_html "$_mac")" \
-                    "$(_html "${_actor:-unknown}")"
+                    "$_by_cell"
             done
             printf '</table>\n'
         fi
