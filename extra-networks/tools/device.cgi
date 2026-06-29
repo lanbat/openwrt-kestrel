@@ -147,9 +147,11 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
         esac
         _approver="${_approver_name:-$_approver_ip}"
         [ "$_approver" = "*" ] && _approver="$_approver_ip"
-        [ -n "$_approver_ip4" ] && _approver="${_approver}, IPv4: ${_approver_ip4}"
-        [ -n "$_approver_ip6" ] && _approver="${_approver}, IPv6: ${_approver_ip6}"
-        [ -n "$_approver_mac" ] && _approver="${_approver}, MAC: ${_approver_mac}"
+        [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
+        _rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+        _rip="${_rip:-192.168.1.1}"
+        _approver_action=""
+        [ -n "$_approver_mac" ] && _approver_action="view, Approver, http://${_rip}/cgi-bin/device?net=lan&mac=${_approver_mac}"
         _notify_ip="${_DEV_IP:-${_DEV_IP6:-}}"
         _dns=$([ -n "$_notify_ip" ] && nslookup "$_notify_ip" 2>/dev/null | awk '/name =/{gsub(/\.$/,"",$NF); print $NF; exit}' || true)
         _device_detail="IPv4: ${_DEV_IP:-unknown}
@@ -182,7 +184,8 @@ Revoked device:
 ${_device_detail}
 Revoked by: ${_approver}
 
-The device is no longer approved on ${_iface}."
+The device is no longer approved on ${_iface}." \
+"${_approver_action}"
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
         ;;

@@ -114,9 +114,11 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
     esac
     _approver="${_approver_name:-$_approver_ip}"
     [ "$_approver" = "*" ] && _approver="$_approver_ip"
-    [ -n "$_approver_ip4" ] && _approver="${_approver}, IPv4: ${_approver_ip4}"
-    [ -n "$_approver_ip6" ] && _approver="${_approver}, IPv6: ${_approver_ip6}"
-    [ -n "$_approver_mac" ] && _approver="${_approver}, MAC: ${_approver_mac}"
+    [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
+    _rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+    _rip="${_rip:-192.168.1.1}"
+    _approver_action=""
+    [ -n "$_approver_mac" ] && _approver_action="view, Approver, http://${_rip}/cgi-bin/device?net=lan&mac=${_approver_mac}"
 
     if [ "$_action" = approve ]; then
         _label_new=$(printf '%s' "$(_get_param "$_params" label)" \
@@ -165,7 +167,8 @@ Approved device:
 ${_device_detail}
 Approved by: ${_approver}
 
-The approved device can now use the internet on ${NET}."
+The approved device can now use the internet on ${NET}." \
+"${_approver_action}"
         _join_history_add "$NET" approved "$MAC" "$IP4" "$IP6" "${HOST:-${_dns:-unknown}}" "$_approver" "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         _msg="$(_html "${HOST:-$IP}") ($MAC) can now use the internet on ${NET}."
         _cls=ok
@@ -185,7 +188,8 @@ Denied device:
 ${_device_detail}
 Denied by: ${_approver}
 
-The denied device remains blocked from internet access on ${NET}."
+The denied device remains blocked from internet access on ${NET}." \
+"${_approver_action}"
         _join_history_add "$NET" denied "$MAC" "$IP4" "$IP6" "${HOST:-${_dns:-unknown}}" "$_approver" "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         _msg="$(_html "${HOST:-$IP}") ($MAC) remains blocked from internet access on ${NET}."
         _cls=err

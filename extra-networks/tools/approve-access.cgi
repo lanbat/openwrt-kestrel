@@ -111,6 +111,17 @@ dst_label=$([ -n "$dst_name" ] && printf '%s (%s)' "$(_html "$dst_name")" "$DST"
 src_plain=$([ -n "$src_name" ] && printf '%s (%s)' "$src_name" "$SRC" || printf '%s' "$SRC")
 dst_plain=$([ -n "$dst_name" ] && printf '%s (%s)' "$dst_name" "$DST" || printf '%s' "$DST")
 
+_approver_ip="${REMOTE_ADDR:-unknown}"
+_approver_name=$(_name_for_ip "$_approver_ip")
+_approver_mac=$(_mac_for_ip "$_approver_ip")
+_approver="${_approver_name:-$_approver_ip}"
+[ "$_approver" = "*" ] && _approver="$_approver_ip"
+[ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
+_rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+_rip="${_rip:-192.168.1.1}"
+_approver_action=""
+[ -n "$_approver_mac" ] && _approver_action="view, Approver, http://${_rip}/cgi-bin/device?net=lan&mac=${_approver_mac}"
+
 QS="net=${NET}&src=${SRC}&dst=${DST}&proto=${PROTO}&port=${PORT}"
 
 # ── POST: execute and confirm ─────────────────────────────────────────────────
@@ -156,7 +167,9 @@ HTML
 From: ${src_plain}${src_mac:+ [${src_mac}]}
 To:   ${dst_plain}${dst_mac:+ [${dst_mac}]}:${PORT}/${PROTO}
 Duration: ${DURATION}${REASON:+
-Reason: ${REASON}}"
+Reason: ${REASON}}
+Approved by: ${_approver}" \
+"${_approver_action}"
     fi
 
     cat <<HTML
