@@ -112,6 +112,7 @@ Config files live in `configs/` and are gitignored — they never leave the rout
 | `NOTIFY_URL` | — | ntfy.sh URL for push notifications, e.g. `https://ntfy.sh/my-topic` |
 | `NOTIFY_JOIN` | `no` | Send a push notification each time a device gets a DHCP lease |
 | `JOIN_APPROVAL` | `no` | Block internet for new devices until you approve them via push notification (requires `NOTIFY_URL`) |
+| `JOIN_HISTORY_RETENTION` | `90d` | Keep join approval, denial, and revocation history this long; plain numbers mean days |
 | `DEFAULT_DURATION` | `24h` | Pre-selected duration in the LAN access approval form (`1h` `6h` `12h` `24h` `2d` `7d` `30d`) |
 | `MAX_DURATION` | `30d` | Longest duration available in the LAN access approval form — options above this are hidden |
 | `REASON_REQUIRED` | `no` | `yes` — approver must enter a reason before LAN access is granted |
@@ -207,7 +208,9 @@ How it works:
 4. Approving records the device's MAC in `/etc/extra-networks/${IFACE}-join-approved` and unblocks it immediately
 5. On all future joins (same MAC, any IP) the device passes straight through with no notification
 
-The dashboard shows join state in the connected-device table: pending, approved, or denied. Denied devices stay blocked and can be approved later from the same row. Approval and denial both send a push notification naming the device and the LAN client that made the decision.
+The dashboard shows join state in the connected-device table: pending, approved, or denied. Denied devices stay blocked and can be approved later from the same row. Approval, denial, and revocation all send a push notification naming the device (IP, DNS, hostname, MAC) and the LAN client that made the decision.
+
+Join decisions are also written to `/etc/extra-networks/${IFACE}-join-history` and shown on the dashboard. `JOIN_HISTORY_RETENTION` controls how long entries are kept; the default is `90d`.
 
 When the WiFi password is rotated, labeled approved devices stay approved; unlabeled approvals, pending requests, and denied requests are cleared because those devices must reconnect with the new password.
 
@@ -250,7 +253,7 @@ The page auto-refreshes every 60 seconds and shows:
 - **System** — uptime, memory, load, WAN IPv4/IPv6
 - **VPN** — interface and state (up / down / routing fault)
 - **WireGuard server peers** — auto-detected for any WireGuard interface in server mode (no outbound peers); shows all configured peers with an online indicator (● / ○), endpoint IP, last handshake, and bytes transferred
-- **Networks** — state, subnet, traffic (↓/↑), connected devices with hostname, IP, MAC, join approval state, and per-device traffic. An IPv6 column appears automatically when the network has IPv6 configured or clients have IPv6 addresses.
+- **Networks** — state, subnet, traffic (↓/↑), connected devices with hostname, IP, MAC, join approval state, recent join decision history, and per-device traffic. An IPv6 column appears automatically when the network has IPv6 configured or clients have IPv6 addresses.
 - **Pending LAN access** — blocked isolated→LAN connection attempts logged since the last check, with **Approve** buttons linking directly to the approval form
 - **Active LAN access** — temporary allowances in both directions (LAN→isolated and isolated→LAN) with destination, port, protocol, and time remaining
 - **Port forwards** — active redirects with zone, port, destination, and expiry

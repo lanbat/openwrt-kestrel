@@ -63,10 +63,13 @@ h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:#888;
 .row{display:flex;justify-content:space-between;font-size:.9rem;padding:.18rem 0}
 .lbl{color:#666}.val{font-weight:600}
 .ok{color:#2e7d32}.warn{color:#c62828}.dim{color:#aaa}
-table{width:100%;border-collapse:collapse;font-size:.875rem;margin:.4rem 0}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:.875rem;margin:.4rem 0;
+      border:1px solid #ececec;border-radius:10px;overflow:hidden}
 th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;
-   color:#888;padding:.35rem .5rem;border-bottom:1px solid #e0e0e0}
-td{padding:.35rem .5rem;border-bottom:1px solid #f0f0f0;vertical-align:top}
+   color:#777;background:#fafafa;padding:.45rem .6rem;border-bottom:1px solid #e0e0e0}
+td{padding:.5rem .6rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tr:hover td{background:#fcfcfc}
 a{color:#1976d2;text-decoration:none}
 form{display:inline}
 button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
@@ -77,6 +80,13 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 .btn-ok{background:#2e7d32}
 .btn-deny{background:#c62828}
 .btn-danger{background:#c62828}
+.badge{display:inline-flex;align-items:center;border-radius:999px;padding:.16rem .52rem;
+       font-size:.72rem;font-weight:700;letter-spacing:.02em}
+.badge-approved{color:#1b5e20;background:#e8f5e9}
+.badge-pending{color:#8a5a00;background:#fff3cd}
+.badge-denied{color:#b71c1c;background:#ffebee}
+.badge-untracked{color:#666;background:#eeeeee}
+.badge-revoked{color:#0d47a1;background:#e3f2fd}
 .net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
 .qr{display:flex;align-items:stretch;gap:1rem}
 .qr-info{font-size:.9rem;display:flex;flex-direction:column;flex:1;min-width:0}
@@ -223,7 +233,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     [ -f "$_conf" ] || continue
     unset NOTIFY_URL SUBNET IFACE_NAME BANDWIDTH_THRESHOLD_MB \
           RATE_LIMIT RATE_LIMIT_PER_DEVICE DNS_SERVER DNS_SERVER_V6 ISOLATE LAN_ACCESS DOT \
-          SHOW_QR NOTIFY_JOIN JOIN_APPROVAL ROTATE_PASSWORD DESCRIPTION
+          SHOW_QR NOTIFY_JOIN JOIN_APPROVAL JOIN_HISTORY_RETENTION ROTATE_PASSWORD DESCRIPTION
     . "$_conf"
     _iface="${IFACE_NAME:-}"
     [ -z "$_iface" ] && continue
@@ -369,7 +379,8 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 grep -qixF "$_mac" "$_join_approved" 2>/dev/null && _join_state="Approved"
                 grep -qixF "$_mac" "$_join_denied" 2>/dev/null && _join_state="Denied"
                 grep -qi "^${_mac} " "$_join_pending" 2>/dev/null && [ "$_join_state" = Untracked ] && _join_state="Pending"
-                printf '<td><strong>%s</strong><span class="actions">' "$_join_state"
+                _join_class=$(printf '%s' "$_join_state" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+                printf '<td><span class="badge badge-%s">%s</span><span class="actions">' "$_join_class" "$_join_state"
                 if [ "$_join_state" != Approved ]; then
                     _jhost=$([ "$_hn" != "*" ] && printf '%s' "$_hn" || true)
                     printf '<form method="POST" action="/cgi-bin/approve-join">'
@@ -397,6 +408,34 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
             printf '<td>%s</td></tr>\n' "$(_exp_str "$_exp_ts")"
         done
         printf '</table>\n'
+    fi
+
+    # ── Join decision history ────────────────────────────────────────────────
+
+    if [ "${JOIN_APPROVAL:-no}" = yes ]; then
+        _history="${BASE_DIR}/${_iface}-join-history"
+        type _join_history_prune >/dev/null 2>&1 \
+            && _join_history_prune "$_iface" "${JOIN_HISTORY_RETENTION:-90d}"
+        if [ -s "$_history" ]; then
+            printf '<h2 style="margin-top:1.25rem">Join history — %s</h2>' "$(_html "$_iface")"
+            printf '<table><tr><th>When</th><th>Decision</th><th>Device</th><th>IP</th><th>MAC</th><th>By</th></tr>\n'
+            tail -20 "$_history" 2>/dev/null | while IFS=$(printf '\t') read -r _ts _when _act _mac _ip _host _actor; do
+                [ -n "$_ts" ] || continue
+                _cls=$(printf '%s' "$_act" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+                case "$_cls" in approved|denied|revoked) ;; *) _cls=untracked ;; esac
+                case "$_act" in
+                    approved) _label=Approved ;;
+                    denied)   _label=Denied ;;
+                    revoked)  _label=Revoked ;;
+                    *)        _label="$(_html "$_act")" ;;
+                esac
+                [ -n "$_host" ] && [ "$_host" != unknown ] || _host="$_mac"
+                printf '<tr><td class="dim">%s</td><td><span class="badge badge-%s">%s</span></td><td>%s</td><td>%s</td><td class="dim">%s</td><td>%s</td></tr>\n' \
+                    "$(_html "$_when")" "$_cls" "$_label" "$(_html "$_host")" \
+                    "$(_html "$_ip")" "$(_html "$_mac")" "$(_html "$_actor")"
+            done
+            printf '</table>\n'
+        fi
     fi
 
     # ── Pending LAN access requests ───────────────────────────────────────────

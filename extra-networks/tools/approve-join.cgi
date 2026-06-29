@@ -69,6 +69,11 @@ DENIED_FILE="${BASE_DIR}/${NET}-join-denied"
 
 _label=$([ -n "$HOST" ] && printf '%s (%s)' "$(_html "$HOST")" "$IP" || printf '%s' "$IP")
 QS="net=${NET}&ip=${IP}&mac=${MAC}&host=${HOST}"
+_dns=$(nslookup "$IP" 2>/dev/null | awk '/name =/{gsub(/\.$/,"",$NF); print $NF; exit}')
+_device_detail="IP: ${IP}
+DNS: ${_dns:-unknown}
+Hostname: ${HOST:-unknown}
+MAC: ${MAC}"
 
 # POST: approve or deny
 if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
@@ -80,7 +85,7 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
     _approver_mac=$(_mac_for_ip "$_approver_ip")
     _approver="${_approver_name:-$_approver_ip}"
     [ "$_approver" = "*" ] && _approver="$_approver_ip"
-    [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
+    [ -n "$_approver_mac" ] && _approver="${_approver}, MAC: ${_approver_mac}"
 
     if [ "$_action" = approve ]; then
         { grep -vF "$MAC" "$APPROVED_FILE" 2>/dev/null; printf '%s\n' "$MAC"; } \
@@ -102,10 +107,12 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
         _ntfy "Access approved — ${NET}" default white_check_mark \
 "Type: Internet access approved
 
-Approved device: ${HOST:+$HOST }($MAC), ${IP}
+Approved device:
+${_device_detail}
 Approved by: ${_approver}
 
 The approved device can now use the internet on ${NET}."
+        _join_history_add "$NET" approved "$MAC" "$IP" "${HOST:-${_dns:-unknown}}" "$_approver" "${JOIN_HISTORY_RETENTION:-90d}"
         _msg="$(_html "${HOST:-$IP}") ($MAC) can now use the internet on ${NET}."
         _cls=ok
     else
@@ -117,10 +124,12 @@ The approved device can now use the internet on ${NET}."
         _ntfy "Access denied — ${NET}" default no_entry \
 "Type: Internet access denied
 
-Denied device: ${HOST:+$HOST }($MAC), ${IP}
+Denied device:
+${_device_detail}
 Denied by: ${_approver}
 
 The denied device remains blocked from internet access on ${NET}."
+        _join_history_add "$NET" denied "$MAC" "$IP" "${HOST:-${_dns:-unknown}}" "$_approver" "${JOIN_HISTORY_RETENTION:-90d}"
         _msg="$(_html "${HOST:-$IP}") ($MAC) remains blocked from internet access on ${NET}."
         _cls=err
     fi

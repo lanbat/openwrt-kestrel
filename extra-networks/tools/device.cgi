@@ -109,6 +109,17 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
         ;;
 
     revoke_join_approval)
+        _approver_ip="${REMOTE_ADDR:-unknown}"
+        _approver_name=$(_name_for_ip "$_approver_ip")
+        _approver_mac=$(_mac_for_ip "$_approver_ip")
+        _approver="${_approver_name:-$_approver_ip}"
+        [ "$_approver" = "*" ] && _approver="$_approver_ip"
+        [ -n "$_approver_mac" ] && _approver="${_approver}, MAC: ${_approver_mac}"
+        _dns=$([ -n "$_DEV_IP" ] && nslookup "$_DEV_IP" 2>/dev/null | awk '/name =/{gsub(/\.$/,"",$NF); print $NF; exit}' || true)
+        _device_detail="IP: ${_DEV_IP:-unknown}
+DNS: ${_dns:-unknown}
+Hostname: ${_DEV_LABEL:-unknown}
+MAC: ${MAC}"
         [ -f "$_join_approved_f" ] && {
             grep -vixF "$MAC" "$_join_approved_f" > "${_join_approved_f}.tmp" 2>/dev/null \
                 && mv "${_join_approved_f}.tmp" "$_join_approved_f" || true
@@ -118,10 +129,17 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
                 > "${_join_pending_f}.tmp" && mv "${_join_pending_f}.tmp" "$_join_pending_f" || true
             nft add element inet fw4 "${_iface}_join_pending" "{ ${_DEV_IP} }" 2>/dev/null || true
         fi
-        { grep -vixF "$MAC" "$_join_denied_f" 2>/dev/null; printf '%s\n' "$MAC"; } \
+        { grep -vixF "$MAC" "$_join_denied_f" 2>/dev/null; } \
             > "${_join_denied_f}.tmp" && mv "${_join_denied_f}.tmp" "$_join_denied_f" || true
+        _join_history_add "$_iface" revoked "$MAC" "${_DEV_IP:-unknown}" "${_DEV_LABEL:-${_dns:-unknown}}" "$_approver" "${JOIN_HISTORY_RETENTION:-90d}"
         _ntfy "Access revoked — ${_iface}" default no_entry \
-            "${_DEV_DISPLAY} (${MAC}) is no longer approved on ${_iface}."
+"Type: Internet access revoked
+
+Revoked device:
+${_device_detail}
+Revoked by: ${_approver}
+
+The device is no longer approved on ${_iface}."
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
         ;;
@@ -351,7 +369,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <h2>Device</h2>
 <div class="card">
 <div class="row"><span class="lbl">MAC</span><span class="val">$(_html "$MAC")</span></div>
-<div class="row"><span class="lbl">Static IP</span><span class="val">${_DEV_IP:----}</span></div>
+<div class="row"><span class="lbl">Tracked IP</span><span class="val">${_DEV_IP:----}</span></div>
 <div class="row"><span class="lbl">Network</span><span class="val">$(_html "$_iface")</span></div>
 <div class="row"><span class="lbl">Join approval</span><span class="val $([ "$_is_approved" = yes ] && echo ok || echo warn)">$([ "$_is_approved" = yes ] && echo Approved || echo Pending)</span></div>
 ${_approval_row}

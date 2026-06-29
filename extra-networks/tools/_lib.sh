@@ -62,3 +62,38 @@ _ip_for_mac() {
     [ -f "$_if" ] || return 0
     awk -v m="$1" 'tolower($1)==tolower(m){print $2; exit}' "$_if"
 }
+
+# Convert a small duration string to seconds. Plain numbers mean days.
+_duration_secs() {
+    _dur="${1:-90d}"
+    case "$_dur" in
+        *d) _n="${_dur%d}"; printf '%s' "$_n" | grep -qE '^[0-9]+$' && printf '%s' $(( _n * 86400 )) || printf '%s' $(( 90 * 86400 )) ;;
+        *h) _n="${_dur%h}"; printf '%s' "$_n" | grep -qE '^[0-9]+$' && printf '%s' $(( _n * 3600 )) || printf '%s' $(( 90 * 86400 )) ;;
+        *m) _n="${_dur%m}"; printf '%s' "$_n" | grep -qE '^[0-9]+$' && printf '%s' $(( _n * 60 )) || printf '%s' $(( 90 * 86400 )) ;;
+        *[!0-9]*|'') printf '%s' $(( 90 * 86400 )) ;;
+        *) printf '%s' $(( _dur * 86400 )) ;;
+    esac
+}
+
+# Keep join decision history bounded by the configured retention window.
+_join_history_prune() {
+    _hist="/etc/extra-networks/${1}-join-history"
+    [ -f "$_hist" ] || return 0
+    _secs=$(_duration_secs "${2:-90d}")
+    [ "$_secs" -gt 0 ] 2>/dev/null || { : > "$_hist"; return 0; }
+    _cut=$(( $(date +%s) - _secs ))
+    awk -F '\t' -v cut="$_cut" '$1 >= cut' "$_hist" > "${_hist}.tmp" \
+        && mv "${_hist}.tmp" "$_hist" || true
+}
+
+# Append a join approval decision: iface action mac ip host approver retention.
+_join_history_add() {
+    _hist="/etc/extra-networks/${1}-join-history"
+    _ret="${7:-90d}"
+    _join_history_prune "$1" "$_ret"
+    _when=$(date '+%d %b %H:%M')
+    _host=$(printf '%s' "${5:-unknown}" | tr '\t\n' '  ')
+    _actor=$(printf '%s' "${6:-unknown}" | tr '\t\n' '  ')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date +%s)" "$_when" "$2" "$3" "$4" "$_host" "$_actor" >> "$_hist"
+}

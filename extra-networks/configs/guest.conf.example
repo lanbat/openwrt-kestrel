@@ -31,6 +31,7 @@ BANDWIDTH_THRESHOLD_MB=0         # alert when a device transfers this many MB in
 SHOW_QR=yes                      # yes = show WiFi QR code and password in the status dashboard
 NOTIFY_JOIN=yes                  # yes = send a push notification each time a device joins
 JOIN_APPROVAL=no                 # yes = block internet until owner approves each new device (requires NOTIFY_URL)
+JOIN_HISTORY_RETENTION=90d       # keep approval/denial/revoke history this long (e.g. 30d 90d 180d)
 ROTATE_PASSWORD=yes              # yes = show a "Rotate password" button in the status dashboard
 DESCRIPTION=Guest WiFi           # optional label shown in the status dashboard
 MDNS=no                          # yes = reflect mDNS from LAN (enables casting, AirPrint, etc.)
