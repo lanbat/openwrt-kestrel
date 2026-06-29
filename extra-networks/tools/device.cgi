@@ -555,37 +555,35 @@ fi
 
 printf '<h2>History</h2>\n'
 _history_f="${BASE_DIR}/${_iface}-join-history"
+_history_html=""
 if [ -f "$_history_f" ]; then
-    _history_rows=$(awk -v m="$MAC" -F'\t' 'tolower($4)==tolower(m){print}' \
-        "$_history_f" 2>/dev/null | tail -20)
+    _history_html=$(awk -v mac="$MAC" -F'\t' '
+    function h(s,  t){t=s;gsub(/&/,"\\&amp;",t);gsub(/</,"\\&lt;",t);gsub(/>/,"\\&gt;",t);gsub(/"/,"\\&quot;",t);return t}
+    BEGIN{
+        bcls["approved"]="approved";bcls["denied"]="denied";bcls["revoked"]="revoked"
+        bcls["connected"]="connected";bcls["disconnected"]="disconnected"
+        blbl["approved"]="Approved";blbl["denied"]="Denied";blbl["revoked"]="Revoked"
+        blbl["connected"]="Connected";blbl["disconnected"]="Disconnected"
+    }
+    tolower($4)==tolower(mac){n++;rw[n]=$2;ra[n]=$3;ri4[n]=$5;ri6[n]=$6;rh[n]=$7;rac[n]=$8;rmac[n]=$11}
+    END{
+        s=(n>20)?n-19:1
+        for(i=s;i<=n;i++){
+            act=ra[i];actor=rac[i];host=rh[i];ip6=ri6[i];amac=rmac[i]
+            if(actor==""&&host!="")actor=host
+            cls=(act in bcls)?bcls[act]:"untracked"
+            lbl=(act in blbl)?blbl[act]:h(act)
+            hip=(ri4[i]!="")?ri4[i]:(ip6!="")?ip6:"—"
+            if(amac!="")by="<a href=\"/cgi-bin/device?net=lan&mac="h(amac)"\">"h(amac)"</a>"
+            else by=h(actor!=""?actor:"unknown")
+            printf "<tr><td class=\"dim\">%s</td><td><span class=\"badge badge-%s\">%s</span></td><td>%s</td><td class=\"dim\">%s</td></tr>\n",\
+                h(rw[i]),cls,lbl,h(hip),by
+        }
+    }' "$_history_f" 2>/dev/null)
 fi
-if [ -n "$_history_rows" ]; then
+if [ -n "$_history_html" ]; then
     printf '<table><tr><th>When</th><th>Decision</th><th>IP</th><th>By</th></tr>\n'
-    printf '%s\n' "$_history_rows" | while IFS=$(printf '\t') read -r _ts _when _act _hmac _ip4 _ip6 _hhost _actor _actor_ip4 _actor_ip6 _actor_mac; do
-        [ -n "$_ts" ] || continue
-        if [ -z "$_actor" ] && [ -n "$_hhost" ]; then
-            _actor="$_hhost"; _hhost="$_ip6"; _ip6=""
-        fi
-        _cls=$(printf '%s' "$_act" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
-        case "$_cls" in approved|denied|revoked|connected|disconnected) ;; *) _cls=untracked ;; esac
-        case "$_act" in
-            approved)     _badge=Approved ;;
-            denied)       _badge=Denied ;;
-            revoked)      _badge=Revoked ;;
-            connected)    _badge=Connected ;;
-            disconnected) _badge=Disconnected ;;
-            *)            _badge="$(_html "$_act")" ;;
-        esac
-        _hip="${_ip4:-${_ip6:----}}"
-        if [ -n "$_actor_mac" ]; then
-            _by_cell="<a href=\"/cgi-bin/device?net=lan&mac=$(_html "$_actor_mac")\">$(_html "$_actor_mac")</a>"
-        else
-            _by_cell="$(_html "${_actor:-unknown}")"
-        fi
-        printf '<tr><td class="dim">%s</td><td><span class="badge badge-%s">%s</span></td><td>%s</td><td class="dim">%s</td></tr>\n' \
-            "$(_html "$_when")" "$_cls" "$_badge" \
-            "$(_html "$_hip")" "$_by_cell"
-    done
+    printf '%s\n' "$_history_html"
     printf '</table>\n'
 else
     printf '<p class="dim">No history yet.</p>\n'
