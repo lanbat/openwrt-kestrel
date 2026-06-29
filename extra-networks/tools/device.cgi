@@ -90,6 +90,11 @@ _DEV_SLUG=$(_slugify "${_DEV_LABEL:-}")
 _LOCAL_DOMAIN=$(uci -q get dhcp.@dnsmasq[0].domain 2>/dev/null || true)
 _LOCAL_DOMAIN="${_LOCAL_DOMAIN:-lan}"
 _DEV_FQDN="${_DEV_SLUG:+${_DEV_SLUG}.${_LOCAL_DOMAIN}}"
+_DEV_HN=$(awk -v m="$MAC" 'tolower($2)==tolower(m)&&$4!="*"{print $4;exit}' /tmp/dhcp.leases 2>/dev/null || true)
+if [ -z "$_DEV_HN" ]; then
+    _uci_idx=$(uci show dhcp 2>/dev/null | grep -i "'${MAC}'" | grep -oE "@host\[[0-9]+\]" | head -1)
+    [ -n "$_uci_idx" ] && _DEV_HN=$(uci -q get "dhcp.${_uci_idx}.name" 2>/dev/null || true)
+fi
 _BACK_URL="/cgi-bin/device?net=${NET}&mac=${MAC}"
 _JOIN_IP="${_DEV_IP:-$_DEV_IP6}"
 _JOIN_STATE=Untracked
@@ -495,7 +500,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="row"><span class="lbl">Tracked IPv4</span><span class="val">${_DEV_IP:----}</span></div>
 <div class="row"><span class="lbl">Tracked IPv6</span><span class="val">${_DEV_IP6:----}</span></div>
 <div class="row"><span class="lbl">Network</span><span class="val">$(_html "$_iface")</span></div>
-<div class="row"><span class="lbl">DNS name</span><span class="val">${_DEV_FQDN:----}</span></div>
+<div class="row"><span class="lbl">DNS name</span><span class="val">${_DEV_FQDN:-${_DEV_HN:----}}</span></div>
 ${_approval_row}
 </div>
 
