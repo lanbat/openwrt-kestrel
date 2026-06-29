@@ -31,6 +31,15 @@ _mac_for_ip() {
     esac
 }
 
+_ip4_for_mac() {
+    awk -v m="$1" 'tolower($2)==tolower(m){print $3;exit}' /tmp/dhcp.leases 2>/dev/null
+}
+
+_ip6_for_mac() {
+    ip -6 neigh show 2>/dev/null | \
+        awk -v m="$1" '!/^fe80:/ && /lladdr/ { for(i=1;i<=NF;i++) if($i=="lladdr" && tolower($(i+1))==tolower(m)){print $1; exit} }'
+}
+
 # Send a push notification via ntfy. Requires NOTIFY_URL to be set.
 # Usage: _ntfy <title> <priority> <tags> <body> [extra_action]
 # extra_action: prepended before the dashboard action, e.g. "view, Approve, URL"
@@ -86,14 +95,16 @@ _join_history_prune() {
         && mv "${_hist}.tmp" "$_hist" || true
 }
 
-# Append a join approval decision: iface action mac ip host approver retention.
+# Append a join approval decision:
+# iface action device_mac device_ip4 device_ip6 device_name approver approver_ip4 approver_ip6 approver_mac retention.
 _join_history_add() {
     _hist="/etc/extra-networks/${1}-join-history"
-    _ret="${7:-90d}"
+    _ret="${11:-90d}"
     _join_history_prune "$1" "$_ret"
     _when=$(date '+%d %b %H:%M')
-    _host=$(printf '%s' "${5:-unknown}" | tr '\t\n' '  ')
-    _actor=$(printf '%s' "${6:-unknown}" | tr '\t\n' '  ')
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$(date +%s)" "$_when" "$2" "$3" "$4" "$_host" "$_actor" >> "$_hist"
+    _host=$(printf '%s' "${6:-unknown}" | tr '\t\n' '  ')
+    _actor=$(printf '%s' "${7:-unknown}" | tr '\t\n' '  ')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date +%s)" "$_when" "$2" "$3" "${4:-}" "${5:-}" "$_host" \
+        "$_actor" "${8:-}" "${9:-}" "${10:-}" >> "$_hist"
 }

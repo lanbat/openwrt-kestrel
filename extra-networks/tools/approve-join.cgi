@@ -70,8 +70,8 @@ DENIED_FILE="${BASE_DIR}/${NET}-join-denied"
 IP6=$(ip -6 neigh show dev "br-${_iface}" 2>/dev/null \
     | awk -v m="$MAC" '!/^fe80:/ && /lladdr/ { for(i=1;i<=NF;i++) if($i=="lladdr" && tolower($(i+1))==tolower(m)){print $1; exit} }')
 case "$IP" in
-    *:*) _pending_set="${NET}_join_pending6"; _ip_store="${BASE_DIR}/${NET}-device-ip6s" ;;
-    *)   _pending_set="${NET}_join_pending";  _ip_store="${BASE_DIR}/${NET}-device-ips" ;;
+    *:*) IP6="$IP"; IP4=$(_ip4_for_mac "$MAC"); _pending_set="${NET}_join_pending6"; _ip_store="${BASE_DIR}/${NET}-device-ip6s" ;;
+    *)   IP4="$IP"; _pending_set="${NET}_join_pending";  _ip_store="${BASE_DIR}/${NET}-device-ips" ;;
 esac
 
 _label=$([ -n "$HOST" ] && printf '%s (%s)' "$(_html "$HOST")" "$IP" || printf '%s' "$IP")
@@ -91,8 +91,14 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
     _approver_ip="${REMOTE_ADDR:-unknown}"
     _approver_name=$(_name_for_ip "$_approver_ip")
     _approver_mac=$(_mac_for_ip "$_approver_ip")
+    case "$_approver_ip" in
+        *:*) _approver_ip6="$_approver_ip"; _approver_ip4=$([ -n "$_approver_mac" ] && _ip4_for_mac "$_approver_mac" || true) ;;
+        *)   _approver_ip4="$_approver_ip"; _approver_ip6=$([ -n "$_approver_mac" ] && _ip6_for_mac "$_approver_mac" || true) ;;
+    esac
     _approver="${_approver_name:-$_approver_ip}"
     [ "$_approver" = "*" ] && _approver="$_approver_ip"
+    [ -n "$_approver_ip4" ] && _approver="${_approver}, IPv4: ${_approver_ip4}"
+    [ -n "$_approver_ip6" ] && _approver="${_approver}, IPv6: ${_approver_ip6}"
     [ -n "$_approver_mac" ] && _approver="${_approver}, MAC: ${_approver_mac}"
 
     if [ "$_action" = approve ]; then
@@ -125,7 +131,7 @@ ${_device_detail}
 Approved by: ${_approver}
 
 The approved device can now use the internet on ${NET}."
-        _join_history_add "$NET" approved "$MAC" "$IP" "${HOST:-${_dns:-unknown}}" "$_approver" "${JOIN_HISTORY_RETENTION:-90d}"
+        _join_history_add "$NET" approved "$MAC" "$IP4" "$IP6" "${HOST:-${_dns:-unknown}}" "$_approver" "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         _msg="$(_html "${HOST:-$IP}") ($MAC) can now use the internet on ${NET}."
         _cls=ok
     else
@@ -145,7 +151,7 @@ ${_device_detail}
 Denied by: ${_approver}
 
 The denied device remains blocked from internet access on ${NET}."
-        _join_history_add "$NET" denied "$MAC" "$IP" "${HOST:-${_dns:-unknown}}" "$_approver" "${JOIN_HISTORY_RETENTION:-90d}"
+        _join_history_add "$NET" denied "$MAC" "$IP4" "$IP6" "${HOST:-${_dns:-unknown}}" "$_approver" "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         _msg="$(_html "${HOST:-$IP}") ($MAC) remains blocked from internet access on ${NET}."
         _cls=err
     fi

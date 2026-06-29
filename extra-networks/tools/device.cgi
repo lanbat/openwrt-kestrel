@@ -117,8 +117,14 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
         _approver_ip="${REMOTE_ADDR:-unknown}"
         _approver_name=$(_name_for_ip "$_approver_ip")
         _approver_mac=$(_mac_for_ip "$_approver_ip")
+        case "$_approver_ip" in
+            *:*) _approver_ip6="$_approver_ip"; _approver_ip4=$([ -n "$_approver_mac" ] && _ip4_for_mac "$_approver_mac" || true) ;;
+            *)   _approver_ip4="$_approver_ip"; _approver_ip6=$([ -n "$_approver_mac" ] && _ip6_for_mac "$_approver_mac" || true) ;;
+        esac
         _approver="${_approver_name:-$_approver_ip}"
         [ "$_approver" = "*" ] && _approver="$_approver_ip"
+        [ -n "$_approver_ip4" ] && _approver="${_approver}, IPv4: ${_approver_ip4}"
+        [ -n "$_approver_ip6" ] && _approver="${_approver}, IPv6: ${_approver_ip6}"
         [ -n "$_approver_mac" ] && _approver="${_approver}, MAC: ${_approver_mac}"
         _notify_ip="${_DEV_IP:-${_DEV_IP6:-}}"
         _dns=$([ -n "$_notify_ip" ] && nslookup "$_notify_ip" 2>/dev/null | awk '/name =/{gsub(/\.$/,"",$NF); print $NF; exit}' || true)
@@ -139,7 +145,7 @@ MAC: ${MAC}"
         [ -n "$_DEV_IP6" ] && nft add element inet fw4 "${_iface}_join_pending6" "{ ${_DEV_IP6} }" 2>/dev/null || true
         { grep -vixF "$MAC" "$_join_denied_f" 2>/dev/null; } \
             > "${_join_denied_f}.tmp" && mv "${_join_denied_f}.tmp" "$_join_denied_f" || true
-        _join_history_add "$_iface" revoked "$MAC" "${_DEV_IP:-${_DEV_IP6:-unknown}}" "${_DEV_LABEL:-${_dns:-unknown}}" "$_approver" "${JOIN_HISTORY_RETENTION:-90d}"
+        _join_history_add "$_iface" revoked "$MAC" "$_DEV_IP" "$_DEV_IP6" "${_DEV_LABEL:-${_dns:-unknown}}" "$_approver" "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         _ntfy "Access revoked — ${_iface}" default no_entry \
 "Type: Internet access revoked
 
