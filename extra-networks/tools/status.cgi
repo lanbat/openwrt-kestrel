@@ -340,7 +340,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
         [ -n "$_ipv6_prefixes" ] && _hdr_ip6=yes
         uci -q get dhcp."$_iface".dhcpv6 2>/dev/null | grep -q server && _hdr_ip6=yes || true
 
-        printf '<table><tr><th>Hostname</th><th>DNS</th><th>IPv4</th><th>Joined</th>'
+        printf '<table><tr><th>Hostname</th><th>Label</th><th>DNS</th><th>IPv4</th><th>Joined</th>'
         [ "$_hdr_ip6" = yes ] && printf '<th>IPv6</th>'
         [ "${JOIN_APPROVAL:-no}" = yes ] && printf '<th>Join access</th>'
         printf '<th>MAC</th>'
@@ -379,8 +379,12 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 'tolower($1)==tolower(m){print $2; exit}' \
                 /tmp/extra-networks-joins 2>/dev/null || true)
             [ -z "$_joined" ] && _joined="—"
-            printf '<tr><td>%s</td><td class="dim">%s</td><td>%s</td><td class="dim">%s</td>' \
-                "$_hn_disp" "$(_html "$_dns")" "$([ "$_ip" = "-" ] && echo "—" || _html "$_ip")" "$_joined"
+            _dlabel=$(awk -v m="$_mac" \
+                'tolower($1)==tolower(m){sub(/^[^\t]+\t/,""); print; exit}' \
+                "${BASE_DIR}/${_iface}-device-labels" 2>/dev/null || true)
+            printf '<tr><td>%s</td><td>%s</td><td class="dim">%s</td><td>%s</td><td class="dim">%s</td>' \
+                "$_hn_disp" "$(_html "${_dlabel:----}")" "$(_html "$_dns")" \
+                "$([ "$_ip" = "-" ] && echo "—" || _html "$_ip")" "$_joined"
             [ "$_hdr_ip6" = yes ] && printf '<td class="dim">%s</td>' "${_ipv6:----}"
             if [ "${JOIN_APPROVAL:-no}" = yes ]; then
                 _join_state="Untracked"
@@ -407,12 +411,9 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 fi
                 printf '</span></td>'
             fi
-            _dlabel=$(awk -v m="$_mac" \
-                'tolower($1)==tolower(m){sub(/^[^\t]+\t/,""); print; exit}' \
-                "${BASE_DIR}/${_iface}-device-labels" 2>/dev/null || true)
             printf '<td class="dim"><a href="/cgi-bin/device?net=%s&mac=%s">%s</a></td>' \
                 "$(_html "$_iface")" "$(_html "$_mac")" \
-                "$(_html "${_dlabel:-$_mac}")"
+                "$(_html "$_mac")"
             [ "$_hdr_sig" = yes ] && printf '<td>%s</td>' "${_sig:----}"
             [ "$_hdr_bw"  = yes ] && printf '<td>%s</td>' "${_bw:----}"
             printf '<td>%s</td></tr>\n' "$([ "${_exp_ts:-0}" -gt 0 ] 2>/dev/null && _exp_str "$_exp_ts" || echo "—")"
