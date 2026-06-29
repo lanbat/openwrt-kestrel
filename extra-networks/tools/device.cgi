@@ -499,17 +499,6 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 ${_approval_row}
 </div>
 
-<h2>Label</h2>
-<form method="POST" action="/cgi-bin/device">
-<input type="hidden" name="net" value="$(_html "$NET")">
-<input type="hidden" name="mac" value="$(_html "$MAC")">
-<input type="hidden" name="action" value="set_label">
-<div class="irow">
-<input type="text" name="label" value="$(_html "$_DEV_LABEL")" maxlength="40" placeholder="Device name" style="width:220px">
-<button type="submit">Save</button>
-</div>
-</form>
-
 <h2>Connection rate limit</h2>
 <form method="POST" action="/cgi-bin/device">
 <input type="hidden" name="net" value="$(_html "$NET")">
