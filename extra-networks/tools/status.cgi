@@ -87,6 +87,7 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 .badge-denied{color:#b71c1c;background:#ffebee}
 .badge-untracked{color:#666;background:#eeeeee}
 .badge-revoked{color:#0d47a1;background:#e3f2fd}
+.badge-connected{color:#1b5e20;background:#e8f5e9}.badge-disconnected{color:#555;background:#eee}
 .net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
 .qr{display:flex;align-items:stretch;gap:1rem}
 .qr-info{font-size:.9rem;display:flex;flex-direction:column;flex:1;min-width:0}
@@ -447,12 +448,14 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                     _actor="$_host"; _host="$_ip6"; _ip6=""
                 fi
                 _cls=$(printf '%s' "$_act" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
-                case "$_cls" in approved|denied|revoked) ;; *) _cls=untracked ;; esac
+                case "$_cls" in approved|denied|revoked|connected|disconnected) ;; *) _cls=untracked ;; esac
                 case "$_act" in
-                    approved) _badge=Approved ;;
-                    denied)   _badge=Denied ;;
-                    revoked)  _badge=Revoked ;;
-                    *)        _badge="$(_html "$_act")" ;;
+                    approved)     _badge=Approved ;;
+                    denied)       _badge=Denied ;;
+                    revoked)      _badge=Revoked ;;
+                    connected)    _badge=Connected ;;
+                    disconnected) _badge=Disconnected ;;
+                    *)            _badge="$(_html "$_act")" ;;
                 esac
                 _hlabel=$(awk -v m="$_mac" \
                     'tolower($1)==tolower(m){sub(/^[^\t]+\t/,""); print; exit}' \

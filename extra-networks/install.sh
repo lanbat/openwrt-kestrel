@@ -556,24 +556,36 @@ if [ -n "$NOTIFY_URL" ]; then
     mkdir -p /etc/hotplug.d/dhcp
     cat >/etc/hotplug.d/dhcp/50-extra-networks <<'NOTIFYEOF'
 #!/bin/sh
-[ "$ACTION" = add ] || exit 0
+[ "$ACTION" = add ] || [ "$ACTION" = del ] || exit 0
 
 BASE_DIR=/etc/extra-networks
 
-# Record join time (mac → timestamp) for the status dashboard
-_jfile=/tmp/extra-networks-joins
-{ grep -v "^${MACADDR}	" "$_jfile" 2>/dev/null
-  printf '%s\t%s\n' "$MACADDR" "$(date '+%d %b %H:%M')"; } > "${_jfile}.tmp" \
-    && mv "${_jfile}.tmp" "$_jfile" || true
+if [ "$ACTION" = add ]; then
+    # Record join time (mac → timestamp) for the status dashboard
+    _jfile=/tmp/extra-networks-joins
+    { grep -v "^${MACADDR}	" "$_jfile" 2>/dev/null
+      printf '%s\t%s\n' "$MACADDR" "$(date '+%d %b %H:%M')"; } > "${_jfile}.tmp" \
+        && mv "${_jfile}.tmp" "$_jfile" || true
+fi
 
 _router_ip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
 
 . /etc/extra-networks/_lib.sh
 for _conf in /etc/extra-networks/*-notify.conf; do
     [ -f "$_conf" ] || continue
-    unset SUBNET NOTIFY_URL IFACE_NAME NOTIFY_JOIN JOIN_APPROVAL
+    unset SUBNET NOTIFY_URL IFACE_NAME NOTIFY_JOIN JOIN_APPROVAL JOIN_HISTORY_RETENTION
     . "$_conf"
     case "$IPADDR" in "$SUBNET".*) ;; *) continue ;; esac
+
+    if [ "$ACTION" = del ]; then
+        _join_history_add "$IFACE_NAME" disconnected "$MACADDR" "$IPADDR" "" \
+            "${HOSTNAME:-unknown}" "system" "" "" "" "${JOIN_HISTORY_RETENTION:-90d}"
+        continue
+    fi
+
+    # ACTION=add
+    _join_history_add "$IFACE_NAME" connected "$MACADDR" "$IPADDR" "" \
+        "${HOSTNAME:-unknown}" "system" "" "" "" "${JOIN_HISTORY_RETENTION:-90d}"
 
     if [ "${JOIN_APPROVAL:-no}" = yes ] && [ -n "${NOTIFY_URL:-}" ]; then
         _approved="${BASE_DIR}/${IFACE_NAME}-join-approved"

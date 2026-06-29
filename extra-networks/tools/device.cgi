@@ -86,6 +86,10 @@ _DEV_LIMIT=$(awk -v m="$MAC" 'tolower($1)==tolower(m){print $2; exit}' \
     "$_limits_f" 2>/dev/null || true)
 _DEV_LIMIT="${_DEV_LIMIT:-120}"
 _DEV_DISPLAY="${_DEV_LABEL:-$MAC}"
+_DEV_SLUG=$(_slugify "${_DEV_LABEL:-}")
+_LOCAL_DOMAIN=$(uci -q get dhcp.@dnsmasq[0].domain 2>/dev/null || true)
+_LOCAL_DOMAIN="${_LOCAL_DOMAIN:-lan}"
+_DEV_FQDN="${_DEV_SLUG:+${_DEV_SLUG}.${_LOCAL_DOMAIN}}"
 _BACK_URL="/cgi-bin/device?net=${NET}&mac=${MAC}"
 _JOIN_IP="${_DEV_IP:-$_DEV_IP6}"
 _JOIN_STATE=Untracked
@@ -487,7 +491,8 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 .badge{font-size:.7rem;font-weight:700;padding:.15rem .45rem;border-radius:999px;
        text-transform:uppercase;letter-spacing:.04em;color:#fff}
 .badge-approved{background:#2e7d32}.badge-denied{background:#c62828}
-.badge-revoked{background:#e65100}
+.badge-revoked{background:#e65100}.badge-connected{background:#1565c0}
+.badge-disconnected{background:#757575}
 </style></head><body>
 <h1>$(_html "$_DEV_DISPLAY")</h1>
 <div class="sub">$(_html "$_iface") &nbsp;·&nbsp; $(_html "$MAC") &nbsp;·&nbsp; <a href="/cgi-bin/status">Dashboard</a></div>
@@ -498,6 +503,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="row"><span class="lbl">Tracked IPv4</span><span class="val">${_DEV_IP:----}</span></div>
 <div class="row"><span class="lbl">Tracked IPv6</span><span class="val">${_DEV_IP6:----}</span></div>
 <div class="row"><span class="lbl">Network</span><span class="val">$(_html "$_iface")</span></div>
+<div class="row"><span class="lbl">DNS name</span><span class="val">${_DEV_FQDN:----}</span></div>
 ${_approval_row}
 </div>
 
@@ -569,12 +575,14 @@ if [ -n "$_history_rows" ]; then
             _actor="$_hhost"; _hhost="$_ip6"; _ip6=""
         fi
         _cls=$(printf '%s' "$_act" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
-        case "$_cls" in approved|denied|revoked) ;; *) _cls=untracked ;; esac
+        case "$_cls" in approved|denied|revoked|connected|disconnected) ;; *) _cls=untracked ;; esac
         case "$_act" in
-            approved) _badge=Approved ;;
-            denied)   _badge=Denied ;;
-            revoked)  _badge=Revoked ;;
-            *)        _badge="$(_html "$_act")" ;;
+            approved)     _badge=Approved ;;
+            denied)       _badge=Denied ;;
+            revoked)      _badge=Revoked ;;
+            connected)    _badge=Connected ;;
+            disconnected) _badge=Disconnected ;;
+            *)            _badge="$(_html "$_act")" ;;
         esac
         _hip="${_ip4:-${_ip6:----}}"
         if [ -n "$_actor_mac" ]; then
