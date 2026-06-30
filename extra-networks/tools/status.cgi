@@ -398,11 +398,9 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 "${BASE_DIR}/${_iface}-device-labels" 2>/dev/null || true)
             if [ -n "$_dlabel" ]; then
                 _label_cell="$(_html "$_dlabel")"
-            elif [ "${JOIN_APPROVAL:-no}" = yes ]; then
+            else
                 _label_cell=$(printf '<form method="POST" action="/cgi-bin/approve-join" style="margin:0"><input type="hidden" name="net" value="%s"><input type="hidden" name="mac" value="%s"><input type="hidden" name="action" value="set_label"><input type="text" name="label" placeholder="Add label" maxlength="40" style="padding:.2rem .35rem;border:1px solid #ccc;border-radius:3px;font-size:.8rem"><button type="submit" style="padding:.2rem .4rem;margin-left:.2rem;font-size:.8rem;border:1px solid #aaa;border-radius:3px;background:#f5f5f5;cursor:pointer">Save</button></form>' \
                     "$(_html "$_iface")" "$(_html "$_mac")")
-            else
-                _label_cell="—"
             fi
             printf '<tr><td>%s</td><td class="dim">%s</td><td>%s</td><td class="dim">%s</td>' \
                 "$_label_cell" "$(_html "$_dns")" \

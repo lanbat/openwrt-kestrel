@@ -55,7 +55,6 @@ printf 'Content-Type: text/html\r\n\r\n'
 
 # Validate inputs
 printf '%s' "$NET" | grep -qE '^[a-z][a-z0-9_]*$' || { printf '<h1>Invalid network</h1>'; exit 0; }
-_valid_ip "$IP"                                      || { printf '<h1>Invalid IP</h1>'; exit 0; }
 printf '%s' "$MAC" | grep -qiE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' \
     || { printf '<h1>Invalid MAC</h1>'; exit 0; }
 
@@ -63,6 +62,26 @@ _load_notify "$NET"
 [ -n "${NOTIFY_URL:-}" ] \
     || { printf '<h1>Notifications not configured for %s</h1>' "$(_html "$NET")"; exit 0; }
 _iface="${IFACE_NAME:-$NET}"
+
+# Handle set_label before IP validation — saving a label doesn't require an IP
+if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" = set_label ]; then
+    _new=$(printf '%s' "$(_get_param "$_params" label)" \
+        | sed 's/+/ /g;s/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 40)
+    _safe=$(printf '%s' "$_new" | sed "s/[^a-zA-Z0-9 _.'-]//g")
+    if [ -n "$_safe" ]; then
+        _lbl_f="${BASE_DIR}/${NET}-device-labels"
+        { grep -v "^${MAC}	" "$_lbl_f" 2>/dev/null
+          printf '%s\t%s\n' "$MAC" "$_safe"; } > "${_lbl_f}.tmp" \
+            && mv "${_lbl_f}.tmp" "$_lbl_f" || true
+        _slug=$(_slugify "$_safe")
+        _write_device_dns "$_iface" "$MAC" "$_slug" \
+            "$(_ip4_for_mac "$MAC")" "$(_ip6_for_mac "$MAC")"
+    fi
+    printf '<meta http-equiv="refresh" content="0;url=/cgi-bin/status">'
+    exit 0
+fi
+
+_valid_ip "$IP" || { printf '<h1>Invalid IP</h1>'; exit 0; }
 
 APPROVED_FILE="${BASE_DIR}/${NET}-join-approved"
 PENDING_FILE="${BASE_DIR}/${NET}-join-pending"
@@ -86,24 +105,7 @@ MAC: ${MAC}"
 # POST: approve or deny
 if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
     _action=$(_get_param "$_params" action)
-    case "$_action" in approve|deny|set_label) ;; *) printf '<h1>Invalid action</h1>'; exit 0 ;; esac
-
-    if [ "$_action" = set_label ]; then
-        _new=$(printf '%s' "$(_get_param "$_params" label)" \
-            | sed 's/+/ /g;s/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 40)
-        _safe=$(printf '%s' "$_new" | sed "s/[^a-zA-Z0-9 _.'-]//g")
-        if [ -n "$_safe" ]; then
-            _lbl_f="${BASE_DIR}/${NET}-device-labels"
-            { grep -v "^${MAC}	" "$_lbl_f" 2>/dev/null
-              printf '%s\t%s\n' "$MAC" "$_safe"; } > "${_lbl_f}.tmp" \
-                && mv "${_lbl_f}.tmp" "$_lbl_f" || true
-            _slug=$(_slugify "$_safe")
-            _write_device_dns "$_iface" "$MAC" "$_slug" \
-                "$(_ip4_for_mac "$MAC")" "$(_ip6_for_mac "$MAC")"
-        fi
-        printf '<meta http-equiv="refresh" content="0;url=/cgi-bin/status">'
-        exit 0
-    fi
+    case "$_action" in approve|deny) ;; *) printf '<h1>Invalid action</h1>'; exit 0 ;; esac
 
     _approver_ip="${REMOTE_ADDR:-unknown}"
     _approver_name=$(_name_for_ip "$_approver_ip")
