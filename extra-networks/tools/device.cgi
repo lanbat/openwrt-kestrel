@@ -453,22 +453,22 @@ _approval_row=$(cat <<HTML
 HTML
 )
 
-# Build "also on" row — other networks where this MAC has been seen
-_also_on_html=""
+# Build "networks" row — all networks where this MAC has been seen (current network first)
+_networks_html="<a href=\"/cgi-bin/device?net=${_iface}&mac=${MAC}\" class=\"ok\">${_iface}</a>"
 for _ohf in "${BASE_DIR}"/*-join-history; do
     [ -f "$_ohf" ] || continue
     _on="${_ohf##*/}"; _on="${_on%-join-history}"
     [ "$_on" = "$_iface" ] && continue
     awk -v m="$MAC" -F'\t' 'tolower($4)==tolower(m){exit 0} END{exit 1}' "$_ohf" 2>/dev/null || continue
-    _also_on_html="${_also_on_html:+$_also_on_html · }<a href=\"/cgi-bin/device?net=${_on}&mac=${MAC}\">${_on}</a>"
+    _networks_html="${_networks_html} · <a href=\"/cgi-bin/device?net=${_on}&mac=${MAC}\">${_on}</a>"
 done
 for _olf in "${BASE_DIR}"/*-device-labels; do
     [ -f "$_olf" ] || continue
     _on="${_olf##*/}"; _on="${_on%-device-labels}"
     [ "$_on" = "$_iface" ] && continue
-    case "$_also_on_html" in *"?net=${_on}&"*) continue ;; esac
+    case "$_networks_html" in *"?net=${_on}&"*) continue ;; esac
     awk -v m="$MAC" 'tolower($1)==tolower(m){exit 0} END{exit 1}' "$_olf" 2>/dev/null || continue
-    _also_on_html="${_also_on_html:+$_also_on_html · }<a href=\"/cgi-bin/device?net=${_on}&mac=${MAC}\">${_on}</a>"
+    _networks_html="${_networks_html} · <a href=\"/cgi-bin/device?net=${_on}&mac=${MAC}\">${_on}</a>"
 done
 _dhcp_ip=$(awk -v m="$MAC" 'tolower($2)==tolower(m){print $3; exit}' /tmp/dhcp.leases 2>/dev/null)
 if [ -n "$_dhcp_ip" ]; then
@@ -479,11 +479,10 @@ if [ -n "$_dhcp_ip" ]; then
         [ -n "$_osub" ] && case "$_dhcp_ip" in "${_osub}."*) _on_managed=yes; break;; esac
     done
     if [ "$_on_managed" = no ]; then
-        _also_on_html="${_also_on_html:+$_also_on_html · }<a href=\"/cgi-bin/device?net=lan&mac=${MAC}\">lan</a> <span class=\"dim\">$(_html "$_dhcp_ip")</span>"
+        _networks_html="${_networks_html} · <a href=\"/cgi-bin/device?net=lan&mac=${MAC}\">lan</a> <span class=\"dim\">$(_html "$_dhcp_ip")</span>"
     fi
 fi
-_also_on_row=""
-[ -n "$_also_on_html" ] && _also_on_row="<div class=\"row\"><span class=\"lbl\">Also on</span><span class=\"val\">${_also_on_html}</span></div>"
+_networks_row="<div class=\"row\"><span class=\"lbl\">Networks</span><span class=\"val\">${_networks_html}</span></div>"
 
 printf 'Content-Type: text/html\r\n\r\n'
 
@@ -537,7 +536,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="row"><span class="lbl">Tracked IPv6</span><span class="val">${_DEV_IP6:----}</span></div>
 <div class="row"><span class="lbl">Network</span><span class="val">$(_html "$_iface")</span></div>
 <div class="row"><span class="lbl">DNS name</span><span class="val">${_DEV_DNS_DISPLAY:----}</span></div>
-${_also_on_row}
+${_networks_row}
 ${_approval_row}
 </div>
 
