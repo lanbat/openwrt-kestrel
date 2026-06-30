@@ -36,28 +36,34 @@ unset GCAL_URL GCAL_TZ_OFFSET
 
 if [ -n "${GCAL_URL:-}" ]; then
     _tomorrow_ts=$(( $(date +%s) + 86400 ))
-    _tomorrow_ymd=$(awk -v ts="$_tomorrow_ts" 'BEGIN{print strftime("%Y%m%d",ts)}')
-    _tomorrow_lbl=$(awk -v ts="$_tomorrow_ts" 'BEGIN{print strftime("%a %d %b",ts)}')
+    _tomorrow_ymd=$(date -d "@${_tomorrow_ts}" '+%Y%m%d' 2>/dev/null || \
+                    awk -v ts="${_tomorrow_ts}" 'BEGIN{print strftime("%Y%m%d",ts)}')
+    _tomorrow_lbl=$(date -d "@${_tomorrow_ts}" '+%a %d %b' 2>/dev/null || \
+                    awk -v ts="${_tomorrow_ts}" 'BEGIN{print strftime("%a %d %b",ts)}')
     _tz=${GCAL_TZ_OFFSET:-0}
 
     _ics=$(curl -sf --max-time 15 "$GCAL_URL" 2>/dev/null)
     if [ -n "$_ics" ]; then
         _events=$(printf '%s\n' "$_ics" | tr -d '\r' | \
-            awk 'BEGIN{line=""} substr($0,1,1)==" "||substr($0,1,1)=="\t"{line=line substr($0,2);next} {if(line!="")print line; line=$0} END{if(line!="")print line}' | \
+            awk '{if(substr($0,1,1)==" "){printf "%s",substr($0,2)}else{if(NR>1)printf "\n";printf "%s",$0}}END{printf "\n"}' | \
             awk -v t="$_tomorrow_ymd" -v tz="$_tz" '
             function fmt(dt,   h,m) {
                 if (length(dt) < 13) return "all day"
                 h = substr(dt,10,2)+0; m = substr(dt,12,2)+0
-                if (substr(dt,length(dt),1)=="Z") h = (h+tz%24+24)%24
-                return sprintf("%02d:%02d",h,m)
+                if (substr(dt,length(dt),1)=="Z") {
+                    h = h + tz
+                    if (h >= 24) h = h - 24
+                    if (h < 0)  h = h + 24
+                }
+                return sprintf("%02d:%02d", h, m)
             }
-            /^BEGIN:VEVENT/ { in=1; dt=""; sm="" }
+            /^BEGIN:VEVENT/ { ev=1; dt=""; sm="" }
             /^END:VEVENT/   {
-                if (in && sm!="" && substr(dt,1,8)==t) print sm " (" fmt(dt) ")"
-                in=0
+                if (ev && sm!="" && substr(dt,1,8)==t) print sm " (" fmt(dt) ")"
+                ev=0
             }
-            in && /^DTSTART/ { n=split($0,a,":"); dt=a[n]; gsub(/[^0-9TZ]/,"",dt) }
-            in && /^SUMMARY:/ { sm=substr($0,9); gsub(/\\,/,",",sm); gsub(/\\n/," ",sm) }
+            ev && /^DTSTART/  { n=split($0,a,":"); dt=a[n]; gsub(/[^0-9TZ]/,"",dt) }
+            ev && /^SUMMARY:/ { sm=substr($0,9); gsub(/\\,/,",",sm); gsub(/\\n/," ",sm) }
             ')
         if [ -n "$_events" ]; then
             _cal_section=$(printf '\nTomorrow (%s):\n%s' \
