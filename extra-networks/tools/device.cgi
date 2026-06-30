@@ -292,6 +292,19 @@ IPv4: ${_DEV_IP:-unknown}
 IPv6: ${_DEV_IP6:-unknown}
 DNS: ${_dns:-unknown}
 MAC: ${MAC}"
+        _approver_ip="${REMOTE_ADDR:-unknown}"
+        _approver_name=$(_name_for_ip "$_approver_ip")
+        _approver_mac=$(_mac_for_ip "$_approver_ip")
+        case "$_approver_ip" in
+            *:*) _approver_ip6="$_approver_ip"; _approver_ip4=$([ -n "$_approver_mac" ] && _ip4_for_mac "$_approver_mac" || true) ;;
+            *)   _approver_ip4="$_approver_ip"; _approver_ip6=$([ -n "$_approver_mac" ] && _ip6_for_mac "$_approver_mac" || true) ;;
+        esac
+        _approver="${_approver_name:-$_approver_ip}"
+        [ "$_approver" = "*" ] && _approver="$_approver_ip"
+        [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
+        _join_history_add "$_iface" deleted "$MAC" "$_DEV_IP" "$_DEV_IP6" \
+            "${_DEV_LABEL:-${_dns:-unknown}}" "$_approver" \
+            "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         # Remove all state files
         for _f in "$_labels_f" "$_ips_f" "$_ip6s_f" "$_limits_f" "$_rules_f"; do
             [ -f "$_f" ] && { grep -v "^${MAC}	" "$_f" > "${_f}.tmp" 2>/dev/null \
@@ -535,7 +548,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
        text-transform:uppercase;letter-spacing:.04em;color:#fff}
 .badge-approved{background:#2e7d32}.badge-denied{background:#c62828}
 .badge-revoked{background:#e65100}.badge-connected{background:#1565c0}
-.badge-disconnected{background:#757575}
+.badge-disconnected{background:#757575}.badge-deleted{background:#37474f}
 </style></head><body>
 <h1>$(_html "$_DEV_DISPLAY")</h1>
 <div class="sub">$(_html "$_iface") &nbsp;·&nbsp; $(_html "$MAC") &nbsp;·&nbsp; <a href="/cgi-bin/status">Dashboard</a></div>
@@ -605,9 +618,9 @@ if [ -f "$_history_f" ]; then
         while((getline ln<"/tmp/dhcp.leases")>0){split(ln,a," ");if(a[3]!=""&&a[2]!="")lm[a[3]]=a[2]}
         while(("ip neigh show" | getline ln)>0){n2=split(ln,a," ");for(i=1;i<n2;i++)if(a[i]=="lladdr"){arp[a[1]]=a[i+1];break}}
         bcls["approved"]="approved";bcls["denied"]="denied";bcls["revoked"]="revoked"
-        bcls["connected"]="connected";bcls["disconnected"]="disconnected"
+        bcls["connected"]="connected";bcls["disconnected"]="disconnected";bcls["deleted"]="deleted"
         blbl["approved"]="Approved";blbl["denied"]="Denied";blbl["revoked"]="Revoked"
-        blbl["connected"]="Connected";blbl["disconnected"]="Disconnected"
+        blbl["connected"]="Connected";blbl["disconnected"]="Disconnected";blbl["deleted"]="Deleted"
     }
     tolower($4)==tolower(mac){n++;rw[n]=$2;ra[n]=$3;ri4[n]=$5;ri6[n]=$6;rh[n]=$7;rac[n]=$8;raip[n]=$9;rmac[n]=$11}
     END{
@@ -643,9 +656,9 @@ if [ -f "$1" ]; then
     function h(s,  t){t=s;gsub(/&/,"\\&amp;",t);gsub(/</,"\\&lt;",t);gsub(/>/,"\\&gt;",t);gsub(/"/,"\\&quot;",t);return t}
     BEGIN{
         bcls["approved"]="approved";bcls["denied"]="denied";bcls["revoked"]="revoked"
-        bcls["connected"]="connected";bcls["disconnected"]="disconnected"
+        bcls["connected"]="connected";bcls["disconnected"]="disconnected";bcls["deleted"]="deleted"
         blbl["approved"]="Approved";blbl["denied"]="Denied";blbl["revoked"]="Revoked"
-        blbl["connected"]="Connected";blbl["disconnected"]="Disconnected"
+        blbl["connected"]="Connected";blbl["disconnected"]="Disconnected";blbl["deleted"]="Deleted"
     }
     tolower($11)==tolower(mac){
         fn=FILENAME; sub(base,"",fn); sub(/-join-history$/,"",fn)

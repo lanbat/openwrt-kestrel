@@ -88,6 +88,7 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 .badge-untracked{color:#666;background:#eeeeee}
 .badge-revoked{color:#0d47a1;background:#e3f2fd}
 .badge-connected{color:#1b5e20;background:#e8f5e9}.badge-disconnected{color:#555;background:#eee}
+.badge-deleted{color:#fff;background:#37474f}
 .net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
 .qr{display:flex;align-items:stretch;gap:1rem}
 .qr-info{font-size:.9rem;display:flex;flex-direction:column;flex:1;min-width:0}
@@ -474,9 +475,9 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
                 while((getline ln<"/tmp/dhcp.leases")>0){split(ln,a," ");if(a[3]!=""&&a[2]!="")lm[a[3]]=a[2]}
                 while(("ip neigh show" | getline ln)>0){n2=split(ln,a," ");for(i=1;i<n2;i++)if(a[i]=="lladdr"){arp[a[1]]=a[i+1];break}}
                 bcls["approved"]="approved";bcls["denied"]="denied";bcls["revoked"]="revoked"
-                bcls["connected"]="connected";bcls["disconnected"]="disconnected"
+                bcls["connected"]="connected";bcls["disconnected"]="disconnected";bcls["deleted"]="deleted"
                 blbl["approved"]="Approved";blbl["denied"]="Denied";blbl["revoked"]="Revoked"
-                blbl["connected"]="Connected";blbl["disconnected"]="Disconnected"
+                blbl["connected"]="Connected";blbl["disconnected"]="Disconnected";blbl["deleted"]="Deleted"
             }
             {n++;rw[n]=$2;ra[n]=$3;rm[n]=$4;ri4[n]=$5;ri6[n]=$6;rh[n]=$7;rac[n]=$8;rami[n]=$9;rami6[n]=$10;rmac[n]=$11}
             END{
