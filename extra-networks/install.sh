@@ -571,7 +571,6 @@ if [ -n "$NOTIFY_URL" ]; then
 BASE_DIR=/etc/extra-networks
 
 if [ "$ACTION" = add ]; then
-    # Record join time (mac → timestamp) for the status dashboard
     _jfile=/tmp/extra-networks-joins
     { grep -v "^${MACADDR}	" "$_jfile" 2>/dev/null
       printf '%s\t%s\n' "$MACADDR" "$(date '+%d %b %H:%M')"; } > "${_jfile}.tmp" \
@@ -593,7 +592,7 @@ for _conf in /etc/extra-networks/*-notify.conf; do
         continue
     fi
 
-    # ACTION=add — capture last-seen time before the current event enters history
+    # Capture last-seen before adding this event to history
     _hist_f="${BASE_DIR}/${IFACE_NAME}-join-history"
     _last_seen=0
     [ -f "$_hist_f" ] && _last_seen=$(awk -F'\t' -v m="$MACADDR" \
@@ -602,44 +601,15 @@ for _conf in /etc/extra-networks/*-notify.conf; do
     _join_history_add "$IFACE_NAME" connected "$MACADDR" "$IPADDR" "" \
         "${HOSTNAME:-unknown}" "system" "" "" "" "${JOIN_HISTORY_RETENTION:-90d}"
 
-    # Absence notification — fires when device returns after configurable gap
-    if [ -n "${REJOIN_NOTIFY_AFTER:-}" ] && [ "${_last_seen:-0}" -gt 0 ] \
-            && [ -n "${NOTIFY_URL:-}" ]; then
-        _thresh=$(_duration_secs "$REJOIN_NOTIFY_AFTER")
-        _absent=$(( $(date +%s) - _last_seen ))
-        if [ "$_absent" -gt "$_thresh" ]; then
-            _rlabel=$(_label_for_mac "$MACADDR" "$IFACE_NAME")
-            [ "$_rlabel" = "$MACADDR" ] && [ -n "${HOSTNAME:-}" ] && _rlabel="$HOSTNAME"
-            if [ "$_absent" -ge 86400 ]; then
-                _d=$(( _absent / 86400 ))
-                _absent_str="${_d} day$([ "$_d" = 1 ] || printf 's')"
-            elif [ "$_absent" -ge 3600 ]; then
-                _h=$(( _absent / 3600 ))
-                _absent_str="${_h} hour$([ "$_h" = 1 ] || printf 's')"
-            else
-                _min=$(( _absent / 60 ))
-                _absent_str="${_min} minute$([ "$_min" = 1 ] || printf 's')"
-            fi
-            _device_url="http://${_router_ip}/cgi-bin/device?net=${IFACE_NAME}&mac=${MACADDR}"
-            _ntfy "Back online — ${IFACE_NAME}" default mobile_phone_back \
-"${_rlabel} — ${MACADDR} (${IPADDR}) returned after ${_absent_str} away." \
-                "view, Device, ${_device_url}"
-        fi
-    fi
+    [ -n "${NOTIFY_URL:-}" ] || continue
 
-    if [ "${JOIN_APPROVAL:-no}" = yes ] && [ -n "${NOTIFY_URL:-}" ]; then
+    _device_url="http://${_router_ip}/cgi-bin/device?net=${IFACE_NAME}&mac=${MACADDR}"
+
+    # JOIN_APPROVAL gate — pending devices get an approval request, not a join notification
+    if [ "${JOIN_APPROVAL:-no}" = yes ]; then
         _approved="${BASE_DIR}/${IFACE_NAME}-join-approved"
         _pending="${BASE_DIR}/${IFACE_NAME}-join-pending"
-        if grep -qF "$MACADDR" "$_approved" 2>/dev/null; then
-            _approved_ips="${BASE_DIR}/${IFACE_NAME}-join-approved-ips"
-            { grep -v "^${MACADDR} " "$_approved_ips" 2>/dev/null
-              printf '%s %s\n' "$MACADDR" "$IPADDR"; } >"${_approved_ips}.tmp" \
-                && mv "${_approved_ips}.tmp" "$_approved_ips" || true
-            nft add element inet fw4 ${IFACE_NAME}_join_approved_ips "{ $IPADDR }" 2>/dev/null || true
-            [ "${NOTIFY_JOIN:-no}" = yes ] && \
-                _ntfy "Device joined — $IFACE_NAME" low "" \
-"${HOSTNAME:-unknown} ($MACADDR) joined $IFACE_NAME at $IPADDR."
-        else
+        if ! grep -qF "$MACADDR" "$_approved" 2>/dev/null; then
             nft add element inet fw4 ${IFACE_NAME}_join_pending "{ $IPADDR }" 2>/dev/null || true
             { grep -v "^${MACADDR} " "$_pending" 2>/dev/null
               printf '%s %s\n' "$MACADDR" "$IPADDR"; } >"${_pending}.tmp" \
@@ -648,12 +618,45 @@ for _conf in /etc/extra-networks/*-notify.conf; do
             _ntfy "Join request — ${IFACE_NAME}" default wifi \
 "${HOSTNAME:-unknown} ($MACADDR) joined ${IFACE_NAME} at $IPADDR and needs internet approval." \
                 "view, Approve, ${_approve_url}"
+            continue
         fi
-    else
+        # Approved — update IP mapping so nft set stays current
+        _approved_ips="${BASE_DIR}/${IFACE_NAME}-join-approved-ips"
+        { grep -v "^${MACADDR} " "$_approved_ips" 2>/dev/null
+          printf '%s %s\n' "$MACADDR" "$IPADDR"; } >"${_approved_ips}.tmp" \
+            && mv "${_approved_ips}.tmp" "$_approved_ips" || true
+        nft add element inet fw4 ${IFACE_NAME}_join_approved_ips "{ $IPADDR }" 2>/dev/null || true
+    fi
+
+    # Two-path join notification: the label is the acknowledgement signal.
+    # Unlabelled → notify every join (prompts labelling). Labelled → notify only after long absence.
+    _label=$(_label_for_mac "$MACADDR" "$IFACE_NAME")
+    if [ "$_label" = "$MACADDR" ]; then
         [ "${NOTIFY_JOIN:-no}" = yes ] || continue
-        [ -n "${NOTIFY_URL:-}" ] || continue
-        _ntfy "Device joined — $IFACE_NAME" low "" \
-"${HOSTNAME:-unknown} ($MACADDR) joined $IFACE_NAME at $IPADDR."
+        _display="${MACADDR}"
+        [ -n "${HOSTNAME:-}" ] && _display="${MACADDR} (${HOSTNAME})"
+        _ntfy "Unknown device — ${IFACE_NAME}" default wifi \
+"${_display} joined ${IFACE_NAME} at ${IPADDR}." \
+            "view, Label, ${_device_url}"
+    else
+        [ -n "${REJOIN_NOTIFY_AFTER:-}" ] || continue
+        [ "${_last_seen:-0}" -gt 0 ] || continue
+        _thresh=$(_duration_secs "$REJOIN_NOTIFY_AFTER")
+        _absent=$(( $(date +%s) - _last_seen ))
+        [ "$_absent" -gt "$_thresh" ] || continue
+        if [ "$_absent" -ge 86400 ]; then
+            _d=$(( _absent / 86400 ))
+            _absent_str="${_d} day$([ "$_d" = 1 ] || printf 's')"
+        elif [ "$_absent" -ge 3600 ]; then
+            _h=$(( _absent / 3600 ))
+            _absent_str="${_h} hour$([ "$_h" = 1 ] || printf 's')"
+        else
+            _min=$(( _absent / 60 ))
+            _absent_str="${_min} minute$([ "$_min" = 1 ] || printf 's')"
+        fi
+        _ntfy "Back online — ${IFACE_NAME}" default mobile_phone_back \
+"${_label} — ${MACADDR} (${IPADDR}) returned after ${_absent_str} away." \
+            "view, Device, ${_device_url}"
     fi
 done
 NOTIFYEOF
