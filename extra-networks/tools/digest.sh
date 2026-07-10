@@ -32,16 +32,16 @@ hostname=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo router)
 _up=$(awk '{print $1}' /proc/uptime 2>/dev/null)
 _up_str=$(awk -v s="${_up:-0}" 'BEGIN{
     d=int(s/86400); h=int((s%86400)/3600)
-    if(d>0) printf "%dd %dh",d,h; else printf "%dh",h
+    if(d>0) printf "%d day%s %d hour%s",d,(d!=1?"s":""),h,(h!=1?"s":"")
+    else    printf "%d hour%s",h,(h!=1?"s":"")
 }')
-_load=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
 _mem_pct=$(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%.0f",(t-a)*100/t}' \
            /proc/meminfo 2>/dev/null)
-_sys_line="System: up ${_up_str}, load ${_load:-?}, mem ${_mem_pct:-?}% used"
+_sys_line="Router up ${_up_str}, memory ${_mem_pct:-?}% used"
 
 # ── Google Calendar: events in next 7 days ────────────────────────────────────
 
-_cal_section=""
+_cal_top=""
 unset GCAL_URL GCAL_TZ_OFFSET
 [ -f "${BASE_DIR}/config" ] && . "${BASE_DIR}/config"
 
@@ -105,8 +105,8 @@ if [ -n "${GCAL_URL:-}" ]; then
             ev && /^SUMMARY:/ { sm=substr($0,9); gsub(/\\,/,",",sm); gsub(/\\n/," ",sm) }
             ' | sort | awk -F'\t' '{print $2}')
         if [ -n "$_events" ]; then
-            _cal_section=$(printf '\n\nUpcoming events:\n%s' \
-                "$(printf '%s\n' "$_events" | awk '{print "• "$0}')")
+            _cal_top="This week:
+$(printf '%s\n' "$_events" | awk '{print "• "$0}')"
         fi
     fi
 fi
@@ -119,43 +119,56 @@ for _vpnconf in /etc/split-routing/vpn-*.conf; do
     unset VPN_IFACE ROUTE_TABLE FWMARK
     . "$_vpnconf"
     [ -n "${VPN_IFACE:-}" ] || continue
+    _tier=$(basename "$_vpnconf" .conf | sed 's/^vpn-//')
+    _tier_upper=$(printf '%s' "$_tier" | tr 'a-z' 'A-Z')
     _if_up=no; ip link show "$VPN_IFACE" 2>/dev/null | grep -q "LOWER_UP" && _if_up=yes
     _rule=no;  ip rule show 2>/dev/null | grep -q "lookup ${ROUTE_TABLE:-}" && _rule=yes
     _rt=no;    ip route show table "${ROUTE_TABLE:-}" 2>/dev/null | grep -q "^default" && _rt=yes
-    [ "$_if_up$_rule$_rt" = yesyesyes ] && _st=up || _st=DOWN
+    [ "$_if_up$_rule$_rt" = yesyesyes ] && _st="running" || _st="offline"
     _vpn_section="${_vpn_section:+${_vpn_section}
-}VPN (${VPN_IFACE}): ${_st}"
+}${_tier_upper} VPN: ${_st}"
 done
 
 # ── Routing set sizes ─────────────────────────────────────────────────────────
 
-_sets_section=""
+_sets_line=""
 if [ -d /etc/split-routing ]; then
-    _sets_body=""
+    _sets_ok=1; _sets_any=0
     for _conf in /etc/split-routing/vpn-*.conf; do
         [ -f "$_conf" ] || continue
         _tier=$(basename "$_conf" .conf | sed 's/^vpn-//')
         unset VPN_IFACE DNS_CATS RESOLVE_CATS
         . "$_conf"
         for _c in ${DNS_CATS:-}; do
+            _sets_any=1
             _n=$(nft list set inet fw4 "dns_${_tier}_${_c}4" 2>/dev/null \
                  | grep -c 'expires' || echo 0)
-            _sets_body="${_sets_body:+${_sets_body}
-}  dns_${_tier}_${_c}: ${_n}"
+            [ "${_n:-0}" = "0" ] && _sets_ok=0
         done
         for _c in ${RESOLVE_CATS:-}; do
+            _sets_any=1
             _n=$(nft list set inet fw4 "resolve_${_tier}_${_c}4" 2>/dev/null \
                  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | wc -l | tr -d ' ')
-            _sets_body="${_sets_body:+${_sets_body}
-}  resolve_${_tier}_${_c}: ${_n}"
+            [ "${_n:-0}" = "0" ] && _sets_ok=0
         done
     done
-    _log_ts=$(stat -c %Y /tmp/routing-sets.log 2>/dev/null || echo 0)
-    _log_age=""
-    [ "${_log_ts:-0}" -gt 0 ] && \
-        _log_age=" (last refresh $(( ($(date +%s) - _log_ts) / 3600 ))h ago)"
-    [ -n "$_sets_body" ] && _sets_section="Routing sets${_log_age}:
-${_sets_body}"
+    if [ "$_sets_any" = 1 ]; then
+        _log_ts=$(stat -c %Y /tmp/routing-sets.log 2>/dev/null || echo 0)
+        _log_age=""
+        if [ "${_log_ts:-0}" -gt 0 ]; then
+            _age_secs=$(( $(date +%s) - _log_ts ))
+            if [ "$_age_secs" -lt 3600 ]; then
+                _log_age=", refreshed $(( _age_secs / 60 )) minutes ago"
+            else
+                _log_age=", refreshed $(( _age_secs / 3600 )) hours ago"
+            fi
+        fi
+        if [ "$_sets_ok" = 0 ]; then
+            _sets_line="Blocklists: some lists are empty${_log_age}"
+        else
+            _sets_line="Blocklists: up to date${_log_age}"
+        fi
+    fi
 fi
 
 # ── WireGuard server peer activity ────────────────────────────────────────────
@@ -174,16 +187,22 @@ for _wg_if in $(wg show interfaces 2>/dev/null); do
 $(wg show "$_wg_if" dump 2>/dev/null | tail -n +2)
 WGEOF
     [ "$_total" -gt 0 ] && _wg_section="${_wg_section:+${_wg_section}
-}WireGuard (${_wg_if}): ${_active}/${_total} peers active in last 24h"
+}VPN server: ${_active} of ${_total} client$([ "$_total" = 1 ] || printf 's') connected today"
 done
 
-# ── Blocked access log counts since boot ─────────────────────────────────────
+# ── Access log counts since boot ──────────────────────────────────────────────
 
 _log_lines=$(logread 2>/dev/null)
 _lan_reqs=$(printf '%s\n' "$_log_lines" | grep -c 'EXTNET-2LAN' || echo 0)
 _deny=$(printf '%s\n' "$_log_lines" | grep -c 'EXTNET-DENY' || echo 0)
 unset _log_lines
-_activity_line="${_lan_reqs:-0} LAN requests, ${_deny:-0} rejections since boot"
+_activity_line=""
+_activity_parts=""
+[ "${_lan_reqs:-0}" -gt 0 ] && \
+    _activity_parts="${_lan_reqs} access request$([ "$_lan_reqs" = 1 ] || printf 's')"
+[ "${_deny:-0}" -gt 0 ] && \
+    _activity_parts="${_activity_parts:+${_activity_parts}, }${_deny} device$([ "$_deny" = 1 ] || printf 's') blocked"
+[ -n "$_activity_parts" ] && _activity_line="${_activity_parts} since last restart"
 
 # ── Access rules expiring today or tomorrow ───────────────────────────────────
 
@@ -207,58 +226,74 @@ crontab -l 2>/dev/null | grep 'allow-service.sh remove' | while IFS= read -r _cl
     fi
     _dst=$(uci -q get firewall."$_rname".dest_ip   2>/dev/null || echo "?")
     _port=$(uci -q get firewall."$_rname".dest_port 2>/dev/null || echo "?")
-    _proto=$(uci -q get firewall."$_rname".proto    2>/dev/null || echo "?")
-    printf '  • %s:%s/%s — %s\n' "$_dst" "$_port" "$_proto" "$_when"
+    printf '• Access for %s → port %s — %s\n' "$_dst" "$_port" "$_when"
 done > "$_expiry_tmp"
 _expiry_section=""
 [ -s "$_expiry_tmp" ] && _expiry_section="
+
 Expiring soon:
 $(cat "$_expiry_tmp")"
 rm -f "$_expiry_tmp"
 
-# ── Per-network digest ────────────────────────────────────────────────────────
+# ── Collect per-network traffic and unique notify URLs ────────────────────────
 
-seen_urls=""
+_networks_section=""
+_notify_urls=""
 for _conf in "${BASE_DIR}"/*-notify.conf; do
     [ -f "$_conf" ] || continue
-    unset NOTIFY_URL SUBNET IFACE_NAME BANDWIDTH_THRESHOLD_MB
+    unset NOTIFY_URL SUBNET IFACE_NAME BANDWIDTH_THRESHOLD_MB DESCRIPTION
     . "$_conf"
-    [ -z "${NOTIFY_URL:-}" ] && continue
-    _iface="$IFACE_NAME"
-    [ -z "$_iface" ] && continue
+    [ -z "${IFACE_NAME:-}" ] && continue
 
+    _iface="$IFACE_NAME"
     _rx=$(_nft_bytes "${_iface}_counter" in)
     _tx=$(_nft_bytes "${_iface}_counter" out)
     _dc=$(awk -v s="${SUBNET}." '$3~s{c++} END{print c+0}' /tmp/dhcp.leases 2>/dev/null)
-    _rules=$(uci show firewall 2>/dev/null \
-        | grep -c "^firewall\.allow_lan_${_iface}" || echo 0)
-
     _dc_str=$([ "${_dc:-0}" = 1 ] && echo "1 device" || echo "${_dc:-0} devices")
-    _rules_str=$([ "${_rules:-0}" = 1 ] && echo "1 LAN rule" || echo "${_rules:-0} LAN rules")
+    _display="${DESCRIPTION:-$(printf '%s' "$_iface" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')}"
 
-    _body="${_sys_line}
+    _networks_section="${_networks_section:+${_networks_section}
 
-${_vpn_section:+${_vpn_section}
+}${_display} — ${_dc_str}
+↓ $(_human "$_rx")  ↑ $(_human "$_tx")"
 
-}${_sets_section:+${_sets_section}
+    [ -n "${NOTIFY_URL:-}" ] || continue
+    case " $_notify_urls " in *" $NOTIFY_URL "*) ;; *)
+        _notify_urls="${_notify_urls:+${_notify_urls} }${NOTIFY_URL}" ;;
+    esac
+done
 
-}${_wg_section:+${_wg_section}
+# ── Send one digest per unique notify URL ─────────────────────────────────────
 
-}${_iface} — ${_dc_str}
-  ↓ $(_human "$_rx")  ↑ $(_human "$_tx")
-  ${_rules_str} | ${_activity_line}${_expiry_section}${_cal_section}
+for _url in $_notify_urls; do
+    _body="${_cal_top:+${_cal_top}
+
+}${_sys_line}"
+    [ -n "$_vpn_section" ]      && _body="${_body}
+
+${_vpn_section}"
+    [ -n "$_networks_section" ] && _body="${_body}
+
+${_networks_section}"
+    _meta=""
+    [ -n "$_wg_section" ]    && _meta="${_meta:+${_meta}
+}${_wg_section}"
+    [ -n "$_sets_line" ]     && _meta="${_meta:+${_meta}
+}${_sets_line}"
+    [ -n "$_activity_line" ] && _meta="${_meta:+${_meta}
+}${_activity_line}"
+    [ -n "$_meta" ]          && _body="${_body}
+
+${_meta}"
+    [ -n "$_expiry_section" ] && _body="${_body}${_expiry_section}"
+    _body="${_body}
 
 Dashboard: ${_dashboard_url}"
 
-    case " $seen_urls " in *" $NOTIFY_URL "*) ;;
-    *)
-        seen_urls="$seen_urls $NOTIFY_URL"
-        curl -sf -X POST "$NOTIFY_URL" \
-            -H "Title: Daily digest — ${hostname}" \
-            -H "Priority: low" \
-            -H "Tags: bar_chart" \
-            -H "Actions: view, Dashboard, ${_dashboard_url}" \
-            -d "$_body" >/dev/null &
-        ;;
-    esac
+    curl -sf -X POST "$_url" \
+        -H "Title: Daily digest — ${hostname}" \
+        -H "Priority: low" \
+        -H "Tags: bar_chart" \
+        -H "Actions: view, Dashboard, ${_dashboard_url}" \
+        -d "$_body" >/dev/null &
 done
