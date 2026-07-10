@@ -42,6 +42,7 @@ SHOW_QR="${SHOW_QR:-no}"
 NOTIFY_JOIN="${NOTIFY_JOIN:-no}"
 JOIN_APPROVAL="${JOIN_APPROVAL:-no}"
 JOIN_HISTORY_RETENTION="${JOIN_HISTORY_RETENTION:-90d}"
+REJOIN_NOTIFY_AFTER="${REJOIN_NOTIFY_AFTER:-}"
 ROTATE_PASSWORD="${ROTATE_PASSWORD:-no}"
 DEVICE_CONTROL="${DEVICE_CONTROL:-no}"
 DESCRIPTION="${DESCRIPTION:-}"
@@ -543,12 +544,12 @@ fi
 # NOTIFY_URL is unset. NOTIFY_URL-dependent features (dhcp hook, CGIs, crons)
 # are only set up when NOTIFY_URL is provided.
 
-{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nDNS_SERVER_V6=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\nNOTIFY_JOIN=%s\nJOIN_APPROVAL=%s\nJOIN_HISTORY_RETENTION=%s\nROTATE_PASSWORD=%s\nDEVICE_CONTROL=%s\n' \
+{ printf 'SUBNET=%s\nNOTIFY_URL=%s\nIFACE_NAME=%s\nDEFAULT_DURATION=%s\nMAX_DURATION=%s\nREASON_REQUIRED=%s\nBANDWIDTH_THRESHOLD_MB=%s\nRATE_LIMIT=%s\nRATE_LIMIT_PER_DEVICE=%s\nDNS_SERVER=%s\nDNS_SERVER_V6=%s\nISOLATE=%s\nLAN_ACCESS=%s\nDOT=%s\nSHOW_QR=%s\nNOTIFY_JOIN=%s\nJOIN_APPROVAL=%s\nJOIN_HISTORY_RETENTION=%s\nREJOIN_NOTIFY_AFTER=%s\nROTATE_PASSWORD=%s\nDEVICE_CONTROL=%s\n' \
     "$SUBNET" "$NOTIFY_URL" "$IFACE" \
     "$DEFAULT_DURATION" "$MAX_DURATION" "$REASON_REQUIRED" "$BANDWIDTH_THRESHOLD_MB" \
     "${RATE_LIMIT:-}" "${RATE_LIMIT_PER_DEVICE:-}" "$DNS_SERVER" "${DNS_SERVER_V6:-}" \
     "$ISOLATE" "${LAN_ACCESS:-no}" "$DOT" "$SHOW_QR" "$NOTIFY_JOIN" "$JOIN_APPROVAL" \
-    "$JOIN_HISTORY_RETENTION" "$ROTATE_PASSWORD" "$DEVICE_CONTROL"
+    "$JOIN_HISTORY_RETENTION" "${REJOIN_NOTIFY_AFTER:-}" "$ROTATE_PASSWORD" "$DEVICE_CONTROL"
   # DESCRIPTION may contain spaces so it must be single-quoted in the conf file.
   printf "DESCRIPTION='%s'\n" "${DESCRIPTION:-}"; } \
     >"${BASE_DIR}/${IFACE}-notify.conf"
@@ -582,7 +583,7 @@ _router_ip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); p
 . /etc/extra-networks/_lib.sh
 for _conf in /etc/extra-networks/*-notify.conf; do
     [ -f "$_conf" ] || continue
-    unset SUBNET NOTIFY_URL IFACE_NAME NOTIFY_JOIN JOIN_APPROVAL JOIN_HISTORY_RETENTION
+    unset SUBNET NOTIFY_URL IFACE_NAME NOTIFY_JOIN JOIN_APPROVAL JOIN_HISTORY_RETENTION REJOIN_NOTIFY_AFTER
     . "$_conf"
     case "$IPADDR" in "$SUBNET".*) ;; *) continue ;; esac
 
@@ -592,9 +593,36 @@ for _conf in /etc/extra-networks/*-notify.conf; do
         continue
     fi
 
-    # ACTION=add
+    # ACTION=add — capture last-seen time before the current event enters history
+    _hist_f="${BASE_DIR}/${IFACE_NAME}-join-history"
+    _last_seen=0
+    [ -f "$_hist_f" ] && _last_seen=$(awk -F'\t' -v m="$MACADDR" \
+        'tolower($4)==tolower(m)&&$1+0>t{t=$1+0}END{print t+0}' "$_hist_f")
+
     _join_history_add "$IFACE_NAME" connected "$MACADDR" "$IPADDR" "" \
         "${HOSTNAME:-unknown}" "system" "" "" "" "${JOIN_HISTORY_RETENTION:-90d}"
+
+    # Absence notification — fires when device returns after configurable gap
+    if [ -n "${REJOIN_NOTIFY_AFTER:-}" ] && [ "${_last_seen:-0}" -gt 0 ] \
+            && [ -n "${NOTIFY_URL:-}" ]; then
+        _thresh=$(_duration_secs "$REJOIN_NOTIFY_AFTER")
+        _absent=$(( $(date +%s) - _last_seen ))
+        if [ "$_absent" -gt "$_thresh" ]; then
+            _rlabel=$(_label_for_mac "$MACADDR" "$IFACE_NAME")
+            if [ "$_absent" -ge 86400 ]; then
+                _d=$(( _absent / 86400 ))
+                _absent_str="${_d} day$([ "$_d" = 1 ] || printf 's')"
+            elif [ "$_absent" -ge 3600 ]; then
+                _h=$(( _absent / 3600 ))
+                _absent_str="${_h} hour$([ "$_h" = 1 ] || printf 's')"
+            else
+                _min=$(( _absent / 60 ))
+                _absent_str="${_min} minute$([ "$_min" = 1 ] || printf 's')"
+            fi
+            _ntfy "Back online — ${IFACE_NAME}" default mobile_phone_back \
+"${_rlabel} (${IPADDR}) returned after ${_absent_str} away."
+        fi
+    fi
 
     if [ "${JOIN_APPROVAL:-no}" = yes ] && [ -n "${NOTIFY_URL:-}" ]; then
         _approved="${BASE_DIR}/${IFACE_NAME}-join-approved"

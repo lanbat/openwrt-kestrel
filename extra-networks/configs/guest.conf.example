@@ -30,6 +30,7 @@ REASON_REQUIRED=no               # yes = approver must enter a reason before gra
 BANDWIDTH_THRESHOLD_MB=0         # alert when a device transfers this many MB in a session; 0 = disabled
 SHOW_QR=yes                      # yes = show WiFi QR code and password in the status dashboard
 NOTIFY_JOIN=yes                  # yes = send a push notification each time a device joins
+REJOIN_NOTIFY_AFTER=             # notify when a known device reconnects after this absence (e.g. 7d, 12h); blank = off
 JOIN_APPROVAL=no                 # yes = block internet until owner approves each new device (requires NOTIFY_URL)
 JOIN_HISTORY_RETENTION=90d       # keep approval/denial/revoke history this long (e.g. 30d 90d 180d)
 ROTATE_PASSWORD=no               # yes = show a manual "Rotate password" button in the status dashboard
