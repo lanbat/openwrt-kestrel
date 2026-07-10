@@ -41,10 +41,21 @@ if [ -n "${GCAL_URL:-}" ]; then
             awk '{if(substr($0,1,1)==" "){printf "%s",substr($0,2)}else{if(NR>1)printf "\n";printf "%s",$0}}END{printf "\n"}' | \
             awk -v now="$(date +%s)" -v tz="${GCAL_TZ_OFFSET:-0}" '
             BEGIN {
+                win_start = now + 86400
+                win_end   = now + 7*86400 + 86399
                 for (i=1; i<=7; i++) {
                     ts = now + i*86400
                     dmap[strftime("%Y%m%d",ts)] = strftime("%a %d %b",ts)
                 }
+            }
+            function ymd_epoch(ymd,   y,m,d,i,leap,md,days) {
+                y=substr(ymd,1,4)+0; m=substr(ymd,5,2)+0; d=substr(ymd,7,2)+0
+                split("31 28 31 30 31 30 31 31 30 31 30 31",md)
+                days=0
+                for(i=1970;i<y;i++){leap=(i%4==0&&(i%100!=0||i%400==0))+0;days+=365+leap}
+                leap=(y%4==0&&(y%100!=0||y%400==0))+0; if(leap)md[2]=29
+                for(i=1;i<m;i++)days+=md[i]
+                return (days+d-1)*86400
             }
             function tparts(dt,   h,m) {
                 if (length(dt) < 13) return "0000\tall day"
@@ -56,18 +67,34 @@ if [ -n "${GCAL_URL:-}" ]; then
                 }
                 return sprintf("%02d%02d\t%02d:%02d",h,m,h,m)
             }
-            /^BEGIN:VEVENT/ { ev=1; dt=""; sm="" }
-            /^END:VEVENT/   {
+            /^BEGIN:VEVENT/ { ev=1; dt=""; sm=""; rrule="" }
+            /^END:VEVENT/ {
                 if (ev && sm!="") {
-                    dpart = substr(dt,1,8)
-                    if (dpart in dmap) {
-                        split(tparts(dt),tp,"\t")
-                        print dpart "T" tp[1] "\t" dmap[dpart] " — " sm " (" tp[2] ")"
+                    dpart=substr(dt,1,8)
+                    if (rrule!="") {
+                        freq=""; interval=1
+                        if(match(rrule,/FREQ=[A-Z]+/)){tmp=substr(rrule,RSTART,RLENGTH);sub(/FREQ=/,"",tmp);freq=tmp}
+                        if(match(rrule,/INTERVAL=[0-9]+/)){tmp=substr(rrule,RSTART,RLENGTH);sub(/INTERVAL=/,"",tmp);interval=tmp+0}
+                        if (freq=="WEEKLY") {
+                            step=interval*7*86400; base=ymd_epoch(dpart)
+                            diff=win_start-base; k=(diff>0)?int(diff/step):0
+                            occ=base+k*step; if(occ<win_start)occ+=step
+                            if (occ<=win_end) {
+                                occ_day=strftime("%Y%m%d",occ)
+                                if(occ_day in dmap){split(tparts(dt),tp,"\t");print occ_day "T" tp[1] "\t" dmap[occ_day] " — " sm " (" tp[2] ")"}
+                            }
+                        }
+                    } else {
+                        if (dpart in dmap) {
+                            split(tparts(dt),tp,"\t")
+                            print dpart "T" tp[1] "\t" dmap[dpart] " — " sm " (" tp[2] ")"
+                        }
                     }
                 }
                 ev=0
             }
             ev && /^DTSTART/  { n=split($0,a,":"); dt=a[n]; gsub(/[^0-9TZ]/,"",dt) }
+            ev && /^RRULE:/   { rrule=$0 }
             ev && /^SUMMARY:/ { sm=substr($0,9); gsub(/\\,/,",",sm); gsub(/\\n/," ",sm) }
             ' | sort | awk -F'\t' '{print $2}')
         if [ -n "$_events" ]; then
