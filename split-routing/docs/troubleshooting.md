@@ -21,10 +21,10 @@ The most common cause is dnsmasq running without `CAP_NET_ADMIN`. Without it, dn
 Test it:
 
 ```sh
-nft flush set inet fw4 dns_torrentsites4
+nft flush set inet fw4 dns_bg_torrentsites4
 nslookup thepiratebay.org 127.0.0.1 > /dev/null
 sleep 1
-nft list set inet fw4 dns_torrentsites4
+nft list set inet fw4 dns_bg_torrentsites4
 ```
 
 If the set stays empty, check:
@@ -72,9 +72,9 @@ curl -4 icanhazip.com # returns your home WAN IP (not in any set)
 
 ## dns category reports "No domains — skipping"
 
-The local file for that category (`/etc/split-routing/local-dns-<name>.txt`) is empty or contains only comments, and no remote URL is configured for it in `update-routing-sets`. Add at least one domain to the local file and re-run `update-routing-sets`.
+The local file for that category (`/etc/split-routing/local-dns-<tier>_<cat>.txt`) is empty or contains only comments, and no `DNS_URLS_<cat>` is set in the `vpn-*.conf`. Add at least one domain to the local file and re-run `update-routing-sets`.
 
-The `dns sites` category is local-only by default — it relies entirely on your `local-dns-sites.txt`.
+The `sites` category for each tier is local-only by default — it relies entirely on the corresponding `local-dns-<tier>_sites.txt`.
 
 ## update-routing-sets produces no output for several minutes
 
@@ -91,12 +91,12 @@ ps | grep nslookup
 Each category writes its own log to `/tmp/`:
 
 ```sh
-cat /tmp/dns-torrentsites.log
-cat /tmp/dns-pornsites.log
-cat /tmp/dns-sites.log
+cat /tmp/dns-bg_torrentsites.log
+cat /tmp/dns-bg_pornsites.log
+cat /tmp/dns-bg_sites.log
 cat /tmp/dns-uk_sites.log
-cat /tmp/resolve-torrenttrackers.log
-cat /tmp/resolve-sites.log
+cat /tmp/resolve-bg_torrenttrackers.log
+cat /tmp/resolve-bg_sites.log
 ```
 
 The cron job also writes a combined log:
@@ -108,7 +108,7 @@ cat /tmp/routing-sets.log
 ## Check set contents
 
 ```sh
-nft list set inet fw4 dns_torrentsites4
-nft list set inet fw4 dns_pornsites4
-nft list set inet fw4 resolve_torrenttrackers4
+nft list set inet fw4 dns_bg_torrentsites4
+nft list set inet fw4 dns_bg_pornsites4
+nft list set inet fw4 resolve_bg_torrenttrackers4
 ```
