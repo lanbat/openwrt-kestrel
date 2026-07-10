@@ -281,13 +281,15 @@ cat >"$HOTPLUG" <<'EOF'
 . /etc/split-routing/config
 ip link show "$VPN_IFACE" 2>/dev/null | grep -q "LOWER_UP" || exit 0
 
-ip    rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null || true
+while ip    rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
 ip    rule add fwmark "$FWMARK" lookup "$ROUTE_TABLE"
 ip    route replace default dev "$VPN_IFACE" table "$ROUTE_TABLE"
 if [ "$ROUTE_IPV6" = yes ]; then
-  ip -6 rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null || true
+  while ip -6 rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
   ip -6 rule add fwmark "$FWMARK" lookup "$ROUTE_TABLE"
   ip -6 route replace default dev "$VPN_IFACE" table "$ROUTE_TABLE"
+else
+  while ip -6 rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
 fi
 EOF
 chmod 0755 "$HOTPLUG"
