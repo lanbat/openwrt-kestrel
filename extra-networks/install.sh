@@ -620,8 +620,10 @@ for _conf in /etc/extra-networks/*-notify.conf; do
                 _min=$(( _absent / 60 ))
                 _absent_str="${_min} minute$([ "$_min" = 1 ] || printf 's')"
             fi
+            _device_url="http://${_router_ip}/cgi-bin/device?net=${IFACE_NAME}&mac=${MACADDR}"
             _ntfy "Back online — ${IFACE_NAME}" default mobile_phone_back \
-"${_rlabel} — ${MACADDR} (${IPADDR}) returned after ${_absent_str} away."
+"${_rlabel} — ${MACADDR} (${IPADDR}) returned after ${_absent_str} away." \
+                "view, Device, ${_device_url}"
         fi
     fi
 
