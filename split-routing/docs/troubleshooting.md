@@ -5,9 +5,10 @@
 Run this on the router to see everything at once:
 
 ```sh
-echo "=== mark rules ===" && nft list chain inet fw4 mangle_prerouting
-echo "=== ip rule ===" && ip rule show | grep fwmark
-echo "=== routing table ===" && ip route show table 100
+echo "=== mark chain ===" && nft list chain inet fw4 split_routing_mark
+echo "=== ip rules ===" && ip -4 rule show | grep fwmark && ip -6 rule show | grep fwmark
+echo "=== routing tables ===" && for f in /etc/split-routing/vpn-*.conf; do
+  . "$f"; echo "table $ROUTE_TABLE ($VPN_IFACE):"; ip route show table "$ROUTE_TABLE" 2>/dev/null; done
 echo "=== set sizes ===" && for s in $(nft list sets inet fw4 | grep -o 'set [a-z_]*4' | awk '{print $2}'); do
   echo "$s: $(nft list set inet fw4 $s | grep -c expires || true) dynamic / $(nft list set inet fw4 $s | grep -c '\.' || true) interval"
 done
@@ -44,25 +45,20 @@ If the capabilities file is missing, run `sh install.sh` — it creates the file
 
 ## Routing stops working after reboot or fw4 reload
 
-`fw4 reload` (triggered by WAN/PPPoE reconnects) wipes `mangle_prerouting`. The `99-mullvad-routing` hotplug script re-adds the mark rules automatically on every interface up event, as long as the VPN interface is `LOWER_UP`.
+The `99-mullvad-routing` hotplug script restores policy routing rules on every interface up event. The nft mark chain survives `fw4 reload` automatically (it lives in `/etc/nftables.d/`).
 
-Check if the chain is empty:
+Check the mark chain and rules:
 
 ```sh
-nft list chain inet fw4 mangle_prerouting
+nft list chain inet fw4 split_routing_mark
+ip -4 rule show | grep fwmark   # one line per VPN tier
+ip -6 rule show | grep fwmark
 ```
 
-If it is, trigger the hotplug script manually:
+If the ip rules are missing, trigger the hotplug manually:
 
 ```sh
 ACTION=ifup sh /etc/hotplug.d/iface/99-mullvad-routing
-```
-
-If the chain is populated but routing still doesn't work, check the ip rule and routing table:
-
-```sh
-ip rule show | grep fwmark   # should show: fwmark 0x1 lookup 100
-ip route show table 100      # should show: default dev <vpn-interface>
 ```
 
 ## Testing routing from a client device
@@ -98,6 +94,7 @@ Each category writes its own log to `/tmp/`:
 cat /tmp/dns-torrentsites.log
 cat /tmp/dns-pornsites.log
 cat /tmp/dns-sites.log
+cat /tmp/dns-uk_sites.log
 cat /tmp/resolve-torrenttrackers.log
 cat /tmp/resolve-sites.log
 ```
