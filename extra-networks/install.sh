@@ -609,6 +609,7 @@ for _conf in /etc/extra-networks/*-notify.conf; do
         _absent=$(( $(date +%s) - _last_seen ))
         if [ "$_absent" -gt "$_thresh" ]; then
             _rlabel=$(_label_for_mac "$MACADDR" "$IFACE_NAME")
+            [ "$_rlabel" = "$MACADDR" ] && [ -n "${HOSTNAME:-}" ] && _rlabel="$HOSTNAME"
             if [ "$_absent" -ge 86400 ]; then
                 _d=$(( _absent / 86400 ))
                 _absent_str="${_d} day$([ "$_d" = 1 ] || printf 's')"
