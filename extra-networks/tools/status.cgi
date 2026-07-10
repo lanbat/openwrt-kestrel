@@ -131,22 +131,27 @@ printf '</div>\n'
 
 # ── VPN ────────────────────────────────────────────────────────────────────────
 
-VPN_CFG=/etc/split-routing/config
-_vpn_iface=""
-if [ -f "$VPN_CFG" ]; then
-    unset VPN_IFACE ROUTE_TABLE FWMARK NOTIFY_URL
-    . "$VPN_CFG"
-    _vpn_iface="${VPN_IFACE:-}"
-    _if_up=no; ip link show "$VPN_IFACE" 2>/dev/null | grep -q "LOWER_UP" && _if_up=yes
-    _rule=no;  ip rule show 2>/dev/null | grep -q "lookup ${ROUTE_TABLE}" && _rule=yes
-    _rt=no;    ip route show table "$ROUTE_TABLE" 2>/dev/null | grep -q "^default" && _rt=yes
-    if   [ "$_if_up$_rule$_rt" = yesyesyes ]; then _vc=ok;   _vl="Up"
-    elif [ "$_if_up" = yes ];                  then _vc=warn; _vl="Up — routing fault"
-    else                                            _vc=warn; _vl="Down"
-    fi
+_vpn_ifaces=""
+if [ -d /etc/split-routing ] && ls /etc/split-routing/vpn-*.conf >/dev/null 2>&1; then
     printf '<h2>VPN</h2><div class="card">'
-    printf '<div class="row"><span class="lbl">Interface</span><span class="val">%s</span></div>' "$VPN_IFACE"
-    printf '<div class="row"><span class="lbl">Status</span><span class="val %s">%s</span></div>' "$_vc" "$_vl"
+    for _vpnconf in /etc/split-routing/vpn-*.conf; do
+        [ -f "$_vpnconf" ] || continue
+        unset VPN_IFACE ROUTE_TABLE FWMARK
+        . "$_vpnconf"
+        [ -n "${VPN_IFACE:-}" ] || continue
+        _tier=$(basename "$_vpnconf" .conf | sed 's/^vpn-//')
+        _tier_upper=$(printf '%s' "$_tier" | tr 'a-z' 'A-Z')
+        _vpn_ifaces="$_vpn_ifaces $VPN_IFACE"
+        _if_up=no; ip link show "$VPN_IFACE" 2>/dev/null | grep -q "LOWER_UP" && _if_up=yes
+        _rule=no;  ip rule show 2>/dev/null | grep -q "lookup ${ROUTE_TABLE}" && _rule=yes
+        _rt=no;    ip route show table "$ROUTE_TABLE" 2>/dev/null | grep -q "^default" && _rt=yes
+        if   [ "$_if_up$_rule$_rt" = yesyesyes ]; then _vc=ok;   _vl="Up"
+        elif [ "$_if_up" = yes ];                  then _vc=warn; _vl="Up — routing fault"
+        else                                            _vc=warn; _vl="Down"
+        fi
+        printf '<div class="row"><span class="lbl">%s (%s)</span><span class="val %s">%s</span></div>' \
+            "$_tier_upper" "$VPN_IFACE" "$_vc" "$_vl"
+    done
     printf '</div>\n'
 fi
 
@@ -157,7 +162,7 @@ if command -v wg >/dev/null 2>&1; then
     for _wgs in $(uci show network 2>/dev/null \
         | awk -F= "/\\.proto='wireguard'/"'{sub(/\.proto.*/,"",$1);sub(/^network\./,"",$1);print $1}'); do
 
-        [ "$_wgs" = "$_vpn_iface" ] && continue
+        case " $_vpn_ifaces " in *" $_wgs "*) continue ;; esac
 
         # Detect server: none of its UCI peers have endpoint_host set
         _wgs_is_server=yes; _pi=0
@@ -259,7 +264,9 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     [ "$_iface" = untrusted ] && SHOW_QR=no
 
     _ssid=$(uci -q get wireless."$_iface".ssid 2>/dev/null || true)
-    _up=no; ip link show "br-${_iface}" 2>/dev/null | grep -q "LOWER_UP" && _up=yes
+    _up=no
+    _brflags=$(ip link show "br-${_iface}" 2>/dev/null | sed -n 's/.*<\([^>]*\)>.*/\1/p' | head -1)
+    case ",$_brflags," in *,UP,*) _up=yes ;; esac
     _rx=$(_nft_bytes "${_iface}_counter" in);  _rxh=$(_human "$_rx")
     _tx=$(_nft_bytes "${_iface}_counter" out); _txh=$(_human "$_tx")
     # WiFi interface for signal strength (e.g. phy0-ap1 for br-guest)
