@@ -112,7 +112,11 @@ elif [ -n "$_DEV_HN" ]; then
 else
     _DEV_DISPLAY="${MAC} (unlabelled)"
 fi
-_DEV_DNS_DISPLAY="${_DEV_FQDN:-${_DEV_HN:+${_DEV_HN}.${_LOCAL_DOMAIN}}}"
+_DEV_DNS_DISPLAY="${_DEV_FQDN:----}"
+_DEV_HN_FQDN="${_DEV_HN:+${_DEV_HN}.${_LOCAL_DOMAIN}}"
+[ -z "$_DEV_FQDN" ] && _DEV_DNS_DISPLAY="${_DEV_HN_FQDN:----}"
+[ -n "$_DEV_FQDN" ] && [ -n "$_DEV_HN_FQDN" ] && [ "$_DEV_HN_FQDN" != "$_DEV_FQDN" ] && \
+    _DEV_DNS_DISPLAY="${_DEV_FQDN}<br><span class=\"dim\">${_DEV_HN_FQDN}</span>"
 _BACK_URL="/cgi-bin/device?net=${NET}&mac=${MAC}"
 _JOIN_IP="${_DEV_IP:-$_DEV_IP6}"
 _JOIN_STATE=Untracked
@@ -648,7 +652,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="row"><span class="lbl">DHCP hostname</span><span class="val">${_DEV_HN:----}</span></div>
 <div class="row"><span class="lbl">Lease</span><span class="val">$(_html "$_LEASE_STATUS")</span></div>
 <div class="row"><span class="lbl">Network</span><span class="val">$(_html "$_iface")</span></div>
-<div class="row"><span class="lbl">DNS name</span><span class="val">${_DEV_DNS_DISPLAY:----}</span></div>
+<div class="row"><span class="lbl">DNS names</span><span class="val" style="text-align:right">${_DEV_DNS_DISPLAY}</span></div>
 <div class="row"><span class="lbl">Total joins</span><span class="val">${_JOIN_COUNT:----}</span></div>
 ${_networks_row}
 ${_approval_row}
