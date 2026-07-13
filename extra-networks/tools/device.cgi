@@ -162,6 +162,11 @@ Was: ${_DEV_LABEL}}
 Now: ${_safe}
 
 ${_actor_info}"
+            _join_history_add "$_iface" labelled "$MAC" \
+                "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}" \
+                "${_DEV_LABEL:+${_DEV_LABEL} → }${_safe}" \
+                "$_actor_display" "$_actor_ip4" "$_actor_ip6" "$_actor_mac" \
+                "${JOIN_HISTORY_RETENTION:-90d}"
         fi
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
@@ -639,6 +644,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 .badge-approved{background:#2e7d32}.badge-denied{background:#c62828}
 .badge-revoked{background:#e65100}.badge-connected{background:#1565c0}
 .badge-disconnected{background:#757575}.badge-deleted{background:#37474f}
+.badge-labelled{background:#6a1b9a}
 </style></head><body>
 <h1>$(_html "$_DEV_DISPLAY")</h1>
 <div class="sub">$(_html "$_iface") &nbsp;·&nbsp; $(_html "$MAC") &nbsp;·&nbsp; <a href="/cgi-bin/status">Dashboard</a></div>
@@ -716,8 +722,10 @@ if [ -f "$1" ]; then
         while(("ip neigh show" | getline ln)>0){n2=split(ln,a," ");for(i=1;i<n2;i++)if(a[i]=="lladdr"){arp[a[1]]=a[i+1];break}}
         bcls["approved"]="approved";bcls["denied"]="denied";bcls["revoked"]="revoked"
         bcls["connected"]="connected";bcls["disconnected"]="disconnected";bcls["deleted"]="deleted"
+        bcls["labelled"]="labelled"
         blbl["approved"]="Approved";blbl["denied"]="Denied";blbl["revoked"]="Revoked"
         blbl["connected"]="Connected";blbl["disconnected"]="Disconnected";blbl["deleted"]="Deleted"
+        blbl["labelled"]="Labelled"
     }
     tolower($4)==tolower(mac){
         fn=FILENAME;sub(base,"",fn);sub(/-join-history$/,"",fn)
@@ -748,6 +756,7 @@ if [ -f "$1" ]; then
             if(actor==""&&host!="")actor=host
             cls=(act in bcls)?bcls[act]:"untracked"
             lbl=(act in blbl)?blbl[act]:h(act)
+            if(act=="labelled"&&host!="")lbl=lbl"<br><span style=\"font-weight:400;font-size:.8em;opacity:.7\">"h(host)"</span>"
             if(amac!="")by="<a href=\"/cgi-bin/device?net=lan&mac="h(amac)"\">"h(amac)"</a>"
             else by=h(actor!=""?actor:"unknown")
             printf "<tr><td class=\"dim\">%s</td><td><span class=\"badge badge-%s\">%s</span></td><td>%s</td><td>%s</td><td>%s</td><td class=\"dim\">%s</td></tr>\n",\
@@ -772,8 +781,10 @@ if [ -f "$1" ]; then
     BEGIN{
         bcls["approved"]="approved";bcls["denied"]="denied";bcls["revoked"]="revoked"
         bcls["connected"]="connected";bcls["disconnected"]="disconnected";bcls["deleted"]="deleted"
+        bcls["labelled"]="labelled"
         blbl["approved"]="Approved";blbl["denied"]="Denied";blbl["revoked"]="Revoked"
         blbl["connected"]="Connected";blbl["disconnected"]="Disconnected";blbl["deleted"]="Deleted"
+        blbl["labelled"]="Labelled"
     }
     tolower($11)==tolower(mac){
         fn=FILENAME; sub(base,"",fn); sub(/-join-history$/,"",fn)

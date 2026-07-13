@@ -96,6 +96,11 @@ Now: ${_safe}
 By: ${_actor_display}${_actor_mac:+ (${_actor_mac})}
 IPv4: ${_actor_ip4:----}
 IPv6: ${_actor_ip6:----}"
+        _join_history_add "$_iface" labelled "$MAC" \
+            "$(_ip4_for_mac "$MAC")" "$(_ip6_for_mac "$MAC")" \
+            "${_old_label:+${_old_label} → }${_safe}" \
+            "$_actor_display" "$_actor_ip4" "$_actor_ip6" "$_actor_mac" \
+            "${JOIN_HISTORY_RETENTION:-90d}"
     fi
     printf '<meta http-equiv="refresh" content="0;url=/cgi-bin/status">'
     exit 0
