@@ -274,9 +274,25 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
         | awk 'NR==1{n=$2; sub(/@.*/,"",n); print n}')
     _assoc=$([ -n "$_wlan" ] && iwinfo "$_wlan" assoclist 2>/dev/null || true)
 
-    # IPv6 neighbour table for this bridge: MAC → global/ULA address (skip link-local)
-    _neigh6=$(ip -6 neigh show dev "br-${_iface}" 2>/dev/null \
-        | awk '!/^fe80:/ && /lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr"){print $(i+1)"\t"$1; break}}')
+    # IPv6: NDP neighbour table first, then odhcpd DHCPv6 leases as fallback
+    _neigh6=$(
+        ip -6 neigh show dev "br-${_iface}" 2>/dev/null \
+            | awk '!/^fe80:/ && /lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr"){print $(i+1)"\t"$1; break}}'
+        awk -v iface="br-${_iface}" -v now="$(date +%s)" '
+        /^# / && $2==iface {
+            duid=$3; expiry=$6; ipv6=""
+            if(expiry!="0" && expiry+0>0 && expiry+0<now+0) next
+            for(i=9;i<=NF;i++){addr=$i; sub(/\/[0-9]+$/,"",addr); if(addr~/:/ && addr!~/^fe80/){ipv6=addr;break}}
+            if(!ipv6) next
+            type=substr(duid,1,4); mac=""
+            if(type=="0001" && length(duid)>=28) mac=substr(duid,17,12)
+            else if(type=="0003" && length(duid)>=20) mac=substr(duid,9,12)
+            if(mac==""||length(mac)!=12) next
+            printf "%s:%s:%s:%s:%s:%s\t%s\n",
+                substr(mac,1,2),substr(mac,3,2),substr(mac,5,2),
+                substr(mac,7,2),substr(mac,9,2),substr(mac,11,2),ipv6
+        }' /tmp/odhcpd.leases 2>/dev/null
+    )
     # ARP/NDP state table: IP → kernel reachability state
     _neigh_states=$({ ip neigh show dev "br-${_iface}" 2>/dev/null
                       ip -6 neigh show dev "br-${_iface}" 2>/dev/null; } \

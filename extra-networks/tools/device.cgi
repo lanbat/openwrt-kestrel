@@ -138,6 +138,10 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
             _slug=$(_slugify "$_safe")
             _write_device_dns "$_iface" "$MAC" "$_slug" \
                 "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}"
+            _ntfy "Label set — ${_iface}" low pencil2 \
+                "MAC: ${MAC}${_DEV_LABEL:+
+Was: ${_DEV_LABEL}}
+Now: ${_safe}"
         fi
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
@@ -563,8 +567,9 @@ for _ls_hf in "${BASE_DIR}"/*-join-history; do
         _ls_rel=$(_rel_time "$_ls_last_ts")
     fi
     _sep=$([ -n "$_last_seen_val" ] && printf '<br>' || true)
-    _last_seen_val="${_last_seen_val}${_sep}<span class=\"dim\">${_ls_net}</span>&ensp;${_ls_rel}"
-    _first_seen_val="${_first_seen_val}${_sep}<span class=\"dim\">${_ls_net}</span>&ensp;${_ls_first_fmt:-—}"
+    _ls_link="<a href=\"/cgi-bin/device?net=${_ls_net}&amp;mac=${MAC}\" class=\"dim\">${_ls_net}</a>"
+    _last_seen_val="${_last_seen_val}${_sep}${_ls_link}&ensp;${_ls_rel}"
+    _first_seen_val="${_first_seen_val}${_sep}${_ls_link}&ensp;${_ls_first_fmt:-—}"
 done
 [ -z "$_last_seen_val" ] && _last_seen_val='<span class="dim">Unknown</span>'
 [ -z "$_first_seen_val" ] && _first_seen_val='<span class="dim">Unknown</span>'
@@ -644,7 +649,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="row"><span class="lbl">Lease</span><span class="val">$(_html "$_LEASE_STATUS")</span></div>
 <div class="row"><span class="lbl">Network</span><span class="val">$(_html "$_iface")</span></div>
 <div class="row"><span class="lbl">DNS name</span><span class="val">${_DEV_DNS_DISPLAY:----}</span></div>
-<div class="row"><span class="lbl">Total joins</span><span class="val dim">${_JOIN_COUNT:----}</span></div>
+<div class="row"><span class="lbl">Total joins</span><span class="val">${_JOIN_COUNT:----}</span></div>
 ${_networks_row}
 ${_approval_row}
 </div>
