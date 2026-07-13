@@ -542,24 +542,32 @@ _hist_stats=$(awk -v m="$MAC" -F'\t' '
     }
     END{print mx"\t"mxw"\t"mn"\t"mnw"\t"cnt}
 ' ${BASE_DIR}/*-join-history 2>/dev/null || true)
-_FIRST_SEEN_FMT=$(printf '%s' "$_hist_stats" | awk -F'\t' '{print $4}')
 _JOIN_COUNT=$(printf '%s' "$_hist_stats" | awk -F'\t' '{print $5}')
-_last_seen_rows=""
+_last_seen_val=""; _first_seen_val=""
 for _ls_hf in "${BASE_DIR}"/*-join-history; do
     [ -f "$_ls_hf" ] || continue
     _ls_net="${_ls_hf##*/}"; _ls_net="${_ls_net%-join-history}"
-    _ls_ts=$(awk -v m="$MAC" -F'\t' \
-        'tolower($4)==tolower(m)&&$1+0>mx+0{mx=$1}END{if(mx+0>0)print mx}' \
-        "$_ls_hf" 2>/dev/null || true)
-    [ -z "$_ls_ts" ] && continue
+    _ls_stats=$(awk -v m="$MAC" -F'\t' '
+        tolower($4)==tolower(m){
+            if(mn==""||$1+0<mn+0){mn=$1;mnw=$2}
+            if(mx==""||$1+0>mx+0){mx=$1;mxw=$2}
+        }
+        END{print mx+0"\t"mn+0"\t"mnw}
+    ' "$_ls_hf" 2>/dev/null || true)
+    _ls_last_ts=$(printf '%s' "$_ls_stats" | awk -F'\t' '{print $1}')
+    _ls_first_fmt=$(printf '%s' "$_ls_stats" | awk -F'\t' '{print $3}')
+    [ -z "$_ls_last_ts" ] || [ "$_ls_last_ts" = 0 ] && continue
     if [ "$_online_text" = Online ] && [ "$_ls_net" = "$_iface" ]; then
-        _ls_rel="Now (online)"
+        _ls_rel='<span class="ok">Now</span>'
     else
-        _ls_rel=$(_rel_time "$_ls_ts")
+        _ls_rel=$(_rel_time "$_ls_last_ts")
     fi
-    _last_seen_rows="${_last_seen_rows}<div class=\"row\"><span class=\"lbl\">Last seen (${_ls_net})</span><span class=\"val\">${_ls_rel}</span></div>"
+    _sep=$([ -n "$_last_seen_val" ] && printf '<br>' || true)
+    _last_seen_val="${_last_seen_val}${_sep}<span class=\"dim\">${_ls_net}</span>&ensp;${_ls_rel}"
+    _first_seen_val="${_first_seen_val}${_sep}<span class=\"dim\">${_ls_net}</span>&ensp;${_ls_first_fmt:-—}"
 done
-[ -z "$_last_seen_rows" ] && _last_seen_rows='<div class="row"><span class="lbl">Last seen</span><span class="val dim">Unknown</span></div>'
+[ -z "$_last_seen_val" ] && _last_seen_val='<span class="dim">Unknown</span>'
+[ -z "$_first_seen_val" ] && _first_seen_val='<span class="dim">Unknown</span>'
 
 # Lease status from /tmp/dhcp.leases (epoch mac ip hostname)
 _lease_line=$(awk -v m="$MAC" 'tolower($2)==tolower(m){print; exit}' /tmp/dhcp.leases 2>/dev/null || true)
@@ -628,15 +636,14 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="row"><span class="lbl">MAC</span><span class="val">$(_html "$MAC")</span></div>
 <div class="row"><span class="lbl">Manufacturer</span><span class="val dim">${_MANUFACTURER:----}</span></div>
 <div class="row"><span class="lbl">Label</span><span class="val"><form method="POST" action="/cgi-bin/device" style="display:inline-flex;gap:.3rem;align-items:center"><input type="hidden" name="net" value="$(_html "$NET")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="set_label"><input type="text" name="label" value="$(_html "$_DEV_LABEL")" placeholder="e.g. Living Room TV" maxlength="40" style="width:160px"><button type="submit">Save</button></form></span></div>
-<div class="row"><span class="lbl">Online</span><span class="val ${_online_cls}"><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:$([ "$_online_cls" = ok ] && printf '#2e7d32' || printf '#ccc');margin-right:.35rem;vertical-align:middle"></span>${_online_text}</span></div>
-${_last_seen_rows}
+<div class="row"><span class="lbl">Last seen</span><span class="val" style="text-align:right;line-height:1.7">${_last_seen_val}</span></div>
+<div class="row"><span class="lbl">First seen</span><span class="val" style="text-align:right;line-height:1.7;font-weight:400;color:#555">${_first_seen_val}</span></div>
 <div class="row"><span class="lbl">Tracked IPv4</span><span class="val">${_DEV_IP:----}</span></div>
 <div class="row"><span class="lbl">Tracked IPv6</span><span class="val">${_DEV_IP6:----}</span></div>
 <div class="row"><span class="lbl">DHCP hostname</span><span class="val">${_DEV_HN:----}</span></div>
 <div class="row"><span class="lbl">Lease</span><span class="val">$(_html "$_LEASE_STATUS")</span></div>
 <div class="row"><span class="lbl">Network</span><span class="val">$(_html "$_iface")</span></div>
 <div class="row"><span class="lbl">DNS name</span><span class="val">${_DEV_DNS_DISPLAY:----}</span></div>
-<div class="row"><span class="lbl">First seen</span><span class="val dim">${_FIRST_SEEN_FMT:----}</span></div>
 <div class="row"><span class="lbl">Total joins</span><span class="val dim">${_JOIN_COUNT:----}</span></div>
 ${_networks_row}
 ${_approval_row}
