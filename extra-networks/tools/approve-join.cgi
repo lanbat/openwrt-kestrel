@@ -79,10 +79,23 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" 
         _slug=$(_slugify "$_safe")
         _write_device_dns "$_iface" "$MAC" "$_slug" \
             "$(_ip4_for_mac "$MAC")" "$(_ip6_for_mac "$MAC")"
+        _actor_ip="${REMOTE_ADDR:-unknown}"
+        _actor_name=$(_name_for_ip "$_actor_ip")
+        _actor_mac=$(_mac_for_ip "$_actor_ip")
+        case "$_actor_ip" in
+            *:*) _actor_ip6="$_actor_ip"; _actor_ip4=$([ -n "$_actor_mac" ] && _ip4_for_mac "$_actor_mac" || true) ;;
+            *)   _actor_ip4="$_actor_ip"; _actor_ip6=$([ -n "$_actor_mac" ] && _ip6_for_mac "$_actor_mac" || true) ;;
+        esac
+        [ "$_actor_name" = "*" ] && _actor_name=""
+        _actor_display="${_actor_name:-${_actor_ip4:-$_actor_ip}}"
         _ntfy "Label set — ${_iface}" default pencil2 \
             "MAC: ${MAC}${_old_label:+
 Was: ${_old_label}}
-Now: ${_safe}"
+Now: ${_safe}
+
+By: ${_actor_display}${_actor_mac:+ (${_actor_mac})}
+IPv4: ${_actor_ip4:----}
+IPv6: ${_actor_ip6:----}"
     fi
     printf '<meta http-equiv="refresh" content="0;url=/cgi-bin/status">'
     exit 0
@@ -179,7 +192,10 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
 
 Approved device:
 ${_device_detail}
-Approved by: ${_approver}
+
+By: ${_approver}
+IPv4: ${_approver_ip4:----}
+IPv6: ${_approver_ip6:----}
 
 The approved device can now use the internet on ${NET}." \
 "${_approver_action}"
@@ -200,7 +216,10 @@ The approved device can now use the internet on ${NET}." \
 
 Denied device:
 ${_device_detail}
-Denied by: ${_approver}
+
+By: ${_approver}
+IPv4: ${_approver_ip4:----}
+IPv6: ${_approver_ip6:----}
 
 The denied device remains blocked from internet access on ${NET}." \
 "${_approver_action}"

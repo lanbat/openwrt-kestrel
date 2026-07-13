@@ -277,6 +277,7 @@ _emit_device_row() {
 
     printf '<td>%s</td>' \
         "$([ -n "$_eip" ] && [ "$_eip" != "-" ] && _html "$_eip" || printf '—')"
+    printf '<td class="dim">%s</td>' "${_eipv6:----}"
     printf '<td class="dim"><a href="/cgi-bin/device?net=%s&mac=%s">%s</a></td>' \
         "$(_html "$_iface")" "$(_html "$_emac_lc")" "$(_html "$_emac_lc")"
 
@@ -327,7 +328,7 @@ _emit_device_row() {
 
 printf '<h2>Devices</h2>\n'
 printf '<table><tr><th style="width:2rem;text-align:center;padding:.45rem .15rem"></th>'
-printf '<th>Label</th><th>IPv4</th><th>MAC</th>'
+printf '<th>Label</th><th>IPv4</th><th>IPv6</th><th>MAC</th>'
 [ "${JOIN_APPROVAL:-no}" = yes ] && printf '<th>Join access</th>'
 [ "$_hdr_bw"  = yes ] && printf '<th>Traffic</th>'
 [ "$_hdr_sig" = yes ] && printf '<th>Signal</th>'
@@ -340,8 +341,9 @@ awk -v s="${SUBNET}." '$3~s{print $4"\t"$3"\t"$2"\t"$1}' /tmp/dhcp.leases 2>/dev
         _emit_device_row "$_hn" "$_ip" "$_mac" "$_exp_ts"
     done
 
-# 2. IPv6-only neigh devices (no DHCP lease on this subnet)
-printf '%s\n' "$_neigh6" | while IFS=$(printf '\t') read -r _nmac _nip6; do
+# 2. IPv6-only neigh devices (no DHCP lease on this subnet) — deduplicated by MAC
+printf '%s\n' "$_neigh6" | awk -F'\t' 'NF && !seen[tolower($1)]++{print}' \
+| while IFS=$(printf '\t') read -r _nmac _nip6; do
     [ -n "$_nmac" ] || continue
     _nmac_lc=$(printf '%s' "$_nmac" | tr 'ABCDEF' 'abcdef')
     awk -v m="$_nmac_lc" 'tolower($2)==tolower(m){exit 0} END{exit 1}' \

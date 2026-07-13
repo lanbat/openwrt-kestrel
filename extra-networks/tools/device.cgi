@@ -130,6 +130,20 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
     _action=$(_get_param "$_params" action)
     printf 'Content-Type: text/html\r\n\r\n'
 
+    # Resolve actor (browser client making the request) — shared across all actions
+    _actor_ip="${REMOTE_ADDR:-unknown}"
+    _actor_name=$(_name_for_ip "$_actor_ip")
+    _actor_mac=$(_mac_for_ip "$_actor_ip")
+    case "$_actor_ip" in
+        *:*) _actor_ip6="$_actor_ip"; _actor_ip4=$([ -n "$_actor_mac" ] && _ip4_for_mac "$_actor_mac" || true) ;;
+        *)   _actor_ip4="$_actor_ip"; _actor_ip6=$([ -n "$_actor_mac" ] && _ip6_for_mac "$_actor_mac" || true) ;;
+    esac
+    [ "$_actor_name" = "*" ] && _actor_name=""
+    _actor_display="${_actor_name:-${_actor_ip4:-$_actor_ip}}"
+    _actor_info="By: ${_actor_display}${_actor_mac:+ (${_actor_mac})}
+IPv4: ${_actor_ip4:----}
+IPv6: ${_actor_ip6:----}"
+
     case "$_action" in
 
     set_label)
@@ -145,7 +159,9 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
             _ntfy "Label set — ${_iface}" default pencil2 \
                 "MAC: ${MAC}${_DEV_LABEL:+
 Was: ${_DEV_LABEL}}
-Now: ${_safe}"
+Now: ${_safe}
+
+${_actor_info}"
         fi
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
@@ -163,20 +179,10 @@ Now: ${_safe}"
         ;;
 
     revoke_join_approval)
-        _approver_ip="${REMOTE_ADDR:-unknown}"
-        _approver_name=$(_name_for_ip "$_approver_ip")
-        _approver_mac=$(_mac_for_ip "$_approver_ip")
-        case "$_approver_ip" in
-            *:*) _approver_ip6="$_approver_ip"; _approver_ip4=$([ -n "$_approver_mac" ] && _ip4_for_mac "$_approver_mac" || true) ;;
-            *)   _approver_ip4="$_approver_ip"; _approver_ip6=$([ -n "$_approver_mac" ] && _ip6_for_mac "$_approver_mac" || true) ;;
-        esac
-        _approver="${_approver_name:-$_approver_ip}"
-        [ "$_approver" = "*" ] && _approver="$_approver_ip"
-        [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
         _rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
         _rip="${_rip:-192.168.1.1}"
         _approver_action=""
-        [ -n "$_approver_mac" ] && _approver_action="view, Approver, http://${_rip}/cgi-bin/device?net=lan&mac=${_approver_mac}"
+        [ -n "$_actor_mac" ] && _approver_action="view, Approver, http://${_rip}/cgi-bin/device?net=lan&mac=${_actor_mac}"
         _notify_ip="${_DEV_IP:-${_DEV_IP6:-}}"
         _dns=$([ -n "$_notify_ip" ] && nslookup "$_notify_ip" 2>/dev/null | awk '/name =/{gsub(/\.$/,"",$NF); print $NF; exit}' || true)
         _device_detail="IPv4: ${_DEV_IP:-unknown}
@@ -201,13 +207,14 @@ MAC: ${MAC}"
             && mv "${_approved_ips_f}.tmp" "$_approved_ips_f" || true
         { grep -vixF "$MAC" "$_join_denied_f" 2>/dev/null; } \
             > "${_join_denied_f}.tmp" && mv "${_join_denied_f}.tmp" "$_join_denied_f" || true
-        _join_history_add "$_iface" revoked "$MAC" "$_DEV_IP" "$_DEV_IP6" "${_DEV_LABEL:-${_dns:-unknown}}" "$_approver" "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
+        _join_history_add "$_iface" revoked "$MAC" "$_DEV_IP" "$_DEV_IP6" "${_DEV_LABEL:-${_dns:-unknown}}" "$_actor_display" "$_actor_ip4" "$_actor_ip6" "$_actor_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         _ntfy "Access revoked — ${_iface}" default no_entry \
 "Type: Internet access revoked
 
 Revoked device:
 ${_device_detail}
-Revoked by: ${_approver}
+
+${_actor_info}
 
 The device is no longer approved on ${_iface}." \
 "${_approver_action}"
@@ -231,7 +238,9 @@ The device is no longer approved on ${_iface}." \
             || printf '%s\n' "$_dentry" >> "$_dconf"
         /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
         _ntfy "Rule added — ${_iface}" default shield \
-            "${_DEV_DISPLAY}: ${_dom} allowed on ${_iface}."
+            "${_DEV_DISPLAY}: ${_dom} allowed on ${_iface}.
+
+${_actor_info}"
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
         ;;
@@ -258,7 +267,9 @@ The device is no longer approved on ${_iface}." \
                 && mv "${_pending_f}.tmp" "$_pending_f" || true
         }
         _ntfy "Rule added — ${_iface}" default shield \
-            "${_DEV_DISPLAY}: ${_dip}:${_dpt}/${_dpr} allowed on ${_iface}."
+            "${_DEV_DISPLAY}: ${_dip}:${_dpt}/${_dpr} allowed on ${_iface}.
+
+${_actor_info}"
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
         ;;
@@ -317,19 +328,9 @@ IPv4: ${_DEV_IP:-unknown}
 IPv6: ${_DEV_IP6:-unknown}
 DNS: ${_dns:-unknown}
 MAC: ${MAC}"
-        _approver_ip="${REMOTE_ADDR:-unknown}"
-        _approver_name=$(_name_for_ip "$_approver_ip")
-        _approver_mac=$(_mac_for_ip "$_approver_ip")
-        case "$_approver_ip" in
-            *:*) _approver_ip6="$_approver_ip"; _approver_ip4=$([ -n "$_approver_mac" ] && _ip4_for_mac "$_approver_mac" || true) ;;
-            *)   _approver_ip4="$_approver_ip"; _approver_ip6=$([ -n "$_approver_mac" ] && _ip6_for_mac "$_approver_mac" || true) ;;
-        esac
-        _approver="${_approver_name:-$_approver_ip}"
-        [ "$_approver" = "*" ] && _approver="$_approver_ip"
-        [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
         _join_history_add "$_iface" deleted "$MAC" "$_DEV_IP" "$_DEV_IP6" \
-            "${_DEV_LABEL:-${_dns:-unknown}}" "$_approver" \
-            "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
+            "${_DEV_LABEL:-${_dns:-unknown}}" "$_actor_display" \
+            "$_actor_ip4" "$_actor_ip6" "$_actor_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         # Remove all state files
         for _f in "$_labels_f" "$_ips_f" "$_ip6s_f" "$_limits_f" "$_rules_f"; do
             [ -f "$_f" ] && { grep -v "^${MAC}	" "$_f" > "${_f}.tmp" 2>/dev/null \
@@ -357,7 +358,9 @@ MAC: ${MAC}"
         _ntfy "Device removed — ${_iface}" default wastebasket \
 "${_DEV_DISPLAY} has been removed from ${_iface}.
 
-${_device_detail}"
+${_device_detail}
+
+${_actor_info}"
         printf '<meta http-equiv="refresh" content="0;url=/cgi-bin/network?net=%s">' "$(_html "$_iface")"
         exit 0
         ;;
