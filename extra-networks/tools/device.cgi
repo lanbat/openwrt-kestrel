@@ -28,6 +28,14 @@ _upsert() {
     { grep -v "^${2}	" "$1" 2>/dev/null; printf '%s\t%s\n' "$2" "$3"; } \
         > "${1}.tmp" && mv "${1}.tmp" "$1" || true
 }
+_rel_time() {
+    _rt_diff=$(( $(date +%s) - ${1:-0} ))
+    if   [ "$_rt_diff" -lt 60 ];    then printf 'just now'
+    elif [ "$_rt_diff" -lt 3600 ];  then printf '%d min ago' $(( _rt_diff / 60 ))
+    elif [ "$_rt_diff" -lt 86400 ]; then printf '%dh ago'    $(( _rt_diff / 3600 ))
+    else                                  printf '%dd ago'   $(( _rt_diff / 86400 ))
+    fi
+}
 
 # CSRF
 if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
@@ -520,6 +528,44 @@ if [ "$_online_text" != Online ] && [ -n "$_DEV_IP6" ]; then
     case "$_ns" in REACHABLE|DELAY|PROBE) _online_cls=ok; _online_text=Online ;; esac
 fi
 
+# History stats: last seen, first seen, join count across all networks
+# shellcheck disable=SC2086
+_hist_stats=$(awk -v m="$MAC" -F'\t' '
+    tolower($4)==tolower(m){
+        cnt++
+        if(mn==""||$1+0<mn+0){mn=$1;mnw=$2}
+        if(mx==""||$1+0>mx+0){mx=$1;mxw=$2}
+    }
+    END{print mx"\t"mxw"\t"mn"\t"mnw"\t"cnt}
+' ${BASE_DIR}/*-join-history 2>/dev/null || true)
+_LAST_SEEN_TS=$(printf '%s' "$_hist_stats" | awk -F'\t' '{print $1}')
+_FIRST_SEEN_FMT=$(printf '%s' "$_hist_stats" | awk -F'\t' '{print $4}')
+_JOIN_COUNT=$(printf '%s' "$_hist_stats" | awk -F'\t' '{print $5}')
+if [ "$_online_text" = Online ]; then
+    _LAST_SEEN_DISPLAY="Now (online)"
+elif [ -n "$_LAST_SEEN_TS" ] && [ "$_LAST_SEEN_TS" -gt 0 ] 2>/dev/null; then
+    _LAST_SEEN_DISPLAY=$(_rel_time "$_LAST_SEEN_TS")
+else
+    _LAST_SEEN_DISPLAY="Unknown"
+fi
+
+# Lease status from /tmp/dhcp.leases (epoch mac ip hostname)
+_lease_line=$(awk -v m="$MAC" 'tolower($2)==tolower(m){print; exit}' /tmp/dhcp.leases 2>/dev/null || true)
+_LEASE_STATUS="No lease"
+if [ -n "$_lease_line" ]; then
+    _lease_exp=$(printf '%s' "$_lease_line" | awk '{print $1}')
+    if [ "${_lease_exp:-0}" = 0 ]; then
+        _LEASE_STATUS="Static (no expiry)"
+    else
+        _lease_diff=$(( _lease_exp - $(date +%s) ))
+        if   [ "$_lease_diff" -le 0 ];     then _LEASE_STATUS="Expired"
+        elif [ "$_lease_diff" -lt 3600 ];  then _LEASE_STATUS="Expires in $(( _lease_diff / 60 ))m"
+        elif [ "$_lease_diff" -lt 86400 ]; then _LEASE_STATUS="Expires in $(( _lease_diff / 3600 ))h"
+        else                                    _LEASE_STATUS="Expires in $(( _lease_diff / 86400 ))d"
+        fi
+    fi
+fi
+
 printf 'Content-Type: text/html\r\n\r\n'
 
 cat <<HTML
@@ -569,10 +615,15 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="card">
 <div class="row"><span class="lbl">MAC</span><span class="val">$(_html "$MAC")</span></div>
 <div class="row"><span class="lbl">Online</span><span class="val ${_online_cls}"><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:$([ "$_online_cls" = ok ] && printf '#2e7d32' || printf '#ccc');margin-right:.35rem;vertical-align:middle"></span>${_online_text}</span></div>
+<div class="row"><span class="lbl">Last seen</span><span class="val">$(_html "$_LAST_SEEN_DISPLAY")</span></div>
 <div class="row"><span class="lbl">Tracked IPv4</span><span class="val">${_DEV_IP:----}</span></div>
 <div class="row"><span class="lbl">Tracked IPv6</span><span class="val">${_DEV_IP6:----}</span></div>
+<div class="row"><span class="lbl">DHCP hostname</span><span class="val">${_DEV_HN:----}</span></div>
+<div class="row"><span class="lbl">Lease</span><span class="val">$(_html "$_LEASE_STATUS")</span></div>
 <div class="row"><span class="lbl">Network</span><span class="val">$(_html "$_iface")</span></div>
 <div class="row"><span class="lbl">DNS name</span><span class="val">${_DEV_DNS_DISPLAY:----}</span></div>
+<div class="row"><span class="lbl">First seen</span><span class="val dim">${_FIRST_SEEN_FMT:----}</span></div>
+<div class="row"><span class="lbl">Total joins</span><span class="val dim">${_JOIN_COUNT:----}</span></div>
 ${_networks_row}
 ${_approval_row}
 </div>
