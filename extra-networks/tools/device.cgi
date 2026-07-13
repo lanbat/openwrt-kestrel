@@ -621,10 +621,11 @@ else
 fi
 
 printf '<h2>History</h2>\n'
-_history_f="${BASE_DIR}/${_iface}-join-history"
 _history_html=""
-if [ -f "$_history_f" ]; then
-    _history_html=$(awk -v mac="$MAC" -F'\t' '
+# shellcheck disable=SC2086
+set -- ${BASE_DIR}/*-join-history
+if [ -f "$1" ]; then
+    _history_html=$(awk -v mac="$MAC" -v base="${BASE_DIR}/" -F'\t' '
     function h(s,  t){t=s;gsub(/&/,"\\&amp;",t);gsub(/</,"\\&lt;",t);gsub(/>/,"\\&gt;",t);gsub(/"/,"\\&quot;",t);return t}
     BEGIN{
         while((getline ln<"/tmp/dhcp.leases")>0){split(ln,a," ");if(a[3]!=""&&a[2]!="")lm[a[3]]=a[2]}
@@ -634,11 +635,30 @@ if [ -f "$_history_f" ]; then
         blbl["approved"]="Approved";blbl["denied"]="Denied";blbl["revoked"]="Revoked"
         blbl["connected"]="Connected";blbl["disconnected"]="Disconnected";blbl["deleted"]="Deleted"
     }
-    tolower($4)==tolower(mac){n++;rw[n]=$2;ra[n]=$3;ri4[n]=$5;ri6[n]=$6;rh[n]=$7;rac[n]=$8;raip[n]=$9;rmac[n]=$11}
+    tolower($4)==tolower(mac){
+        fn=FILENAME;sub(base,"",fn);sub(/-join-history$/,"",fn)
+        n++;rts[n]=$1;rw[n]=$2;ra[n]=$3;ri4[n]=$5;ri6[n]=$6;rh[n]=$7;rac[n]=$8;raip[n]=$9;rmac[n]=$11;rnet[n]=fn
+    }
     END{
-        s=(n>20)?n-19:1
-        for(i=n;i>=s;i--){
-            act=ra[i];actor=rac[i];host=rh[i];ip6=ri6[i];amac=rmac[i];aip4=raip[i]
+        for(i=1;i<=n;i++){
+            mx=i
+            for(j=i+1;j<=n;j++)if(rts[j]>rts[mx])mx=j
+            if(mx!=i){
+                tmp=rts[i];rts[i]=rts[mx];rts[mx]=tmp
+                tmp=rw[i];rw[i]=rw[mx];rw[mx]=tmp
+                tmp=ra[i];ra[i]=ra[mx];ra[mx]=tmp
+                tmp=ri4[i];ri4[i]=ri4[mx];ri4[mx]=tmp
+                tmp=ri6[i];ri6[i]=ri6[mx];ri6[mx]=tmp
+                tmp=rh[i];rh[i]=rh[mx];rh[mx]=tmp
+                tmp=rac[i];rac[i]=rac[mx];rac[mx]=tmp
+                tmp=raip[i];raip[i]=raip[mx];raip[mx]=tmp
+                tmp=rmac[i];rmac[i]=rmac[mx];rmac[mx]=tmp
+                tmp=rnet[i];rnet[i]=rnet[mx];rnet[mx]=tmp
+            }
+        }
+        lim=(n>20)?20:n
+        for(i=1;i<=lim;i++){
+            act=ra[i];actor=rac[i];host=rh[i];ip6=ri6[i];amac=rmac[i];aip4=raip[i];net=rnet[i]
             if(amac==""&&aip4!=""&&aip4 in lm)amac=lm[aip4]
             if(amac==""&&aip4!=""&&aip4 in arp)amac=arp[aip4]
             if(actor==""&&host!="")actor=host
@@ -647,13 +667,13 @@ if [ -f "$_history_f" ]; then
             hip=(ri4[i]!="")?ri4[i]:(ip6!="")?ip6:"—"
             if(amac!="")by="<a href=\"/cgi-bin/device?net=lan&mac="h(amac)"\">"h(amac)"</a>"
             else by=h(actor!=""?actor:"unknown")
-            printf "<tr><td class=\"dim\">%s</td><td><span class=\"badge badge-%s\">%s</span></td><td>%s</td><td class=\"dim\">%s</td></tr>\n",\
-                h(rw[i]),cls,lbl,h(hip),by
+            printf "<tr><td class=\"dim\">%s</td><td><span class=\"badge badge-%s\">%s</span></td><td>%s</td><td>%s</td><td class=\"dim\">%s</td></tr>\n",\
+                h(rw[i]),cls,lbl,h(net),h(hip),by
         }
-    }' "$_history_f" 2>/dev/null)
+    }' "$@" 2>/dev/null)
 fi
 if [ -n "$_history_html" ]; then
-    printf '<table><tr><th>When</th><th>Decision</th><th>IP</th><th>By</th></tr>\n'
+    printf '<table><tr><th>When</th><th>Decision</th><th>Network</th><th>IP</th><th>By</th></tr>\n'
     printf '%s\n' "$_history_html"
     printf '</table>\n'
 else
