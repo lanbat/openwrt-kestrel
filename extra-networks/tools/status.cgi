@@ -294,8 +294,8 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
 
     # ── Network header + config card ──────────────────────────────────────────
 
-    printf '<h2>%s%s</h2>' "$(_html "$_iface")" \
-        "${_ssid:+ — $(_html "$_ssid")}"
+    printf '<h2>%s%s <a href="/cgi-bin/network?net=%s" style="font-size:.75rem;font-weight:400;text-transform:none;letter-spacing:0;color:#1976d2;margin-left:.5rem">Network →</a></h2>' \
+        "$(_html "$_iface")" "${_ssid:+ — $(_html "$_ssid")}" "$(_html "$_iface")"
     [ -n "${DESCRIPTION:-}" ] && printf '<div class="net-desc">%s</div>\n' "$(_html "$DESCRIPTION")"
     printf '<div class="card">'
     printf '<div class="row"><span class="lbl">State</span><span class="val %s">%s</span></div>' \

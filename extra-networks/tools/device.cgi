@@ -78,6 +78,9 @@ _DEV_IP=$(awk -v m="$MAC" 'tolower($1)==tolower(m){print $2; exit}' \
 [ -n "$_DEV_IP" ] || _DEV_IP=$(awk -v m="$MAC" 'tolower($1)==tolower(m){print $2; exit}' \
     "${BASE_DIR}/${_iface}-join-approved-ips" 2>/dev/null || true)
 [ -n "$_DEV_IP" ] || _DEV_IP=$(_ip4_for_mac "$MAC")
+[ -n "$_DEV_IP" ] || _DEV_IP=$(awk -F'\t' -v m="$MAC" \
+    'tolower($4)==tolower(m)&&$5~/^[0-9]+\.[0-9]/{ip=$5}END{print ip}' \
+    "${BASE_DIR}/${_iface}-join-history" 2>/dev/null)
 _DEV_IP6=$(awk -v m="$MAC" 'tolower($1)==tolower(m){print $2; exit}' \
     "$_ip6s_f" 2>/dev/null || true)
 [ -n "$_DEV_IP6" ] || _DEV_IP6=$(ip -6 neigh show dev "br-${_iface}" 2>/dev/null \
@@ -423,6 +426,8 @@ _rules_rows=$([ -f "$_rules_f" ] && \
 || true)
 
 _approval_controls=""
+_approval_row=""
+if [ "${JOIN_APPROVAL:-no}" = yes ]; then
 if [ "$_JOIN_STATE" != Approved ] && [ -n "$_JOIN_IP" ]; then
     _approval_controls="${_approval_controls}$(cat <<HTML
 <form method="POST" action="/cgi-bin/approve-join">
@@ -465,6 +470,7 @@ _approval_row=$(cat <<HTML
 <div class="row"><span class="lbl">Actions</span><span class="val actions">${_approval_controls:-No action available}</span></div>
 HTML
 )
+fi  # JOIN_APPROVAL=yes
 
 # Build "networks" row — all networks where this MAC has been seen (current network first)
 _networks_html="<a href=\"/cgi-bin/device?net=${_iface}&mac=${MAC}\" class=\"ok\">${_iface}</a>"
@@ -472,7 +478,7 @@ for _ohf in "${BASE_DIR}"/*-join-history; do
     [ -f "$_ohf" ] || continue
     _on="${_ohf##*/}"; _on="${_on%-join-history}"
     [ "$_on" = "$_iface" ] && continue
-    awk -v m="$MAC" -F'\t' 'tolower($4)==tolower(m){exit 0} END{exit 1}' "$_ohf" 2>/dev/null || continue
+    awk -v m="$MAC" -F'\t' 'tolower($4)==tolower(m){found=1} END{exit !found}' "$_ohf" 2>/dev/null || continue
     _networks_html="${_networks_html} · <a href=\"/cgi-bin/device?net=${_on}&mac=${MAC}\">${_on}</a>"
 done
 for _olf in "${BASE_DIR}"/*-device-labels; do
@@ -480,7 +486,7 @@ for _olf in "${BASE_DIR}"/*-device-labels; do
     _on="${_olf##*/}"; _on="${_on%-device-labels}"
     [ "$_on" = "$_iface" ] && continue
     case "$_networks_html" in *"?net=${_on}&"*) continue ;; esac
-    awk -v m="$MAC" 'tolower($1)==tolower(m){exit 0} END{exit 1}' "$_olf" 2>/dev/null || continue
+    awk -v m="$MAC" 'tolower($1)==tolower(m){found=1} END{exit !found}' "$_olf" 2>/dev/null || continue
     _networks_html="${_networks_html} · <a href=\"/cgi-bin/device?net=${_on}&mac=${MAC}\">${_on}</a>"
 done
 _dhcp_ip=$(awk -v m="$MAC" 'tolower($2)==tolower(m){print $3; exit}' /tmp/dhcp.leases 2>/dev/null)
