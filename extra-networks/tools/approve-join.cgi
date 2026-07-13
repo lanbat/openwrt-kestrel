@@ -70,12 +70,19 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" 
     _safe=$(printf '%s' "$_new" | sed "s/[^a-zA-Z0-9 _.'-]//g")
     if [ -n "$_safe" ]; then
         _lbl_f="${BASE_DIR}/${NET}-device-labels"
+        _old_label=$(awk -v m="$MAC" \
+            'tolower($1)==tolower(m){sub(/^[^\t]+\t/,""); print; exit}' \
+            "$_lbl_f" 2>/dev/null || true)
         { grep -v "^${MAC}	" "$_lbl_f" 2>/dev/null
           printf '%s\t%s\n' "$MAC" "$_safe"; } > "${_lbl_f}.tmp" \
             && mv "${_lbl_f}.tmp" "$_lbl_f" || true
         _slug=$(_slugify "$_safe")
         _write_device_dns "$_iface" "$MAC" "$_slug" \
             "$(_ip4_for_mac "$MAC")" "$(_ip6_for_mac "$MAC")"
+        _ntfy "Label set — ${_iface}" low pencil2 \
+            "MAC: ${MAC}${_old_label:+
+Was: ${_old_label}}
+Now: ${_safe}"
     fi
     printf '<meta http-equiv="refresh" content="0;url=/cgi-bin/status">'
     exit 0
