@@ -73,10 +73,7 @@ _write_device_dns() {
     _wd_domain="${_wd_domain:-lan}"
     _wd_fqdn="${_wd_slug}.${_wd_domain}"
     _wd_conf="/etc/dnsmasq.d/${_wd_iface}-dns-${_wd_macn}.conf"
-    {   if [ -n "$_wd_ip4" ]; then
-            printf 'dhcp-host=%s,%s\n' "$_wd_mac" "$_wd_ip4"
-        fi
-        if [ -n "$_wd_ip4" ] && [ -n "$_wd_ip6" ]; then
+    {   if [ -n "$_wd_ip4" ] && [ -n "$_wd_ip6" ]; then
             printf 'host-record=%s,%s,%s\n' "$_wd_fqdn" "$_wd_ip4" "$_wd_ip6"
         elif [ -n "$_wd_ip4" ]; then
             printf 'host-record=%s,%s\n' "$_wd_fqdn" "$_wd_ip4"
