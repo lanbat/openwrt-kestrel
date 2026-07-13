@@ -142,7 +142,7 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
             _slug=$(_slugify "$_safe")
             _write_device_dns "$_iface" "$MAC" "$_slug" \
                 "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}"
-            _ntfy "Label set — ${_iface}" low pencil2 \
+            _ntfy "Label set — ${_iface}" default pencil2 \
                 "MAC: ${MAC}${_DEV_LABEL:+
 Was: ${_DEV_LABEL}}
 Now: ${_safe}"

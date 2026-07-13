@@ -79,7 +79,7 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" 
         _slug=$(_slugify "$_safe")
         _write_device_dns "$_iface" "$MAC" "$_slug" \
             "$(_ip4_for_mac "$MAC")" "$(_ip6_for_mac "$MAC")"
-        _ntfy "Label set — ${_iface}" low pencil2 \
+        _ntfy "Label set — ${_iface}" default pencil2 \
             "MAC: ${MAC}${_old_label:+
 Was: ${_old_label}}
 Now: ${_safe}"
