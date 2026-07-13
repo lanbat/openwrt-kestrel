@@ -567,7 +567,7 @@ for _ls_hf in "${BASE_DIR}"/*-join-history; do
         _ls_rel=$(_rel_time "$_ls_last_ts")
     fi
     _sep=$([ -n "$_last_seen_val" ] && printf '<br>' || true)
-    _ls_link="<a href=\"/cgi-bin/device?net=${_ls_net}&amp;mac=${MAC}\" class=\"dim\">${_ls_net}</a>"
+    _ls_link="<a href=\"/cgi-bin/network?net=${_ls_net}\" class=\"dim\">${_ls_net}</a>"
     _last_seen_val="${_last_seen_val}${_sep}${_ls_link}&ensp;${_ls_rel}"
     _first_seen_val="${_first_seen_val}${_sep}${_ls_link}&ensp;${_ls_first_fmt:-—}"
 done
