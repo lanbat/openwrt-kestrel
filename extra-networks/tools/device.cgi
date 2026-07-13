@@ -88,7 +88,6 @@ _DEV_IP6=$(awk -v m="$MAC" 'tolower($1)==tolower(m){print $2; exit}' \
 _DEV_LIMIT=$(awk -v m="$MAC" 'tolower($1)==tolower(m){print $2; exit}' \
     "$_limits_f" 2>/dev/null || true)
 _DEV_LIMIT="${_DEV_LIMIT:-120}"
-_DEV_DISPLAY="${_DEV_LABEL:-$MAC}"
 _DEV_SLUG=$(_slugify "${_DEV_LABEL:-}")
 _LOCAL_DOMAIN=$(uci -q get dhcp.@dnsmasq[0].domain 2>/dev/null || true)
 _LOCAL_DOMAIN="${_LOCAL_DOMAIN:-lan}"
@@ -97,6 +96,13 @@ _DEV_HN=$(awk -v m="$MAC" 'tolower($2)==tolower(m)&&$4!="*"{print $4;exit}' /tmp
 if [ -z "$_DEV_HN" ]; then
     _uci_idx=$(uci show dhcp 2>/dev/null | grep -i "'${MAC}'" | grep -oE "@host\[[0-9]+\]" | head -1)
     [ -n "$_uci_idx" ] && _DEV_HN=$(uci -q get "dhcp.${_uci_idx}.name" 2>/dev/null || true)
+fi
+if [ -n "$_DEV_LABEL" ]; then
+    _DEV_DISPLAY="$_DEV_LABEL"
+elif [ -n "$_DEV_HN" ]; then
+    _DEV_DISPLAY="${_DEV_HN} (unlabelled)"
+else
+    _DEV_DISPLAY="${MAC} (unlabelled)"
 fi
 _DEV_DNS_DISPLAY="${_DEV_FQDN:-${_DEV_HN:+${_DEV_HN}.${_LOCAL_DOMAIN}}}"
 _BACK_URL="/cgi-bin/device?net=${NET}&mac=${MAC}"
