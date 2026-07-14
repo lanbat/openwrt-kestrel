@@ -759,7 +759,7 @@ if [ -f "$1" ]; then
             if(amac!="")by="<a href=\"/cgi-bin/device?net=lan&mac="h(amac)"\">"h(amac)"</a>"
             else by=h(actor!=""?actor:"unknown")
             if(act=="labelled")
-                dcell="<td><span class=\"badge badge-labelled\">Labelled</span>"(host!=""?" <span class=\"dim\" style=\"font-size:.82rem\">"h(host)"</span>":"")  "</td>"
+                dcell="<td><span class=\"badge badge-labelled\">Labelled</span>"(host!=""?"<br><span class=\"dim\" style=\"font-size:.82rem\">"h(host)"</span>":"")  "</td>"
             else
                 dcell="<td><span class=\"badge badge-"cls"\">"lbl"</span></td>"
             printf "<tr><td class=\"dim\">%s</td>%s<td>%s</td><td>%s</td><td>%s</td><td class=\"dim\">%s</td></tr>\n",\
