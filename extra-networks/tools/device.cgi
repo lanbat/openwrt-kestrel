@@ -156,17 +156,19 @@ IPv6: ${_actor_ip6:----}"
             _slug=$(_slugify "$_safe")
             _write_device_dns "$_iface" "$MAC" "$_slug" \
                 "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}"
-            _ntfy "Label set — ${_iface}" default pencil2 \
-                "MAC: ${MAC}${_DEV_LABEL:+
+            if [ "$_safe" != "$_DEV_LABEL" ]; then
+                _ntfy "Label set — ${_iface}" default pencil2 \
+                    "MAC: ${MAC}${_DEV_LABEL:+
 Was: ${_DEV_LABEL}}
 Now: ${_safe}
 
 ${_actor_info}"
-            _join_history_add "$_iface" labelled "$MAC" \
-                "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}" \
-                "${_DEV_LABEL:+${_DEV_LABEL} → }${_safe}" \
-                "$_actor_display" "$_actor_ip4" "$_actor_ip6" "$_actor_mac" \
-                "${JOIN_HISTORY_RETENTION:-90d}"
+                _join_history_add "$_iface" labelled "$MAC" \
+                    "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}" \
+                    "${_DEV_LABEL:+${_DEV_LABEL} → }${_safe}" \
+                    "$_actor_display" "$_actor_ip4" "$_actor_ip6" "$_actor_mac" \
+                    "${JOIN_HISTORY_RETENTION:-90d}"
+            fi
         fi
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
