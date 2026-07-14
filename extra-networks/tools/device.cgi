@@ -153,9 +153,6 @@ IPv6: ${_actor_ip6:----}"
         if [ -n "$_safe" ]; then
             mkdir -p "$BASE_DIR"
             _upsert "$_labels_f" "$MAC" "$_safe"
-            _slug=$(_slugify "$_safe")
-            _write_device_dns "$_iface" "$MAC" "$_slug" \
-                "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}"
             if [ "$_safe" != "$_DEV_LABEL" ]; then
                 _ntfy "Label set — ${_iface}" default pencil2 \
                     "MAC: ${MAC}${_DEV_LABEL:+
@@ -169,6 +166,11 @@ ${_actor_info}"
                     "$_actor_display" "$_actor_ip4" "$_actor_ip6" "$_actor_mac" \
                     "${JOIN_HISTORY_RETENTION:-90d}"
             fi
+            # Run last: restarts dnsmasq, which drops local DNS resolution for
+            # several seconds — must happen after _ntfy's curl call resolves NOTIFY_URL.
+            _slug=$(_slugify "$_safe")
+            _write_device_dns "$_iface" "$MAC" "$_slug" \
+                "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}"
         fi
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
