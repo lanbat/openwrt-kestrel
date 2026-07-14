@@ -545,9 +545,14 @@ if [ "$_online_text" != Online ] && [ -n "$_DEV_IP6" ]; then
     case "$_ns" in REACHABLE|DELAY|PROBE) _online_cls=ok; _online_text=Online ;; esac
 fi
 
-# Manufacturer via OUI lookup
+# Manufacturer via OUI lookup; locally administered (randomized) MACs have no OUI entry
 _mac_oui=$(printf '%s' "$MAC" | tr -d ':' | tr 'abcdef' 'ABCDEF' | cut -c1-6)
-_MANUFACTURER=$(awk -v p="$_mac_oui" -F'\t' '$1==p{print $2; exit}' "${BASE_DIR}/oui.txt" 2>/dev/null || true)
+_mac_first=$(printf '%d' "0x${_mac_oui%????}")
+if [ $(( _mac_first & 2 )) -ne 0 ]; then
+    _MANUFACTURER="Randomized MAC"
+else
+    _MANUFACTURER=$(awk -v p="$_mac_oui" -F'\t' '$1==p{print $2; exit}' "${BASE_DIR}/oui.txt" 2>/dev/null || true)
+fi
 
 # History stats: last seen, first seen, join count across all networks
 # shellcheck disable=SC2086
