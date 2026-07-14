@@ -684,15 +684,22 @@ NOTIFYEOF
     fi
 
     _cron_set extra-networks-monitor  "* * * * * sh ${SCRIPT_DIR}/tools/check-access-log.sh"
-    _cron_set extra-networks-reboot   "@reboot sleep 30 && sh ${SCRIPT_DIR}/tools/notify-reboot.sh"
     _cron_set extra-networks-digest   "0 8 * * * sh ${SCRIPT_DIR}/tools/digest.sh"
     _cron_set extra-networks-bwcheck  "0 * * * * sh ${SCRIPT_DIR}/tools/bandwidth-check.sh"
     _cron_set extra-networks-vpncheck "*/5 * * * * sh ${SCRIPT_DIR}/tools/check-vpn.sh"
     _cron_set extra-networks-wancheck "*/5 * * * * sh ${SCRIPT_DIR}/tools/check-wan.sh"
+    # BusyBox crond does not support @reboot — use an init.d service instead
+    ( crontab -l 2>/dev/null | grep -vF '# extra-networks-reboot' ) | crontab -
+    printf '#!/bin/sh /etc/rc.common\nSTART=98\nstart() { ( sleep 30; sh "%s/tools/notify-reboot.sh" ) & }\n' \
+        "${SCRIPT_DIR}" > /etc/init.d/extra-networks-reboot
+    chmod 0755 /etc/init.d/extra-networks-reboot
+    /etc/init.d/extra-networks-reboot enable 2>/dev/null || true
 else
-    # Remove crons only if no remaining network has NOTIFY_URL configured
+    # Remove crons and reboot notify service if no remaining network has NOTIFY_URL
     if ! grep -qE 'NOTIFY_URL=.+' "${BASE_DIR}/"*-notify.conf 2>/dev/null; then
         ( crontab -l 2>/dev/null | grep -v '# extra-networks-' ) | crontab -
+        /etc/init.d/extra-networks-reboot disable 2>/dev/null || true
+        rm -f /etc/init.d/extra-networks-reboot
     fi
 fi
 
