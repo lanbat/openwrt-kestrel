@@ -247,8 +247,8 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     [ -z "${IFACE_NAME:-}" ] && continue
 
     _iface="$IFACE_NAME"
-    _rx=$(_nft_bytes "${_iface}_counter" in)
-    _tx=$(_nft_bytes "${_iface}_counter" out)
+    _down=$(_nft_bytes "${_iface}_counter" out)
+    _up=$(_nft_bytes "${_iface}_counter" in)
     _dc=$(awk -v s="${SUBNET}." '$3~s{c++} END{print c+0}' /tmp/dhcp.leases 2>/dev/null)
     _dc_str=$([ "${_dc:-0}" = 1 ] && echo "1 device" || echo "${_dc:-0} devices")
     _display="${DESCRIPTION:-$(printf '%s' "$_iface" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')}"
@@ -256,7 +256,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
     _networks_section="${_networks_section:+${_networks_section}
 
 }${_display} — ${_dc_str}
-↓ $(_human "$_rx")  ↑ $(_human "$_tx")"
+↓ $(_human "$_down")  ↑ $(_human "$_up")"
 
     [ -n "${NOTIFY_URL:-}" ] || continue
     case " $_notify_urls " in *" $NOTIFY_URL "*) ;; *)
