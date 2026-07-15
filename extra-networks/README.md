@@ -280,7 +280,7 @@ Sent every morning at 08:00. Includes:
 
 - **System health** — uptime, 1-min load average, memory usage %
 - **VPN status** — up/down per tier (if split-routing is configured)
-- **Routing set sizes** — entry count for each nft set, and how long ago the blocklists were last refreshed
+- **Blocklists** — domain and IP count per category (from the last `update-routing-sets` run), and how long ago it ran
 - **WireGuard server peers** — how many peers were active in the last 24h (for server-mode WG interfaces)
 - **Traffic** — ↓/↑ totals, connected device count (active DHCP leases), active LAN access rule count per network
 - **Blocked counts** — LAN access requests and allowlist rejections logged since boot
@@ -371,6 +371,15 @@ VLAN_TRUNK=eth0  # physical interface the trunk arrives on (hardware-specific)
 The trunk interface name depends on your board — check with `ip link show`. Common values: `eth0`, `eth1`, `lan1`. `install.sh` creates an `8021q` VLAN device (`eth0.20`) and adds it to `br-${IFACE}`; netifd brings it up automatically.
 
 Omit both variables (or leave them blank) for WiFi-only — the feature is entirely opt-in.
+
+## WiFi VAP recovery
+
+On some MediaTek Filogic boards (MT7986 / Alder Lake), a race condition in the mac80211 driver causes VAPs to disappear after a `wifi reload` — the radio is up but no interfaces appear. Two complementary services handle this automatically:
+
+- **`wifi-recover` (init.d, START=99)** — runs at boot after everything else has started; checks each radio for live VAPs and replays the hostapd config via ubus if any are missing. Retries up to 5 times with a 3-second delay between attempts.
+- **`wifi-recover-hotplug`** — listens for `phy0-ap*` interface-removal events mid-session (triggered by package upgrades or re-running `install.sh`); applies the same recovery after a 3-second settling delay. Uses an atomic lock so only one recovery runs at a time.
+
+Both are installed by `install.sh` and are harmless on hardware not affected by the race — they exit immediately when VAPs are already present.
 
 ## Tools
 

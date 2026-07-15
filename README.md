@@ -16,6 +16,8 @@ Routes specific domains and IPs through a WireGuard VPN without
 moving the default gateway. Supports domain lists in many formats,
 dnsmasq-based lazy resolution, and daily auto-updates.
 
+Supplementary docs: [supported formats](split-routing/docs/supported-formats.md) · [troubleshooting](split-routing/docs/troubleshooting.md) · [WireGuard VPN server](split-routing/docs/wireguard-vpn.md)
+
 ## Install
 
 ```sh

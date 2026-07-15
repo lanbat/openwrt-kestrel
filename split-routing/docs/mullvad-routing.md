@@ -215,3 +215,9 @@ To trigger manually after a `fw4 reload`:
 ```sh
 ACTION=ifup sh /etc/hotplug.d/iface/99-mullvad-routing
 ```
+
+## See also
+
+- [Supported blocklist formats](supported-formats.md) — all domain/IP/tracker list formats the updater accepts
+- [Troubleshooting](troubleshooting.md) — diagnosing empty sets, missing routing rules, dnsmasq capability issues
+- [Inbound WireGuard VPN server](wireguard-vpn.md) — set up the router as a WireGuard server so remote devices join the LAN (and benefit from Mullvad policy routing)
