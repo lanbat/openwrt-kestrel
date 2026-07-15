@@ -715,7 +715,7 @@ fi
 
 if [ "$MDNS" = yes ]; then
     if ! command -v avahi-daemon >/dev/null 2>&1; then
-        apk add avahi-dbus-daemon >/dev/null
+        apk add avahi-nodbus-daemon >/dev/null
     fi
     mkdir -p /etc/avahi
     # Gather all interfaces that already have mDNS enabled, plus this one.
