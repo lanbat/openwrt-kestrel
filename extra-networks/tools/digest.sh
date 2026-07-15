@@ -134,41 +134,54 @@ done
 
 _sets_line=""
 if [ -d /etc/split-routing ]; then
-    _sets_ok=1; _sets_any=0
+    _sets_bullets=""; _sets_any=0
+    _log=$(cat /tmp/routing-sets.log 2>/dev/null)
     for _conf in /etc/split-routing/vpn-*.conf; do
         [ -f "$_conf" ] || continue
-        _tier=$(basename "$_conf" .conf | sed 's/^vpn-//')
         unset VPN_IFACE DNS_CATS RESOLVE_CATS
         . "$_conf"
         for _c in ${DNS_CATS:-}; do
             _sets_any=1
-            _n=$(nft list set inet fw4 "dns_${_tier}_${_c}4" 2>/dev/null \
-                 | awk '/expires/{c++}END{print c+0}')
-            [ "${_n:-0}" = "0" ] && _sets_ok=0
+            _n=$(printf '%s\n' "$_log" | grep -A3 "==> dns ${_c}$" \
+                 | awk '/^Domains:/{print $2+0; exit}')
+            if [ -n "$_n" ] && [ "$_n" -gt 0 ]; then
+                _sets_bullets="${_sets_bullets}• ${_c}: ${_n} domains
+"
+            else
+                _sets_bullets="${_sets_bullets}• ${_c}: empty
+"
+            fi
         done
         for _c in ${RESOLVE_CATS:-}; do
             _sets_any=1
-            _n=$(nft list set inet fw4 "resolve_${_tier}_${_c}4" 2>/dev/null \
-                 | awk '/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/{c++}END{print c+0}')
-            [ "${_n:-0}" = "0" ] && _sets_ok=0
+            _n=$(printf '%s\n' "$_log" | grep -A5 "==> resolve ${_c}$" \
+                 | awk '/^IPv4 set/{print $4+0; exit}')
+            _parsed=$(printf '%s\n' "$_log" | grep -A5 "==> resolve ${_c}$" \
+                      | awk '/^Domains parsed:/{print $3+0; exit}')
+            if [ "${_parsed:-0}" -eq 0 ]; then
+                continue  # no sources configured, skip
+            elif [ -n "$_n" ] && [ "$_n" -gt 0 ]; then
+                _sets_bullets="${_sets_bullets}• ${_c}: ${_n} IPs
+"
+            else
+                _sets_bullets="${_sets_bullets}• ${_c}: empty
+"
+            fi
         done
     done
-    if [ "$_sets_any" = 1 ]; then
+    if [ "$_sets_any" = 1 ] && [ -n "$_log" ]; then
         _log_ts=$(stat -c %Y /tmp/routing-sets.log 2>/dev/null); _log_ts=${_log_ts:-0}
         _log_age=""
         if [ "${_log_ts:-0}" -gt 0 ]; then
             _age_secs=$(( $(date +%s) - _log_ts ))
             if [ "$_age_secs" -lt 3600 ]; then
-                _log_age=", refreshed $(( _age_secs / 60 )) minutes ago"
+                _log_age=" (refreshed $(( _age_secs / 60 )) min ago)"
             else
-                _log_age=", refreshed $(( _age_secs / 3600 )) hours ago"
+                _log_age=" (refreshed $(( _age_secs / 3600 )) h ago)"
             fi
         fi
-        if [ "$_sets_ok" = 0 ]; then
-            _sets_line="Blocklists: some lists are empty${_log_age}"
-        else
-            _sets_line="Blocklists: up to date${_log_age}"
-        fi
+        _sets_line="Blocklists${_log_age}:
+${_sets_bullets%?}"
     fi
 fi
 
