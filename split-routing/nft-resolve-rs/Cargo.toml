@@ -1,0 +1,22 @@
+[package]
+name = "nft-resolve"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nft-resolve"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "fs"] }
+anyhow = "1"
+hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+ipnet = "2"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"
