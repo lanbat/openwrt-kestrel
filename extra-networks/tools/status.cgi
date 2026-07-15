@@ -356,7 +356,7 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
 
     _devs=$(
         awk -v s="${SUBNET}." '$3~s{print $4"\t"$3"\t"$2"\t"$1}' /tmp/dhcp.leases 2>/dev/null
-        printf '%s\n' "$_neigh6" | while IFS=$(printf '\t') read -r _nmac _nip6; do
+        printf '%s\n' "$_neigh6" | awk -F'\t' '!seen[$1]++' | while IFS=$(printf '\t') read -r _nmac _nip6; do
             [ -n "$_nmac" ] || continue
             awk -v m="$_nmac" 'tolower($2)==tolower(m){found=1} END{exit found?0:1}' /tmp/dhcp.leases 2>/dev/null \
                 || printf '*\t-\t%s\t0\n' "$_nmac"
