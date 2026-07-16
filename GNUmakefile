@@ -62,12 +62,13 @@ $(NFT_BIN):
 
 # ── shared staging ────────────────────────────────────────────────────────────
 
-$(STAGING)/.staged: $(UI_BIN) $(NFT_BIN) release/files/kestreld.init
+$(STAGING)/.staged: $(UI_BIN) $(NFT_BIN)
 	rm -rf $(STAGING) $(CONTROL)
-	mkdir -p $(STAGING)/usr/bin $(STAGING)/etc/init.d $(CONTROL)
-	install -m 0755 $(UI_BIN)                       $(STAGING)/usr/bin/kestreld
-	install -m 0755 $(NFT_BIN)                      $(STAGING)/usr/bin/nft-resolve
-	install -m 0755 release/files/kestreld.init    $(STAGING)/etc/init.d/kestreld
+	mkdir -p $(STAGING)/usr/bin $(STAGING)/www/cgi-bin $(CONTROL)
+	install -m 0755 $(UI_BIN)  $(STAGING)/usr/bin/kestreld
+	install -m 0755 $(NFT_BIN) $(STAGING)/usr/bin/nft-resolve
+	ln -sf /usr/bin/kestreld   $(STAGING)/www/cgi-bin/status
+	ln -sf /usr/bin/kestreld   $(STAGING)/www/cgi-bin/device
 	touch $@
 
 # ── .apk (OpenWrt snapshot / apk) ────────────────────────────────────────────
@@ -79,19 +80,14 @@ $(APK_OUT): $(STAGING)/.staged
 	@echo "==> $(notdir $(APK_OUT))"
 	printf 'pkgname = %s\npkgver = %s\narch = %s\nsize = %s\npkgdesc = %s\nurl = %s\nbuilddate = %s\npackager = %s\n' \
 	  '$(PKG_NAME)' '$(PKG_VER_FULL)' '$(ARCH)' \
-	  "$$(find $(STAGING)/usr $(STAGING)/etc -type f | xargs du -b | awk '{s+=$$1}END{print s}')" \
+	  "$$(find $(STAGING)/usr $(STAGING)/www -type f | xargs du -b | awk '{s+=$$1}END{print s}')" \
 	  'Extra-networks router UI + nft-resolve blocklist resolver' \
 	  'https://github.com/lanbat/openwrt-kestrel' \
 	  "$$(date +%s)" \
 	  'Kiril Momchilov <momchilov@gmail.com>' \
 	  > $(STAGING)/.PKGINFO
-	printf '#!/bin/sh\n/etc/init.d/kestreld enable\n/etc/init.d/kestreld start\n' \
-	  > $(STAGING)/.post-install
-	printf '#!/bin/sh\n/etc/init.d/kestreld stop\n/etc/init.d/kestreld disable\n' \
-	  > $(STAGING)/.pre-deinstall
-	chmod 0755 $(STAGING)/.post-install $(STAGING)/.pre-deinstall
 	mkdir -p $(OUTDIR)
-	tar -czf $(APK_OUT) -C $(STAGING) .PKGINFO .post-install .pre-deinstall usr etc
+	tar -czf $(APK_OUT) -C $(STAGING) .PKGINFO usr www
 
 # ── .ipk (OpenWrt stable / opkg) ─────────────────────────────────────────────
 # Install with: opkg install --force-reinstall /tmp/extra-networks_*.ipk
@@ -108,13 +104,8 @@ $(IPK_OUT): $(STAGING)/.staged
 	  ' /usr/bin/kestreld   — HTTP daemon for /cgi-bin/status and /cgi-bin/device' \
 	  ' /usr/bin/nft-resolve — DNS blocklist to nftables set resolver' \
 	  > $(CONTROL)/control
-	printf '#!/bin/sh\n[ -n "$$IPKG_INSTROOT" ] && exit 0\n/etc/init.d/kestreld enable\n/etc/init.d/kestreld start\n' \
-	  > $(CONTROL)/postinst
-	printf '#!/bin/sh\n[ -n "$$IPKG_INSTROOT" ] && exit 0\n/etc/init.d/kestreld stop\n/etc/init.d/kestreld disable\n' \
-	  > $(CONTROL)/prerm
-	chmod 0755 $(CONTROL)/postinst $(CONTROL)/prerm
 	mkdir -p $(OUTDIR)
-	tar -czf $(OUTDIR)/data.tar.gz    -C $(STAGING) usr etc
+	tar -czf $(OUTDIR)/data.tar.gz    -C $(STAGING) usr www
 	tar -czf $(OUTDIR)/control.tar.gz -C $(CONTROL) .
 	printf '2.0\n' > $(OUTDIR)/debian-binary
 	ar cr $(IPK_OUT) \

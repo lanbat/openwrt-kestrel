@@ -76,7 +76,7 @@ impl AppState {
     }
 }
 
-async fn build_snapshot(base_dir: &Path) -> Snapshot {
+pub async fn build_snapshot(base_dir: &Path) -> Snapshot {
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

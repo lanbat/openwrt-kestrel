@@ -152,10 +152,14 @@ pub struct PfwdRow {
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
+pub async fn render(snap: &Snapshot) -> String {
+    let tmpl = build(snap).await;
+    tmpl.render().unwrap_or_else(|e| format!("Template error: {e}"))
+}
+
 pub async fn get(State(state): State<Arc<AppState>>) -> Html<String> {
     let snap = state.snap().await;
-    let tmpl = build(&snap).await;
-    Html(tmpl.render().unwrap_or_else(|e| format!("Template error: {e}")))
+    Html(render(&snap).await)
 }
 
 async fn build(snap: &Snapshot) -> StatusTmpl {

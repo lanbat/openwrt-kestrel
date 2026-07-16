@@ -6,12 +6,14 @@ Two cooperating toolkits for OpenWrt routers, delivered as a single native packa
 
 ### kestreld
 
-An HTTP daemon (`/usr/bin/kestreld`) that runs on port 8080 and serves two endpoints:
+A CGI binary (`/usr/bin/kestreld`) served directly by uhttpd via symlinks at `/www/cgi-bin/`. Serves two endpoints:
 
 - `GET /cgi-bin/status` — live dashboard: WiFi clients, nftables traffic counters, WireGuard peers, DHCP leases, neighbor table
 - `GET /cgi-bin/device` — per-device management page
 
-Managed by procd (`/etc/init.d/kestreld`), starts at boot. Sits behind nginx, which proxies these two paths to port 8080 and forwards everything else to uhttpd on port 8181.
+Renders HTML on demand and caches the result in `/tmp/kestreld/` for 5 seconds, so repeated page loads within the TTL are instant. No daemon, no extra port, no proxy — uhttpd handles HTTPS and authentication as normal.
+
+Also runnable as a standalone HTTP server (`kestreld 8080`) for local development.
 
 Source: [`extra-networks/kestreld-rs/`](extra-networks/kestreld-rs/)
 
@@ -49,21 +51,7 @@ opkg install --force-reinstall /tmp/extra-networks_*_aarch64_cortex-a53.ipk
 
 To find your architecture: `apk info --print-arch` or `opkg print-architecture`.
 
-### 2. Set up the nginx proxy
-
-kestreld listens on port 8080. Move uhttpd off port 80 so nginx can front both:
-
-```sh
-uci set uhttpd.main.listen_http='127.0.0.1:8181'
-uci set uhttpd.main.listen_https='127.0.0.1:8443'
-uci commit uhttpd && /etc/init.d/uhttpd restart
-
-apk add nginx
-cp /root/openwrt-kestrel/release/files/kestreld-nginx.conf /etc/nginx/conf.d/
-/etc/init.d/nginx enable && /etc/init.d/nginx start
-```
-
-### 3. Clone the repo and install the shell scripts
+### 2. Clone the repo and install the shell scripts
 
 ```sh
 git clone https://github.com/lanbat/openwrt-kestrel /root/openwrt-kestrel

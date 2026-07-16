@@ -13,14 +13,25 @@ pub struct DeviceQuery {
     pub mac: Option<String>,
 }
 
+pub fn render(net: &str, mac: &str) -> String {
+    format!(r#"<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Device — {mac}</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:1rem}}
+h1{{font-size:1.4rem}}.sub{{color:#888;font-size:.85rem;margin-bottom:2rem}}
+</style></head><body>
+<h1>{mac}</h1>
+<div class="sub">{net} &nbsp;·&nbsp; <a href="/cgi-bin/status">Dashboard</a></div>
+<p><a href="/cgi-bin/device-shell?net={net}&amp;mac={mac}">Full device page (shell CGI)</a></p>
+</body></html>"#)
+}
+
 pub async fn get(
     State(_state): State<Arc<AppState>>,
     Query(params): Query<DeviceQuery>,
 ) -> Html<String> {
     let net = params.net.as_deref().unwrap_or("lan");
     let mac = params.mac.as_deref().unwrap_or("");
-
-    // Validate params
     if !net.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || net.is_empty() {
         return Html("<h1>Invalid network</h1>".to_string());
     }
@@ -31,19 +42,7 @@ pub async fn get(
     if !mac_valid {
         return Html("<h1>Invalid MAC</h1>".to_string());
     }
-
-    // For now, render a basic device page
-    let html = format!(r#"<!DOCTYPE html><html><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Device — {mac}</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:1rem}}
-h1{{font-size:1.4rem}}.sub{{color:#888;font-size:.85rem;margin-bottom:2rem}}
-</style></head><body>
-<h1>{mac}</h1>
-<div class="sub">{net} &nbsp;·&nbsp; <a href="/cgi-bin/status">Dashboard</a></div>
-<p><a href="/cgi-bin/device-shell?net={net}&amp;mac={mac}">Full device page (shell CGI)</a></p>
-</body></html>"#);
-    Html(html)
+    Html(render(net, mac))
 }
 
 #[derive(Deserialize)]

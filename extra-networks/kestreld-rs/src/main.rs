@@ -1,11 +1,17 @@
 use std::path::PathBuf;
 
+mod cgi;
 mod data;
 mod routes;
 mod state;
 
 #[tokio::main]
 async fn main() {
+    if cgi::is_cgi() {
+        cgi::run().await;
+        return;
+    }
+
     let base_dir = PathBuf::from("/etc/extra-networks");
     let app_state = state::AppState::new(base_dir).await;
 
