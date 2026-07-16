@@ -8,97 +8,106 @@ pub struct NftState {
 
 pub async fn fetch() -> NftState {
     let raw = Command::new("nft")
-        .args(["-j", "list", "ruleset"])
+        .args(["list", "ruleset"])
         .output()
         .await
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        // fallback: plain text if -j not available / not useful
-        .or_else(|| {
-            // We'll parse the text format instead
-            None
-        })
         .unwrap_or_default();
-
     NftState { raw }
 }
 
 impl NftState {
-    /// Total bytes for a counter chain (in or out direction).
-    /// Parses: `nft list chain inet fw4 <chain>` text output cached in raw.
-    /// Since we have the full ruleset, we search within it.
+    /// Bytes for a counter chain (in = iifname, out = oifname).
     pub fn chain_bytes(&self, chain: &str, direction: &str) -> u64 {
-        // Parse from `nft list ruleset` text output
-        // We look for the chain block and then extract the counter bytes
         let iface_kw = if direction == "in" { "iifname" } else { "oifname" };
-
+        let header = format!("chain {chain} {{");
         let mut in_chain = false;
         let mut depth = 0usize;
 
         for line in self.raw.lines() {
-            let trimmed = line.trim();
-
-            if trimmed == format!("chain {chain} {{") || trimmed.starts_with(&format!("chain {chain} {{")) {
-                in_chain = true;
-                depth = 1;
+            let t = line.trim();
+            if !in_chain {
+                if t.starts_with(&header) {
+                    in_chain = true;
+                    depth = 1;
+                }
                 continue;
             }
-
-            if in_chain {
-                depth += trimmed.chars().filter(|&c| c == '{').count();
-                depth = depth.saturating_sub(trimmed.chars().filter(|&c| c == '}').count());
-
-                if depth == 0 {
-                    break;
-                }
-
-                if trimmed.contains(iface_kw) && trimmed.contains("counter") {
-                    if let Some(bytes) = extract_counter_bytes(trimmed) {
-                        return bytes;
-                    }
+            depth += t.chars().filter(|&c| c == '{').count();
+            depth = depth.saturating_sub(t.chars().filter(|&c| c == '}').count());
+            if depth == 0 {
+                break;
+            }
+            if t.contains(iface_kw) && t.contains("counter") {
+                if let Some(b) = extract_bytes(t) {
+                    return b;
                 }
             }
         }
         0
     }
 
-    /// Per-device bytes from a named set (e.g. `guest_device_bytes`).
-    /// Returns ip → bytes map.
+    /// Per-IP byte counters from a dynamic set. Returns ip → bytes.
     pub fn device_bytes(&self, set_name: &str) -> HashMap<String, u64> {
         let mut result = HashMap::new();
+        let header = format!("set {set_name} {{");
         let mut in_set = false;
+        let mut in_elements = false;
 
         for line in self.raw.lines() {
-            let trimmed = line.trim();
-
-            if trimmed.starts_with(&format!("set {set_name} {{")) {
-                in_set = true;
+            let t = line.trim();
+            if !in_set {
+                if t.starts_with(&header) {
+                    in_set = true;
+                }
                 continue;
             }
-
-            if in_set {
-                if trimmed == "}" {
+            if !in_elements {
+                if t.starts_with("elements") {
+                    in_elements = true;
+                    parse_element_chunk(t, &mut result);
+                    if t.ends_with('}') {
+                        break;
+                    }
+                } else if t == "}" {
                     break;
                 }
-                // Elements look like: 192.168.10.5 counter packets 12 bytes 34567 ,
-                // or: { 192.168.10.5 counter packets 12 bytes 34567 }
-                let s = trimmed.trim_matches(|c| c == '{' || c == '}').trim();
-                for part in s.split(',') {
-                    let part = part.trim();
-                    if let Some(ip_end) = part.find(' ') {
-                        let ip = &part[..ip_end];
-                        if let Some(bytes) = extract_counter_bytes(part) {
-                            result.insert(ip.to_string(), bytes);
-                        }
-                    }
-                }
+                continue;
+            }
+            parse_element_chunk(t, &mut result);
+            if t.ends_with('}') {
+                break;
             }
         }
         result
     }
 }
 
-fn extract_counter_bytes(s: &str) -> Option<u64> {
+fn parse_element_chunk(s: &str, result: &mut HashMap<String, u64>) {
+    // Strip "elements = {" prefix and trailing "}"
+    let s = s
+        .trim_start_matches("elements")
+        .trim_start_matches('=')
+        .trim_matches(|c: char| c == '{' || c == '}')
+        .trim();
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(space) = part.find(' ') {
+            let ip = &part[..space];
+            if ip.contains('.') || ip.contains(':') {
+                if let Some(bytes) = extract_bytes(part) {
+                    result.insert(ip.to_string(), bytes);
+                }
+            }
+        }
+    }
+}
+
+fn extract_bytes(s: &str) -> Option<u64> {
     let parts: Vec<&str> = s.split_whitespace().collect();
     parts
         .windows(2)

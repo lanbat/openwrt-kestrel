@@ -1,0 +1,338 @@
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<title>Status — {{ hostname }}</title>
+<style>
+:root{color-scheme:light}
+*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:1rem;color:#111;background:#fff}
+h1{font-size:1.4rem;margin-bottom:.15rem}
+.sub{color:#888;font-size:.85rem;margin-bottom:2rem}
+h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:#888;
+   border-bottom:1px solid #e0e0e0;padding-bottom:.3rem;margin:1.75rem 0 .6rem}
+.card{background:#f5f5f5;border-radius:8px;padding:.7rem 1rem;margin:.4rem 0}
+.row{display:flex;justify-content:space-between;font-size:.9rem;padding:.18rem 0}
+.lbl{color:#666}.val{font-weight:600}
+.ok{color:#2e7d32}.warn{color:#c62828}.dim{color:#aaa}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:.875rem;margin:.4rem 0;
+      border:1px solid #ececec;border-radius:10px;overflow:hidden}
+th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;
+   color:#777;background:#fafafa;padding:.45rem .6rem;border-bottom:1px solid #e0e0e0}
+td{padding:.5rem .6rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tr:hover td{background:#fcfcfc}
+a{color:#1976d2;text-decoration:none}
+form{display:inline}
+button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
+       color:#fff;border:none;border-radius:4px}
+.actions{display:inline-flex;gap:.25rem;align-items:center;margin-left:.45rem;vertical-align:middle}
+.actions form{display:inline-flex}
+.actions button{font-weight:600;padding:.22rem .55rem;border-radius:999px;box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.btn-ok{background:#2e7d32}
+.btn-deny{background:#c62828}
+.btn-danger{background:#c62828}
+.badge{display:inline-flex;align-items:center;border-radius:999px;padding:.16rem .52rem;
+       font-size:.72rem;font-weight:700;letter-spacing:.02em}
+.badge-approved{color:#1b5e20;background:#e8f5e9}
+.badge-pending{color:#8a5a00;background:#fff3cd}
+.badge-denied{color:#b71c1c;background:#ffebee}
+.badge-untracked{color:#666;background:#eeeeee}
+.badge-revoked{color:#0d47a1;background:#e3f2fd}
+.badge-connected{color:#1b5e20;background:#e8f5e9}.badge-disconnected{color:#555;background:#eee}
+.badge-deleted{color:#fff;background:#37474f}
+.net-desc{color:#555;font-size:.88rem;margin:-.4rem 0 .6rem}
+.qr{display:flex;align-items:stretch;gap:1rem}
+.qr-info{font-size:.9rem;display:flex;flex-direction:column;flex:1;min-width:0}
+.qr-info strong{margin-bottom:.2rem}
+.q-lbl{font-size:.72rem;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-top:.4rem}
+.qr-info code{background:#e8e8e8;padding:.2rem .45rem;border-radius:4px;
+              word-break:break-all;font-size:.85rem;align-self:flex-start}
+</style></head><body>
+<h1>{{ hostname }}</h1>
+<div class="sub">{{ now }} &nbsp;·&nbsp; <a href="">Refresh</a></div>
+
+<h2>System</h2>
+<div class="card">
+  <div class="row"><span class="lbl">Uptime</span><span class="val">{{ uptime }}</span></div>
+  <div class="row"><span class="lbl">Memory</span><span class="val">{{ memory }}</span></div>
+  <div class="row"><span class="lbl">Load</span><span class="val">{{ load }}</span></div>
+  {% if let Some(ip4) = wan_ip.as_ref() %}{% if let Some(ip6) = wan_ipv6.as_ref() %}
+  <div class="row"><span class="lbl">WAN IPv4</span><span class="val">{{ ip4 }}</span></div>
+  <div class="row"><span class="lbl">WAN IPv6</span><span class="val">{{ ip6 }}</span></div>
+  {% else %}
+  <div class="row"><span class="lbl">WAN IP</span><span class="val">{{ ip4 }}</span></div>
+  {% endif %}{% endif %}
+</div>
+
+{% if !wifi.is_empty() %}
+<h2>WiFi</h2>
+<div class="card">
+  {% for row in wifi %}
+  <div class="row"><span class="lbl">{{ row.label }}</span><span class="val {{ row.css }}">{{ row.value }}</span></div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if !vpn.is_empty() %}
+<h2>VPN</h2>
+<div class="card">
+  {% for row in vpn %}
+  <div class="row"><span class="lbl">{{ row.label }}</span><span class="val {{ row.css }}">{{ row.value }}</span></div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% for wg in wg_sections %}
+<h2>WireGuard — {{ wg.name }}</h2>
+<table>
+  <tr>
+    <th style="width:2rem;text-align:center;padding:.45rem .15rem"></th>
+    <th>Peer</th><th>Endpoint</th><th>Allowed IPs</th><th>Last seen</th><th>Traffic ↓/↑</th>
+  </tr>
+  {% for p in wg.peers %}
+  <tr>
+    <td style="text-align:center;padding:.5rem .15rem">
+      <span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:{% if p.online %}#2e7d32{% else %}#ccc{% endif %}"></span>
+    </td>
+    <td>{{ p.label }}</td>
+    <td>{% if p.endpoint.is_empty() %}—{% else %}{{ p.endpoint }}{% endif %}</td>
+    <td class="dim">{{ p.allowed_ips }}</td>
+    <td>{{ p.last_seen }}</td>
+    <td>{{ p.traffic }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endfor %}
+
+{% for net in networks %}
+<h2>{{ net.iface }}{% if !net.ssid.is_empty() %} — {{ net.ssid }}{% endif %} <a href="/cgi-bin/network?net={{ net.iface }}" style="font-size:.75rem;font-weight:400;text-transform:none;letter-spacing:0;color:#1976d2;margin-left:.5rem">Network →</a></h2>
+{% if !net.description.is_empty() %}<div class="net-desc">{{ net.description }}</div>{% endif %}
+<div class="card">
+  <div class="row"><span class="lbl">State</span><span class="val {% if net.up %}ok{% else %}warn{% endif %}">{% if net.up %}Up{% else %}Down{% endif %}</span></div>
+  {% if !net.subnet.is_empty() %}
+  <div class="row"><span class="lbl">Subnet</span><span class="val">{{ net.subnet }}.0/24</span></div>
+  {% endif %}
+  {% for (lbl, pfx) in net.ipv6_prefixes %}
+  <div class="row"><span class="lbl">{{ lbl }}</span><span class="val">{{ pfx }}</span></div>
+  {% endfor %}
+  <div class="row"><span class="lbl">Traffic ↓ / ↑</span><span class="val">{{ net.traffic_down }} / {{ net.traffic_up }}</span></div>
+  <div class="row"><span class="lbl">Devices</span><span class="val">{{ net.device_count }}</span></div>
+  {% if !net.dns_server.is_empty() %}
+  <div class="row"><span class="lbl">DNS</span><span class="val">{{ net.dns_server }}{% if !net.dns_server_v6.is_empty() %} / {{ net.dns_server_v6 }}{% endif %}{% if net.dot %} (DoT){% endif %}</span></div>
+  {% endif %}
+  {% if !net.rate_limit.is_empty() && net.rate_limit != "0" %}
+  <div class="row"><span class="lbl">Rate limit</span><span class="val">{{ net.rate_limit }}{% if !net.rate_limit_per_device.is_empty() && net.rate_limit_per_device != "0" %} / {{ net.rate_limit_per_device }} per device{% endif %}</span></div>
+  {% endif %}
+  <div class="row"><span class="lbl">LAN access</span><span class="val">{% if net.lan_access %}yes{% else %}no{% endif %}</span></div>
+  <div class="row"><span class="lbl">Isolation</span><span class="val">{% if net.isolate %}on{% else %}off{% endif %}</span></div>
+  <div class="row"><span class="lbl">Join alerts</span><span class="val">{% if net.notify_join %}on{% else %}off{% endif %}</span></div>
+  {% if net.bandwidth_threshold_mb != 0 %}
+  <div class="row"><span class="lbl">Bandwidth alert</span><span class="val">{{ net.bandwidth_threshold_mb }} MB/h</span></div>
+  {% endif %}
+  {% if !net.wlan_label.is_empty() %}
+  <div class="row"><span class="lbl">WiFi</span><span class="val {% if net.wlan_ok %}ok{% else %}warn{% endif %}">{{ net.wlan_label }}</span></div>
+  {% endif %}
+</div>
+
+{% if net.show_qr %}
+<div class="card qr">
+  <div class="qr-canvas" data-qr="{{ net.qr_data }}"></div>
+  <div class="qr-info">
+    <span class="q-lbl">SSID</span><strong>{{ net.ssid }}</strong>
+    <span class="q-lbl">Password</span><code>{{ net.wifi_key }}</code>
+    {% if net.rotate_password %}
+    <form method="POST" action="/cgi-bin/rotate-password" style="margin-top:auto;padding-top:.6rem;text-align:right">
+      <input type="hidden" name="net" value="{{ net.iface }}">
+      <button class="btn-danger" type="submit" onclick="return confirm('Rotate the WiFi password for {{ net.iface }}? All connected devices will need to reconnect with the new password.')">Rotate password</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if !net.devices.is_empty() %}
+<table>
+  <tr>
+    <th style="width:2rem;text-align:center;padding:.45rem .15rem"></th>
+    <th>Label</th><th>DNS</th><th>IPv4</th>
+    {% if show_ip6_col %}<th>IPv6</th>{% endif %}
+    <th>Joined</th>
+    {% if show_join_col %}<th>Join access</th>{% endif %}
+    <th>MAC</th>
+    <th>Traffic</th>
+    <th>Lease expires</th>
+  </tr>
+  {% for dev in net.devices %}
+  <tr>
+    <td style="text-align:center;padding:.5rem .15rem">
+      <span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:{% if dev.online %}#2e7d32{% else %}#ccc{% endif %}"></span>
+    </td>
+    <td>
+      {% if dev.has_label %}
+        {{ dev.label }}
+      {% else %}
+        <form method="POST" action="/cgi-bin/approve-join" style="margin:0">
+          <input type="hidden" name="net" value="{{ net.iface }}">
+          <input type="hidden" name="mac" value="{{ dev.mac }}">
+          <input type="hidden" name="action" value="set_label">
+          <input type="text" name="label" placeholder="Add label" maxlength="40" style="padding:.2rem .35rem;border:1px solid #ccc;border-radius:3px;font-size:.8rem">
+          <button type="submit" style="margin-left:.2rem">Save</button>
+        </form>
+      {% endif %}
+    </td>
+    <td class="dim">{{ dev.dns }}</td>
+    <td>{% if dev.ip == "—" %}—{% else %}{{ dev.ip }}{% endif %}</td>
+    {% if show_ip6_col %}<td class="dim">{% if dev.ipv6.is_empty() %}—{% else %}{{ dev.ipv6 }}{% endif %}</td>{% endif %}
+    <td class="dim">{{ dev.joined }}</td>
+    {% if show_join_col %}
+    <td>
+      {% if net.join_approval %}
+      <span class="badge badge-{{ dev.join_css }}">{{ dev.join_state }}</span>
+      <span class="actions">
+        {% if dev.show_approve %}
+        <form method="POST" action="/cgi-bin/approve-join">
+          <input type="hidden" name="net" value="{{ net.iface }}">
+          <input type="hidden" name="ip" value="{{ dev.approve_ip }}">
+          <input type="hidden" name="mac" value="{{ dev.mac }}">
+          <input type="hidden" name="host" value="{{ dev.hostname }}">
+          <input type="hidden" name="action" value="approve">
+          <input type="text" name="label" value="{{ dev.label_value }}" placeholder="Label (required)" required maxlength="40" style="display:block;padding:.25rem .4rem;margin:.25rem 0;border:1px solid #ccc;border-radius:4px;font-size:.8rem">
+          <button class="btn-ok" type="submit">Approve</button>
+        </form>
+        {% endif %}
+        {% if dev.show_deny %}
+        <form method="POST" action="/cgi-bin/approve-join">
+          <input type="hidden" name="net" value="{{ net.iface }}">
+          <input type="hidden" name="ip" value="{{ dev.approve_ip }}">
+          <input type="hidden" name="mac" value="{{ dev.mac }}">
+          <input type="hidden" name="host" value="{{ dev.hostname }}">
+          <input type="hidden" name="action" value="deny">
+          <button class="btn-deny" type="submit">Deny</button>
+        </form>
+        {% endif %}
+      </span>
+      {% else %}<span class="dim">—</span>{% endif %}
+    </td>
+    {% endif %}
+    <td class="dim"><a href="/cgi-bin/device?net={{ net.iface }}&amp;mac={{ dev.mac }}">{{ dev.mac }}</a></td>
+    <td>{{ dev.bytes }}</td>
+    <td>{{ dev.lease_expires }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if !net.history.is_empty() %}
+<h2 style="margin-top:1.25rem">Join history — {{ net.iface }}</h2>
+<table>
+  <tr><th>When</th><th>Decision</th><th>Label</th><th>IPv4</th><th>IPv6</th><th>MAC</th><th>By</th></tr>
+  {% for h in net.history %}
+  <tr>
+    <td class="dim">{{ h.when }}</td>
+    <td><span class="badge badge-{{ h.css }}">{{ h.action }}</span></td>
+    <td>{{ h.mac }}</td>
+    <td>{{ h.ip4 }}</td>
+    <td>{{ h.ip6 }}</td>
+    <td class="dim">{{ h.mac }}</td>
+    <td class="dim">{% if !h.by_mac.is_empty() %}<a href="/cgi-bin/device?net=lan&amp;mac={{ h.by_mac }}">{{ h.by }}</a>{% else %}{{ h.by }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if !net.pending_access.is_empty() %}
+<h2 style="margin-top:1.25rem">Pending — {{ net.iface }}</h2>
+<table>
+  <tr><th>Time</th><th>From (guest)</th><th>To (LAN)</th><th>Port/Proto</th><th></th></tr>
+  {% for p in net.pending_access %}
+  <tr>
+    <td>{{ p.ts }}</td>
+    <td>{{ p.src_name }}</td>
+    <td>{{ p.dst_name }}</td>
+    <td>{{ p.port }}/{{ p.proto }}</td>
+    <td>
+      <form method="POST" action="/cgi-bin/approve-access">
+        <input type="hidden" name="net" value="{{ net.iface }}">
+        <input type="hidden" name="src" value="{{ p.src }}">
+        <input type="hidden" name="dst" value="{{ p.dst }}">
+        <input type="hidden" name="proto" value="{{ p.proto }}">
+        <input type="hidden" name="port" value="{{ p.port }}">
+        <input type="hidden" name="dest_zone" value="lan">
+        <input type="hidden" name="duration" value="{{ net.default_duration }}">
+        <button type="submit">Grant</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if !net.active_rules.is_empty() %}
+<h2 style="margin-top:1.25rem">LAN access — {{ net.iface }}</h2>
+<table>
+  <tr><th>Device</th><th>Port/Proto</th><th>Expires</th></tr>
+  {% for r in net.active_rules %}
+  <tr>
+    <td>{{ r.device }}</td>
+    <td>{{ r.port_proto }}</td>
+    <td>{{ r.expires }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if !net.blocked.is_empty() %}
+<h2 style="margin-top:1.25rem">Recent blocked — {{ net.iface }}</h2>
+<table>
+  <tr><th>Time</th><th>From (device)</th><th>To</th><th>Port/Proto</th></tr>
+  {% for b in net.blocked %}
+  <tr>
+    <td>{{ b.ts }}</td>
+    <td>{{ b.src }}</td>
+    <td>{{ b.dst }}</td>
+    <td>{{ b.port_proto }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% endfor %}
+
+{% if !port_forwards.is_empty() %}
+<h2>Port forwards</h2>
+<table>
+  <tr><th>Name</th><th>Zone</th><th>Port</th><th>→ Host</th><th>Proto</th><th>Expires</th></tr>
+  {% for pf in port_forwards %}
+  <tr>
+    <td>{{ pf.name }}</td>
+    <td>{{ pf.zone }}</td>
+    <td>{{ pf.port }}</td>
+    <td>{{ pf.dest }}</td>
+    <td>{{ pf.proto }}</td>
+    <td>{{ pf.expires }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<script>
+(function(){
+  var q=document.querySelectorAll('.qr-canvas');
+  for(var i=0;i<q.length;i++){
+    var el=q[i],lines=el.getAttribute('data-qr').split('|').filter(Boolean);
+    if(!lines.length)continue;
+    var cols=lines[0].length,rows=lines.length,mods=cols>>1;
+    var cv=document.createElement('canvas');
+    cv.width=mods;cv.height=rows;
+    cv.style.cssText='width:120px;height:120px;image-rendering:pixelated;flex-shrink:0;border-radius:4px';
+    var ctx=cv.getContext('2d');
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,mods,rows);
+    ctx.fillStyle='#000';
+    for(var y=0;y<rows;y++)
+      for(var x=0;x<cols;x+=2)
+        if(lines[y][x]==='#')ctx.fillRect(x>>1,y,1,1);
+    el.parentNode.replaceChild(cv,el);
+  }
+})();
+</script>
+</body></html>
