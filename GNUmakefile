@@ -91,9 +91,7 @@ $(APK_OUT): $(STAGING)/.staged
 	  > $(STAGING)/.pre-deinstall
 	chmod 0755 $(STAGING)/.post-install $(STAGING)/.pre-deinstall
 	mkdir -p $(OUTDIR)
-	tar -czf $(APK_OUT) \
-	  -C $(STAGING) .PKGINFO .post-install .pre-deinstall \
-	  -C $(STAGING) usr etc
+	tar -czf $(APK_OUT) -C $(STAGING) .PKGINFO .post-install .pre-deinstall usr etc
 
 # ── .ipk (OpenWrt stable / opkg) ─────────────────────────────────────────────
 # Install with: opkg install --force-reinstall /tmp/extra-networks_*.ipk
