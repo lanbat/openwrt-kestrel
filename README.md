@@ -6,30 +6,38 @@ Two cooperating toolkits for OpenWrt routers, delivered as a single native packa
 
 ### kestreld
 
-A Rust HTTP daemon (`/usr/bin/kestreld`) that replaces the extra-networks shell CGI scripts. It keeps a 5-second TTL in-memory cache of router state and serves it via:
+An HTTP daemon (`/usr/bin/kestreld`) that runs on port 8080 and serves two endpoints:
 
 - `GET /cgi-bin/status` — live dashboard: WiFi clients, nftables traffic counters, WireGuard peers, DHCP leases, neighbor table
 - `GET /cgi-bin/device` — per-device management page
 
-Runs on port 8080 behind uhttpd (which handles everything else on port 80). Source: [`extra-networks/kestreld-rs/`](extra-networks/kestreld-rs/)
+Managed by procd (`/etc/init.d/kestreld`), starts at boot. Sits behind nginx, which proxies these two paths to port 8080 and forwards everything else to uhttpd on port 8181.
+
+Source: [`extra-networks/kestreld-rs/`](extra-networks/kestreld-rs/)
 
 ### nft-resolve
 
-A Rust CLI (`/usr/bin/nft-resolve`) that resolves a domain blocklist into nftables `add element` commands and applies them atomically. Supports Adblock, dnsmasq, hosts, RPZ, Unbound, ipset, clash, and plain-domain formats, with parallel DNS resolution. Source: [`split-routing/nft-resolve-rs/`](split-routing/nft-resolve-rs/)
+A CLI tool (`/usr/bin/nft-resolve`) that resolves a domain blocklist into nftables `add element` commands and applies them atomically. Supports Adblock, dnsmasq, hosts, RPZ, Unbound, ipset, clash, and plain-domain formats, with parallel DNS resolution.
 
-### extra-networks (shell)
+Source: [`split-routing/nft-resolve-rs/`](split-routing/nft-resolve-rs/)
 
-Shell scripts and CGI handlers for the isolated WiFi networks feature. Manages guest and untrusted IoT networks with dnsmasq-based isolation, per-device firewall rules, join approval, password rotation, and device labelling. Source: [`extra-networks/`](extra-networks/README.md)
+### extra-networks
 
-### split-routing (shell)
+Shell scripts and CGI handlers for isolated WiFi networks (guest, untrusted IoT). Manages per-network dnsmasq config, per-device firewall rules in nftables/fw4, join approval, push notifications, password rotation, and device labelling.
 
-Shell scripts that route specific domains and IPs through a WireGuard VPN without moving the default gateway. Integrates with nft-resolve for blocklist management. Source: [`split-routing/`](split-routing/docs/mullvad-routing.md) · [formats](split-routing/docs/supported-formats.md) · [troubleshooting](split-routing/docs/troubleshooting.md) · [WireGuard server setup](split-routing/docs/wireguard-vpn.md)
+Source: [`extra-networks/`](extra-networks/README.md)
+
+### split-routing
+
+Shell scripts that route specific domains and IPs through a WireGuard VPN without moving the default gateway. Uses nft-resolve for blocklist management and dnsmasq for lazy domain resolution.
+
+Source: [`split-routing/`](split-routing/docs/mullvad-routing.md) · [formats](split-routing/docs/supported-formats.md) · [troubleshooting](split-routing/docs/troubleshooting.md) · [WireGuard server setup](split-routing/docs/wireguard-vpn.md)
 
 ## Install on the router
 
-### From a pre-built package (recommended)
+### 1. Install the package
 
-Download the package for your architecture from the [latest release](https://github.com/lanbat/openwrt-kestrel/releases/latest) and install it:
+Download the `.apk` or `.ipk` for your architecture from the [latest release](https://github.com/lanbat/openwrt-kestrel/releases/latest).
 
 ```sh
 # OpenWrt snapshot (apk):
@@ -41,32 +49,9 @@ opkg install --force-reinstall /tmp/extra-networks_*_aarch64_cortex-a53.ipk
 
 To find your architecture: `apk info --print-arch` or `opkg print-architecture`.
 
-The package installs `/usr/bin/kestreld`, `/usr/bin/nft-resolve`, and `/etc/init.d/kestreld` (procd service, starts on boot at priority 95).
+### 2. Set up the nginx proxy
 
-### Extra-networks shell scripts
-
-The shell layer still needs to be installed from the repo on the router:
-
-```sh
-git clone https://github.com/lanbat/openwrt-kestrel /root/openwrt-kestrel
-cd /root/openwrt-kestrel
-cp extra-networks/configs/guest.conf.example     extra-networks/configs/guest.conf
-cp extra-networks/configs/untrusted.conf.example extra-networks/configs/untrusted.conf
-vi extra-networks/configs/guest.conf
-vi extra-networks/configs/untrusted.conf
-sh extra-networks/install.sh extra-networks/configs/guest.conf
-sh extra-networks/install.sh extra-networks/configs/untrusted.conf
-```
-
-### split-routing
-
-```sh
-sh split-routing/install.sh
-```
-
-### Proxy kestreld behind uhttpd
-
-kestreld serves on port 8080. Move uhttpd off port 80 so nginx can front both:
+kestreld listens on port 8080. Move uhttpd off port 80 so nginx can front both:
 
 ```sh
 uci set uhttpd.main.listen_http='127.0.0.1:8181'
@@ -78,7 +63,35 @@ cp /root/openwrt-kestrel/release/files/kestreld-nginx.conf /etc/nginx/conf.d/
 /etc/init.d/nginx enable && /etc/init.d/nginx start
 ```
 
-See [`release/files/kestreld-nginx.conf`](release/files/kestreld-nginx.conf) for the full proxy config.
+### 3. Clone the repo and install the shell scripts
+
+```sh
+git clone https://github.com/lanbat/openwrt-kestrel /root/openwrt-kestrel
+cd /root/openwrt-kestrel
+```
+
+**extra-networks** requires a config file per network. Copy the examples and fill in at minimum `WIFI_KEY`, `SSID`, and `SUBNET`:
+
+```sh
+cp extra-networks/configs/guest.conf.example     extra-networks/configs/guest.conf
+cp extra-networks/configs/untrusted.conf.example extra-networks/configs/untrusted.conf
+vi extra-networks/configs/guest.conf
+vi extra-networks/configs/untrusted.conf
+sh extra-networks/install.sh extra-networks/configs/guest.conf
+sh extra-networks/install.sh extra-networks/configs/untrusted.conf
+```
+
+**split-routing** reads its config from `/etc/split-routing/` and needs no argument:
+
+```sh
+sh split-routing/install.sh
+```
+
+## How they interact
+
+- Both sub-projects write to `/etc/dnsmasq.d/` and `/etc/nftables.d/` with distinct filenames — no conflicts.
+- split-routing's VPN mark chain excludes traffic from extra-network bridges (`br-guest`, `br-untrusted`, etc.) so isolated network traffic always uses the normal WAN, never the VPN tunnel.
+- `nft-resolve` is available to both sub-projects for bulk domain resolution.
 
 ## Building from source
 
@@ -91,7 +104,7 @@ make build
 # assemble .apk and .ipk packages
 make package
 
-# build + deploy to a router (auto-detects apk vs opkg)
+# build + deploy directly to a router (auto-detects apk vs opkg)
 make deploy ROUTER=192.168.1.1
 ```
 
@@ -106,9 +119,9 @@ make package \
 
 Supported targets and their `cross` Docker images are in [`Cross.toml`](Cross.toml).
 
-## Release process
+## Releases
 
-Tagging a `v*` commit triggers GitHub Actions, which builds packages for all six supported architectures in parallel and uploads them to a single GitHub release:
+Tagging a `v*` commit triggers GitHub Actions, which builds packages for all six supported architectures in parallel and publishes them to a single GitHub release:
 
 | Architecture | Rust target | Covers |
 |---|---|---|
@@ -155,8 +168,6 @@ The installer adds paths to `/etc/sysupgrade.conf` and packages add their own pa
 apk update
 apk add dnsmasq-full crowdsec crowdsec-firewall-bouncer banip pbr \
         https-dns-proxy tmux qrencode nginx
-
-# reinstall the kestrel package from your local build or GitHub releases
 apk add --allow-untrusted /tmp/extra-networks-*.aarch64.apk
 ```
 
@@ -188,9 +199,3 @@ sysupgrade /tmp/openwrt-*.bin
 
 # 3. After reboot: reinstall packages and re-run installers (see above)
 ```
-
-## How they interact
-
-- Both sub-projects write to `/etc/dnsmasq.d/` and `/etc/nftables.d/` with distinct filenames — no conflicts.
-- split-routing's VPN mark chain automatically excludes traffic from extra-network bridges (`br-guest`, `br-untrusted`, etc.) so isolated network traffic always uses the normal WAN, never the VPN tunnel.
-- `nft-resolve` is available to both sub-projects for bulk domain resolution.
