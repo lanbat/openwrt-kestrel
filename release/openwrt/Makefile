@@ -22,7 +22,7 @@ PKG_RELEASE := 1
 
 # GitHub release tarball: kestreld-<version>-aarch64-musl.tar.gz
 # containing a single file: kestreld (the stripped static binary)
-PKG_SOURCE_URL  := https://github.com/lanbat/openwrt-router/releases/download/v$(PKG_VERSION)
+PKG_SOURCE_URL  := https://github.com/lanbat/openwrt-kestrel/releases/download/v$(PKG_VERSION)
 PKG_SOURCE      := $(PKG_NAME)-$(PKG_VERSION)-aarch64-musl.tar.gz
 PKG_HASH        := skip  # replace with sha256sum output after first release
 
@@ -35,7 +35,7 @@ define Package/$(PKG_NAME)
   SECTION    := net
   CATEGORY   := Network
   TITLE      := Extra-networks router UI daemon
-  URL        := https://github.com/lanbat/openwrt-router
+  URL        := https://github.com/lanbat/openwrt-kestrel
   DEPENDS    :=
 endef
 

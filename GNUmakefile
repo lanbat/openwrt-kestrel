@@ -81,7 +81,7 @@ $(APK_OUT): $(STAGING)/.staged
 	  '$(PKG_NAME)' '$(PKG_VER_FULL)' '$(ARCH)' \
 	  "$$(find $(STAGING)/usr $(STAGING)/etc -type f | xargs du -b | awk '{s+=$$1}END{print s}')" \
 	  'Extra-networks router UI + nft-resolve blocklist resolver' \
-	  'https://github.com/lanbat/openwrt-router' \
+	  'https://github.com/lanbat/openwrt-kestrel' \
 	  "$$(date +%s)" \
 	  'Kiril Momchilov <momchilov@gmail.com>' \
 	  > $(STAGING)/.PKGINFO
@@ -103,7 +103,7 @@ $(IPK_OUT): $(STAGING)/.staged
 	  'Version: $(PKG_VERSION)-1' \
 	  'Architecture: $(OPENWRT_ARCH)' \
 	  'Maintainer: Kiril Momchilov <momchilov@gmail.com>' \
-	  'Source: https://github.com/lanbat/openwrt-router' \
+	  'Source: https://github.com/lanbat/openwrt-kestrel' \
 	  'Description: Extra-networks router UI + nft-resolve blocklist resolver' \
 	  ' /usr/bin/kestreld   — HTTP daemon for /cgi-bin/status and /cgi-bin/device' \
 	  ' /usr/bin/nft-resolve — DNS blocklist to nftables set resolver' \
