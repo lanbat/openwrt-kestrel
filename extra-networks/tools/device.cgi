@@ -640,9 +640,11 @@ if [ "${ALLOWLIST:-no}" = yes ]; then
 HTML
 )
     else
+        _al_btn_attr=""
+        [ -z "$_DEV_LABEL" ] && _al_btn_attr=' disabled title="Set a label first"'
         _allowlist_row=$(cat <<HTML
 <div class="row"><span class="lbl">Allowlist</span><span class="val warn">Not on allowlist</span></div>
-<div class="row"><span class="lbl">Actions</span><span class="val actions"><form method="POST" action="/cgi-bin/approve-join"><input type="hidden" name="net" value="$(_html "$NET")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="allowlist_add"><input type="hidden" name="redirect" value="$(_html "$_BACK_URL")"><input type="hidden" name="label" value="$(_html "$_DEV_LABEL")"><button class="btn-ok" type="submit">Add to allowlist</button></form></span></div>
+<div class="row"><span class="lbl">Actions</span><span class="val actions"><form method="POST" action="/cgi-bin/approve-join"><input type="hidden" name="net" value="$(_html "$NET")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="allowlist_add"><input type="hidden" name="redirect" value="$(_html "$_BACK_URL")"><input type="hidden" name="label" value="$(_html "$_DEV_LABEL")"><button class="btn-ok" type="submit"${_al_btn_attr}>Add to allowlist</button></form></span></div>
 HTML
 )
     fi
