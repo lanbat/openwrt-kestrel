@@ -408,9 +408,7 @@ ${_actor_info}"
                 ACTION=ifup INTERFACE=${_iface} sh /etc/hotplug.d/iface/51-${_iface}-macfilter \
                 >/dev/null 2>&1" &
         fi
-        _al_redirect=$(_urldecode "$(_get_param "$_params" redirect)")
-        case "$_al_redirect" in /cgi-bin/*) ;; *) _al_redirect="$_BACK_URL" ;; esac
-        printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_al_redirect")"
+        printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
         ;;
 
@@ -630,32 +628,23 @@ HTML
 fi  # JOIN_APPROVAL=yes
 
 _allowlist_row=""
-_al_first=1
-for _nc in "${BASE_DIR}"/*-notify.conf; do
-    [ -f "$_nc" ] || continue
-    unset ALLOWLIST IFACE_NAME
-    . "$_nc"
-    [ "${ALLOWLIST:-no}" = yes ] || continue
-    _al_net="${IFACE_NAME:-}"
-    [ -z "$_al_net" ] && continue
-    _al_lbl=$([ "$_al_first" = 1 ] && printf 'Allowlist' || printf '')
-    _al_first=0
-    _al_macs_f="${BASE_DIR}/${_al_net}-allowed-macs"
+if [ "${ALLOWLIST:-no}" = yes ]; then
+    _al_macs_f="${BASE_DIR}/${NET}-allowed-macs"
     if grep -qiE "^${MAC}[[:space:]]" "$_al_macs_f" 2>/dev/null; then
         _al_ip=$(awk -v m="$MAC" 'tolower($1)==tolower(m){print $2; exit}' "$_al_macs_f" 2>/dev/null)
-        _allowlist_row="${_allowlist_row}$(cat <<HTML
-<div class="row"><span class="lbl">${_al_lbl}</span><span class="val actions"><span class="ok">$(_html "$_al_net")${_al_ip:+ ($(_html "$_al_ip"))}</span><form method="POST" action="/cgi-bin/device" onsubmit="return confirm('Remove $(_html "$_DEV_DISPLAY") from $(_html "$_al_net") allowlist?')"><input type="hidden" name="net" value="$(_html "$_al_net")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="allowlist_remove"><input type="hidden" name="redirect" value="$(_html "$_BACK_URL")"><button class="btn-danger" type="submit">Remove</button></form></span></div>
+        _allowlist_row=$(cat <<HTML
+<div class="row"><span class="lbl">Allowlist</span><span class="val actions"><span class="ok">Allowed${_al_ip:+ ($(_html "$_al_ip"))}</span><form method="POST" action="/cgi-bin/device" onsubmit="return confirm('Remove $(_html "$_DEV_DISPLAY") from allowlist?')"><input type="hidden" name="net" value="$(_html "$NET")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="allowlist_remove"><button class="btn-danger" type="submit">Remove</button></form></span></div>
 HTML
-)"
+)
     else
         _al_btn_attr=""
         [ -z "$_DEV_LABEL" ] && _al_btn_attr=' disabled title="Set a label first"'
-        _allowlist_row="${_allowlist_row}$(cat <<HTML
-<div class="row"><span class="lbl">${_al_lbl}</span><span class="val actions"><span class="warn">$(_html "$_al_net")</span><form method="POST" action="/cgi-bin/approve-join"><input type="hidden" name="net" value="$(_html "$_al_net")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="allowlist_add"><input type="hidden" name="redirect" value="$(_html "$_BACK_URL")"><input type="hidden" name="label" value="$(_html "$_DEV_LABEL")"><button class="btn-ok" type="submit"${_al_btn_attr}>Add</button></form></span></div>
+        _allowlist_row=$(cat <<HTML
+<div class="row"><span class="lbl">Allowlist</span><span class="val actions"><span class="warn">Not on allowlist</span><form method="POST" action="/cgi-bin/approve-join"><input type="hidden" name="net" value="$(_html "$NET")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="allowlist_add"><input type="hidden" name="redirect" value="$(_html "$_BACK_URL")"><input type="hidden" name="label" value="$(_html "$_DEV_LABEL")"><button class="btn-ok" type="submit"${_al_btn_attr}>Add to allowlist</button></form></span></div>
 HTML
-)"
+)
     fi
-done
+fi
 
 # Build "networks" row — all networks where this MAC has been seen (current network first)
 _networks_html="<a href=\"/cgi-bin/device?net=${_iface}&mac=${MAC}\" class=\"ok\">${_iface}</a>"
