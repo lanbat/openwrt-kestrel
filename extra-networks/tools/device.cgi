@@ -118,6 +118,9 @@ _DEV_HN_FQDN="${_DEV_HN:+${_DEV_HN}.${_LOCAL_DOMAIN}}"
 [ -n "$_DEV_FQDN" ] && [ -n "$_DEV_HN_FQDN" ] && [ "$_DEV_HN_FQDN" != "$_DEV_FQDN" ] && \
     _DEV_DNS_DISPLAY="${_DEV_FQDN}<br><span class=\"dim\">${_DEV_HN_FQDN}</span>"
 _BACK_URL="/cgi-bin/device?net=${NET}&mac=${MAC}"
+_rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+_rip="${_rip:-192.168.1.1}"
+_DEV_URL="http://${_rip}${_BACK_URL}"
 _JOIN_IP="${_DEV_IP:-$_DEV_IP6}"
 _JOIN_STATE=Untracked
 grep -qixF "$MAC" "$_join_approved_f" 2>/dev/null && _JOIN_STATE=Approved
@@ -161,7 +164,8 @@ IPv6: ${_actor_ip6:----}"
 Was: ${_DEV_LABEL}}
 Now: ${_new}
 
-${_actor_info}"
+${_actor_info}" \
+                    "view, Device, ${_DEV_URL}"
                 _join_history_add "$_iface" labelled "$MAC" \
                     "${_DEV_IP:-$(_ip4_for_mac "$MAC")}" "${_DEV_IP6:-$(_ip6_for_mac "$MAC")}" \
                     "${_DEV_LABEL:+${_DEV_LABEL} → }${_new}" \
@@ -185,8 +189,6 @@ ${_actor_info}"
         ;;
 
     revoke_join_approval)
-        _rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
-        _rip="${_rip:-192.168.1.1}"
         _approver_action=""
         [ -n "$_actor_mac" ] && _approver_action="view, Approver, http://${_rip}/cgi-bin/device?net=lan&mac=${_actor_mac}"
         _notify_ip="${_DEV_IP:-${_DEV_IP6:-}}"
@@ -223,7 +225,7 @@ ${_device_detail}
 ${_actor_info}
 
 The device is no longer approved on ${_iface}." \
-"${_approver_action}"
+"view, Device, ${_DEV_URL}${_approver_action:+; ${_approver_action}}"
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
         ;;
@@ -246,7 +248,8 @@ The device is no longer approved on ${_iface}." \
         _ntfy "Rule added — ${_iface}" default shield \
             "${_DEV_DISPLAY}: ${_dom} allowed on ${_iface}.
 
-${_actor_info}"
+${_actor_info}" \
+            "view, Device, ${_DEV_URL}"
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
         ;;
@@ -275,7 +278,8 @@ ${_actor_info}"
         _ntfy "Rule added — ${_iface}" default shield \
             "${_DEV_DISPLAY}: ${_dip}:${_dpt}/${_dpr} allowed on ${_iface}.
 
-${_actor_info}"
+${_actor_info}" \
+            "view, Device, ${_DEV_URL}"
         printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
         exit 0
         ;;

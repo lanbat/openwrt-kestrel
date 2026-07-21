@@ -60,6 +60,9 @@ printf '%s' "$MAC" | grep -qiE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' \
 
 _load_notify "$NET"
 _iface="${IFACE_NAME:-$NET}"
+_rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+_rip="${_rip:-192.168.1.1}"
+_DEV_URL="http://${_rip}/cgi-bin/device?net=${_iface}&mac=${MAC}"
 
 # Handle set_label before IP validation — saving a label doesn't require an IP
 if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" = set_label ]; then
@@ -93,7 +96,8 @@ Now: ${_new}
 
 By: ${_actor_display}${_actor_mac:+ (${_actor_mac})}
 IPv4: ${_actor_ip4:----}
-IPv6: ${_actor_ip6:----}"
+IPv6: ${_actor_ip6:----}" \
+                "view, Device, ${_DEV_URL}"
             _join_history_add "$_iface" labelled "$MAC" \
                 "$(_ip4_for_mac "$MAC")" "$(_ip6_for_mac "$MAC")" \
                 "${_old_label:+${_old_label} → }${_new}" \
@@ -131,7 +135,8 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" 
     _ntfy "Device added — ${_iface}" default white_check_mark \
 "${MAC} added to ${_iface} allowlist.
 Label: ${_label_new}
-IP: ${_ip_new}"
+IP: ${_ip_new}" \
+    "view, Device, ${_DEV_URL}"
 
     _redirect=$(_urldecode "$(_get_param "$_params" redirect)")
     case "$_redirect" in /cgi-bin/*) ;; *) _redirect="/cgi-bin/status" ;; esac
@@ -175,8 +180,6 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
     _approver="${_approver_name:-$_approver_ip}"
     [ "$_approver" = "*" ] && _approver="$_approver_ip"
     [ -n "$_approver_mac" ] && _approver="${_approver} (${_approver_mac})"
-    _rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
-    _rip="${_rip:-192.168.1.1}"
     _approver_action=""
     [ -n "$_approver_mac" ] && _approver_action="view, Approver, http://${_rip}/cgi-bin/device?net=lan&mac=${_approver_mac}"
 
@@ -235,7 +238,7 @@ IPv4: ${_approver_ip4:----}
 IPv6: ${_approver_ip6:----}
 
 The approved device can now use the internet on ${NET}." \
-"${_approver_action}"
+"view, Device, ${_DEV_URL}${_approver_action:+; ${_approver_action}}"
         _join_history_add "$NET" approved "$MAC" "$IP4" "$IP6" "${HOST:-${_dns:-unknown}}" "$_approver" "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         _msg="$(_html "${HOST:-$IP}") ($MAC) can now use the internet on ${NET}."
         _cls=ok
@@ -259,7 +262,7 @@ IPv4: ${_approver_ip4:----}
 IPv6: ${_approver_ip6:----}
 
 The denied device remains blocked from internet access on ${NET}." \
-"${_approver_action}"
+"view, Device, ${_DEV_URL}${_approver_action:+; ${_approver_action}}"
         _join_history_add "$NET" denied "$MAC" "$IP4" "$IP6" "${HOST:-${_dns:-unknown}}" "$_approver" "$_approver_ip4" "$_approver_ip6" "$_approver_mac" "${JOIN_HISTORY_RETENTION:-90d}"
         _msg="$(_html "${HOST:-$IP}") ($MAC) remains blocked from internet access on ${NET}."
         _cls=err

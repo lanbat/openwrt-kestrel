@@ -30,6 +30,9 @@ _nft_entries() {
     }'
 }
 
+_rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+_rip="${_rip:-192.168.1.1}"
+
 for _conf in "${BASE_DIR}"/*-notify.conf; do
     [ -f "$_conf" ] || continue
     unset NOTIFY_URL SUBNET IFACE_NAME BANDWIDTH_THRESHOLD_MB
@@ -87,7 +90,8 @@ for _conf in "${BASE_DIR}"/*-notify.conf; do
             _ntfy "Bandwidth alert — ${_iface}" default warning \
 "Type: Bandwidth alert
 
-${_label} has used $(_human "$_bytes") on ${_iface} (threshold: ${_thresh} MB)."
+${_label} has used $(_human "$_bytes") on ${_iface} (threshold: ${_thresh} MB)." \
+                "view, Device, http://${_rip}/cgi-bin/device?net=${_iface}&mac=${_mac}"
         fi
     done
 
