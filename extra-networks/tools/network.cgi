@@ -376,6 +376,48 @@ fi
 printf '</table>\n'
 rm -f "$_tmp_known"
 
+# ── Requesting access (ALLOWLIST networks) ────────────────────────────────────
+# WiFi-associated devices not yet in the allowed-macs file. Shown only when
+# ALLOWLIST=yes so the operator can admit them without leaving the page.
+
+if [ "${ALLOWLIST:-no}" = yes ] && [ -n "$_wlan" ]; then
+    _allowed_macs_f="${BASE_DIR}/${_iface}-allowed-macs"
+    _allowed_mac_list=$(awk '!/^[[:space:]]*([#]|$)/{print tolower($1)}' \
+        "$_allowed_macs_f" 2>/dev/null)
+    _tmp_unk="/tmp/netcgi_unk_${_iface}_$$"
+    printf '%s\n' "$_assoc" \
+        | grep -oE '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}' \
+        | tr 'ABCDEF' 'abcdef' \
+        | while read -r _smac; do
+            printf '%s\n' "$_allowed_mac_list" | grep -qxF "$_smac" && continue
+            printf '%s\n' "$_smac"
+          done > "$_tmp_unk"
+    if [ -s "$_tmp_unk" ]; then
+        _next_n=$(awk '!/^[[:space:]]*([#]|$)/{split($2,a,"."); n=a[4]+0; if(n>0&&n>m)m=n}
+                       END{print m>0&&m<249?m+1:100}' \
+                   "$_allowed_macs_f" 2>/dev/null)
+        _next_n="${_next_n:-100}"
+        printf '<h2>Requesting access</h2>\n'
+        printf '<table><tr><th>MAC</th><th></th></tr>\n'
+        while IFS= read -r _smac; do
+            printf '<tr><td class="dim">%s</td><td>' "$(_html "$_smac")"
+            printf '<form method="POST" action="/cgi-bin/approve-join" style="display:inline-flex;gap:.35rem;align-items:center">'
+            printf '<input type="hidden" name="net"      value="%s">' "$(_html "$_iface")"
+            printf '<input type="hidden" name="mac"      value="%s">' "$(_html "$_smac")"
+            printf '<input type="hidden" name="action"   value="allowlist_add">'
+            printf '<input type="hidden" name="redirect" value="/cgi-bin/network?net=%s">' "$(_html "$_iface")"
+            printf '<input type="text" name="label" placeholder="Label" required maxlength="40" style="flex:1">'
+            printf '<input type="text" name="ip" value="%s.%s" maxlength="15" style="width:8rem">' \
+                "$SUBNET" "$_next_n"
+            printf '<button class="btn-ok" type="submit">Add</button>'
+            printf '</form></td></tr>\n'
+            _next_n=$(( _next_n + 1 ))
+        done < "$_tmp_unk"
+        printf '</table>\n'
+    fi
+    rm -f "$_tmp_unk"
+fi
+
 # ── Join history ──────────────────────────────────────────────────────────────
 
 if [ "${JOIN_APPROVAL:-no}" = yes ]; then

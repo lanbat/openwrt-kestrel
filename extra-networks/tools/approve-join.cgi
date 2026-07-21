@@ -105,6 +105,42 @@ IPv6: ${_actor_ip6:----}"
     exit 0
 fi
 
+# Handle allowlist_add — add a WiFi-associated device to the MAC allowlist
+if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" = allowlist_add ]; then
+    [ "${ALLOWLIST:-no}" = yes ] \
+        || { printf '<h1>Network %s does not use an allowlist</h1>' "$(_html "$NET")"; exit 0; }
+    _label_new=$(printf '%s' "$(_get_param "$_params" label)" \
+        | sed 's/+/ /g;s/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 40)
+    [ -n "$_label_new" ] || { printf '<h1>Label is required</h1>'; exit 0; }
+    _ip_new=$(_urldecode "$(_get_param "$_params" ip)")
+    _valid_ip "$_ip_new" || { printf '<h1>Invalid IP</h1>'; exit 0; }
+    case "$_ip_new" in "${SUBNET}."*) ;; \
+        *) printf '<h1>IP must be in subnet %s.0/24</h1>' "$(_html "${SUBNET:-?}")"; exit 0 ;; esac
+
+    _allowed_macs_f="${BASE_DIR}/${NET}-allowed-macs"
+    { grep -vi "^${MAC}[[:space:]]" "$_allowed_macs_f" 2>/dev/null
+      printf '%s\t%s\t%s\n' "$MAC" "$_ip_new" "$_label_new"; } \
+        > "${_allowed_macs_f}.tmp" && mv "${_allowed_macs_f}.tmp" "$_allowed_macs_f" || true
+
+    _lbl_f="${BASE_DIR}/${NET}-device-labels"
+    { grep -v "^${MAC}	" "$_lbl_f" 2>/dev/null
+      printf '%s\t%s\n' "$MAC" "$_label_new"; } > "${_lbl_f}.tmp" \
+        && mv "${_lbl_f}.tmp" "$_lbl_f" || true
+
+    ACTION=ifup INTERFACE="$_iface" sh "/etc/hotplug.d/iface/51-${_iface}-macfilter" \
+        >/dev/null 2>&1 || true
+
+    _ntfy "Device added — ${_iface}" default white_check_mark \
+"${MAC} added to ${_iface} allowlist.
+Label: ${_label_new}
+IP: ${_ip_new}"
+
+    _redirect=$(_urldecode "$(_get_param "$_params" redirect)")
+    case "$_redirect" in /cgi-bin/*) ;; *) _redirect="/cgi-bin/status" ;; esac
+    printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_redirect")"
+    exit 0
+fi
+
 _valid_ip "$IP" || { printf '<h1>Invalid IP</h1>'; exit 0; }
 
 APPROVED_FILE="${BASE_DIR}/${NET}-join-approved"
