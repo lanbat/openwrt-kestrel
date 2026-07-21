@@ -50,7 +50,7 @@ while IFS= read -r line; do
         _t="${line##*SRC=}"; src="${_t%% *}"
         [ -z "$src" ] && continue
 
-        key="deny:${iface}:${src}"
+        key="deny:${iface}:${src}:$(date +%Y%m%d)"
         grep -qxF "$key" "$SEEN_FILE" 2>/dev/null && continue
         printf '%s\n' "$key" >> "$SEEN_FILE"
         _trim_seen
