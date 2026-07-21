@@ -117,9 +117,18 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" 
         | sed 's/+/ /g;s/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 40)
     [ -n "$_label_new" ] || { printf '<h1>Label is required</h1>'; exit 0; }
     _allowed_macs_f="${BASE_DIR}/${NET}-allowed-macs"
+    # Prefer the device's current DHCP IP (avoids needing a re-lease); fall back to next free
+    _cur_ip=$(awk -v m="$MAC" 'tolower($2)==tolower(m){print $3; exit}' /tmp/dhcp.leases 2>/dev/null)
+    _cur_last="${_cur_ip#${SUBNET}.}"
     _ip_n=$(awk '!/^[[:space:]]*([#]|$)/{split($2,a,"."); n=a[4]+0; if(n>=100&&n<=249&&n>m)m=n} \
                  END{print (m>0?m+1:100)}' "$_allowed_macs_f" 2>/dev/null)
     _ip_new="${SUBNET}.${_ip_n:-100}"
+    if [ -n "$_cur_ip" ] && [ "$_cur_last" != "$_cur_ip" ] && \
+       [ "$_cur_last" -ge 100 ] 2>/dev/null && [ "$_cur_last" -le 249 ] 2>/dev/null && \
+       ! awk -v ip="$_cur_ip" '$2==ip{found=1;exit} END{exit 1-found}' \
+             "$_allowed_macs_f" 2>/dev/null; then
+        _ip_new="$_cur_ip"
+    fi
     { grep -vi "^${MAC}[[:space:]]" "$_allowed_macs_f" 2>/dev/null
       printf '%s\t%s\t%s\n' "$MAC" "$_ip_new" "$_label_new"; } \
         > "${_allowed_macs_f}.tmp" && mv "${_allowed_macs_f}.tmp" "$_allowed_macs_f" || true
@@ -129,8 +138,19 @@ if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ "$(_get_param "$_params" action)" 
       printf '%s\t%s\n' "$MAC" "$_label_new"; } > "${_lbl_f}.tmp" \
         && mv "${_lbl_f}.tmp" "$_lbl_f" || true
 
+    # Update macfilter immediately (DHCP + nft allowlist set); then rebuild inspect chain
+    # in background and re-run macfilter to restore the allowlist after fw4 reload wipes it.
     ACTION=ifup INTERFACE="$_iface" sh "/etc/hotplug.d/iface/51-${_iface}-macfilter" \
         >/dev/null 2>&1 || true
+    if [ "${DEVICE_CONTROL:-no}" = yes ]; then
+        _ip_store="${BASE_DIR}/${NET}-device-ips"
+        { grep -v "^${MAC}	" "$_ip_store" 2>/dev/null
+          printf '%s\t%s\n' "$MAC" "$_ip_new"; } > "${_ip_store}.tmp" \
+            && mv "${_ip_store}.tmp" "$_ip_store" || true
+        setsid sh -c "sh /etc/extra-networks/_regen-inspect.sh ${_iface} >/dev/null 2>&1; \
+            ACTION=ifup INTERFACE=${_iface} sh /etc/hotplug.d/iface/51-${_iface}-macfilter \
+            >/dev/null 2>&1" &
+    fi
 
     _ntfy "Device added — ${_iface}" default white_check_mark \
 "${MAC} added to ${_iface} allowlist.

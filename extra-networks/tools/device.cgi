@@ -393,6 +393,25 @@ ${_actor_info}"
         exit 0
         ;;
 
+    allowlist_remove)
+        [ "${ALLOWLIST:-no}" = yes ] || { printf '<h1>Not applicable</h1>'; exit 0; }
+        _allowed_macs_f="${BASE_DIR}/${NET}-allowed-macs"
+        { grep -vi "^${MAC}[[:space:]]" "$_allowed_macs_f" 2>/dev/null; } \
+            > "${_allowed_macs_f}.tmp" && mv "${_allowed_macs_f}.tmp" "$_allowed_macs_f" || true
+        ACTION=ifup INTERFACE="$_iface" sh "/etc/hotplug.d/iface/51-${_iface}-macfilter" \
+            >/dev/null 2>&1 || true
+        if [ "${DEVICE_CONTROL:-no}" = yes ]; then
+            _ip_store="${BASE_DIR}/${NET}-device-ips"
+            { grep -v "^${MAC}	" "$_ip_store" 2>/dev/null; } \
+                > "${_ip_store}.tmp" && mv "${_ip_store}.tmp" "$_ip_store" || true
+            setsid sh -c "sh /etc/extra-networks/_regen-inspect.sh ${_iface} >/dev/null 2>&1; \
+                ACTION=ifup INTERFACE=${_iface} sh /etc/hotplug.d/iface/51-${_iface}-macfilter \
+                >/dev/null 2>&1" &
+        fi
+        printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
+        exit 0
+        ;;
+
     esac
     printf '<h1>Unknown action</h1>'
     exit 0
@@ -608,6 +627,27 @@ HTML
 )
 fi  # JOIN_APPROVAL=yes
 
+_allowlist_row=""
+if [ "${ALLOWLIST:-no}" = yes ]; then
+    _allowed_macs_f="${BASE_DIR}/${NET}-allowed-macs"
+    _on_allowlist=no
+    grep -qiE "^${MAC}[[:space:]]" "$_allowed_macs_f" 2>/dev/null && _on_allowlist=yes
+    if [ "$_on_allowlist" = yes ]; then
+        _al_ip=$(awk -v m="$MAC" 'tolower($1)==tolower(m){print $2; exit}' "$_allowed_macs_f" 2>/dev/null)
+        _allowlist_row=$(cat <<HTML
+<div class="row"><span class="lbl">Allowlist</span><span class="val ok">Allowed${_al_ip:+ ($(_html "$_al_ip"))}</span></div>
+<div class="row"><span class="lbl">Actions</span><span class="val actions"><form method="POST" action="/cgi-bin/device" onsubmit="return confirm('Remove $(_html "$_DEV_DISPLAY") from allowlist?')"><input type="hidden" name="net" value="$(_html "$NET")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="allowlist_remove"><button class="btn-danger" type="submit">Remove from allowlist</button></form></span></div>
+HTML
+)
+    else
+        _allowlist_row=$(cat <<HTML
+<div class="row"><span class="lbl">Allowlist</span><span class="val warn">Not on allowlist</span></div>
+<div class="row"><span class="lbl">Actions</span><span class="val actions"><form method="POST" action="/cgi-bin/approve-join"><input type="hidden" name="net" value="$(_html "$NET")"><input type="hidden" name="mac" value="$(_html "$MAC")"><input type="hidden" name="action" value="allowlist_add"><input type="hidden" name="redirect" value="$(_html "$_BACK_URL")"><input type="text" name="label" value="$(_html "$_DEV_LABEL")" placeholder="Label" maxlength="40" style="width:140px"><button class="btn-ok" type="submit">Add to allowlist</button></form></span></div>
+HTML
+)
+    fi
+fi
+
 # Build "networks" row — all networks where this MAC has been seen (current network first)
 _networks_html="<a href=\"/cgi-bin/device?net=${_iface}&mac=${MAC}\" class=\"ok\">${_iface}</a>"
 for _ohf in "${BASE_DIR}"/*-join-history; do
@@ -784,6 +824,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="row"><span class="lbl">DNS names</span><span class="val" style="text-align:right">${_DEV_DNS_DISPLAY}</span></div>
 <div class="row"><span class="lbl">Total joins</span><span class="val">${_JOIN_COUNT:----}</span></div>
 ${_networks_row}
+${_allowlist_row}
 ${_approval_row}
 </div>
 
