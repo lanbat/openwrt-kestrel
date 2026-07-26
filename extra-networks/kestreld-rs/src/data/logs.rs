@@ -43,6 +43,30 @@ impl LogData {
     }
 }
 
+/// Parse dnsmasq query log lines for a specific source IP.
+/// Returns (domain, qtype) for each matching `query[A]` or `query[AAAA]` entry.
+/// Log format: `... dnsmasq[N]: ID SRC/PORT query[A] domain from SRC`
+pub fn parse_dns_queries<'a>(lines: &'a [String], src_ip: &str) -> Vec<(&'a str, &'a str)> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            if !line.contains("query[") { return None; }
+            let from_suffix = format!("from {src_ip}");
+            if !line.ends_with(&from_suffix) { return None; }
+            // Extract query type and domain
+            let qi = line.find("query[")?;
+            let rest = &line[qi + 6..];
+            let close = rest.find(']')?;
+            let qtype = &rest[..close];
+            if qtype != "A" && qtype != "AAAA" { return None; }
+            let after = rest[close + 1..].trim();
+            let domain = after.split_whitespace().next()?;
+            if domain.ends_with(".arpa") { return None; }
+            Some((domain, &line[qi + 6..qi + 6 + close]))
+        })
+        .collect()
+}
+
 /// Parse kernel netfilter log fields (SRC=, DST=, PROTO=, DPT=) from a log line.
 pub struct NfFields<'a> {
     pub src: &'a str,

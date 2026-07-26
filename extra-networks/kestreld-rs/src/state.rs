@@ -45,19 +45,36 @@ pub struct Snapshot {
     pub ipv6_prefixes: HashMap<String, Vec<String>>,
     /// iface → whether br-{iface} has the UP flag
     pub iface_up: HashMap<String, bool>,
+    /// iface → (mac → tracked IPv4) from device-ips
+    pub device_ips: HashMap<String, HashMap<String, String>>,
+    /// iface → (mac → tracked IPv6) from device-ip6s
+    pub device_ip6s: HashMap<String, HashMap<String, String>>,
+    /// iface → (mac → rate limit) from device-limits
+    pub device_limits: HashMap<String, HashMap<String, u32>>,
+    /// iface → rules list from device-rules
+    pub device_rules: HashMap<String, Vec<files::DeviceRule>>,
+    /// iface → (mac → ip) from join-approved-ips
+    pub join_approved_ips: HashMap<String, HashMap<String, String>>,
+    /// iface → allowlist entries from allowed-macs
+    pub allowed_macs: HashMap<String, Vec<files::AllowedMac>>,
+    /// local DNS domain suffix (e.g. "lan") from dnsmasq config
+    pub local_domain: String,
 }
 
 pub struct AppState {
     pub snapshot: RwLock<Arc<Snapshot>>,
     pub base_dir: PathBuf,
+    pub oui: HashMap<String, String>,
 }
 
 impl AppState {
     pub async fn new(base_dir: PathBuf) -> Arc<Self> {
         let snap = build_snapshot(&base_dir).await;
+        let oui = files::read_oui(&base_dir.join("oui.txt")).await;
         let state = Arc::new(Self {
             snapshot: RwLock::new(Arc::new(snap)),
             base_dir,
+            oui,
         });
         // Background refresh every 5 seconds
         let state2 = Arc::clone(&state);
@@ -111,6 +128,12 @@ pub async fn build_snapshot(base_dir: &Path) -> Snapshot {
     let mut net_traffic: HashMap<String, (String, u64, u64)> = HashMap::new();
     let mut dev_bytes4: HashMap<String, HashMap<String, u64>> = HashMap::new();
     let mut dev_bytes6: HashMap<String, HashMap<String, u64>> = HashMap::new();
+    let mut device_ips: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut device_ip6s: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut device_limits: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    let mut device_rules: HashMap<String, Vec<files::DeviceRule>> = HashMap::new();
+    let mut join_approved_ips: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut allowed_macs: HashMap<String, Vec<files::AllowedMac>> = HashMap::new();
 
     for conf in &net_confs {
         let iface = &conf.iface;
@@ -166,14 +189,34 @@ pub async fn build_snapshot(base_dir: &Path) -> Snapshot {
         // Per-device byte counters
         dev_bytes4.insert(iface.clone(), nft_state.device_bytes(&format!("{iface}_device_bytes")));
         dev_bytes6.insert(iface.clone(), nft_state.device_bytes(&format!("{iface}_device_bytes6")));
+
+        // Device control state
+        if conf.device_control {
+            device_ips.insert(iface.clone(),
+                files::read_mac_ip_map(&base_dir.join(format!("{iface}-device-ips"))).await);
+            device_ip6s.insert(iface.clone(),
+                files::read_mac_ip_map(&base_dir.join(format!("{iface}-device-ip6s"))).await);
+            device_limits.insert(iface.clone(),
+                files::read_device_limits(&base_dir.join(format!("{iface}-device-limits"))).await);
+            device_rules.insert(iface.clone(),
+                files::read_device_rules(&base_dir.join(format!("{iface}-device-rules"))).await);
+        }
+        join_approved_ips.insert(iface.clone(),
+            files::read_mac_ip_map(&base_dir.join(format!("{iface}-join-approved-ips"))).await);
+        if conf.join_approval {
+            allowed_macs.insert(iface.clone(),
+                files::read_allowed_macs(&base_dir.join(format!("{iface}-allowed-macs"))).await);
+        }
     }
 
-    // uci show firewall + crontab + joins
-    let (uci_firewall, crontab, joins) = tokio::join!(
+    // uci show firewall + crontab + joins + local domain
+    let (uci_firewall, crontab, joins, local_domain) = tokio::join!(
         run_cmd("uci", &["show", "firewall"]),
         run_cmd("crontab", &["-l"]),
         files::read_joins(),
+        run_cmd("uci", &["-q", "get", "dhcp.@dnsmasq[0].domain"]),
     );
+    let local_domain = local_domain.trim().to_string();
 
     // Per-interface bridge state and IPv6 prefixes
     let mut ipv6_prefixes: HashMap<String, Vec<String>> = HashMap::new();
@@ -212,6 +255,13 @@ pub async fn build_snapshot(base_dir: &Path) -> Snapshot {
         joins,
         ipv6_prefixes,
         iface_up,
+        device_ips,
+        device_ip6s,
+        device_limits,
+        device_rules,
+        join_approved_ips,
+        allowed_macs,
+        local_domain,
     }
 }
 

@@ -23,18 +23,10 @@ pub async fn run() {
             print!("Status: 303 See Other\r\nLocation: /cgi-bin/device?net={net}&mac={mac}\r\n\r\n");
         }
         ("/cgi-bin/device", _) => {
+            // Device page served by the daemon; redirect to it.
             let net = qs_get(&query, "net");
             let mac = qs_get(&query, "mac");
-            if !validate_net(&net) {
-                respond("<h1>Invalid network</h1>");
-                return;
-            }
-            if !validate_mac(&mac) {
-                respond("<h1>Invalid MAC</h1>");
-                return;
-            }
-            let html = crate::routes::device::render(&net, &mac);
-            respond(&html);
+            print!("Status: 302 Found\r\nLocation: /cgi-bin/device?net={net}&mac={mac}\r\n\r\n");
         }
         _ => {
             print!("Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot found");

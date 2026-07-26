@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 mod cgi;
+mod cmd;
 mod data;
 mod routes;
 mod state;

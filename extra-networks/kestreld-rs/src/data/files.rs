@@ -184,6 +184,286 @@ pub async fn read_pending(path: &Path) -> HashMap<String, String> {
         .collect()
 }
 
+// ── Additional data types ─────────────────────────────────────────────────────
+
+/// One rule from `<iface>-device-rules`.
+/// Format: `mac\tdst\tallow|deny\tport\tproto\troute`
+#[derive(Clone, Debug)]
+pub struct DeviceRule {
+    pub mac: String,
+    pub dst: String,
+    pub action: String,
+    pub port: String,
+    pub proto: String,
+    pub route: String,
+}
+
+/// One entry from `<iface>-allowed-macs`.
+/// Format: `mac\tip\tlabel`
+#[derive(Clone, Debug)]
+pub struct AllowedMac {
+    pub mac: String,
+    pub ip: String,
+    pub label: String,
+}
+
+/// One pending connection from `<iface>-pending-<mac_n>`.
+/// Format: `dst\tport\tproto[\tts]`
+#[derive(Clone, Debug)]
+pub struct PendingConn {
+    pub dst: String,
+    pub port: String,
+    pub proto: String,
+    pub ts: u64,
+}
+
+pub async fn read_device_rules(path: &Path) -> Vec<DeviceRule> {
+    read_lines(path)
+        .await
+        .into_iter()
+        .filter_map(|l| {
+            let mut f = l.splitn(6, '\t');
+            let mac = f.next()?.trim().to_lowercase();
+            let dst = f.next()?.trim().to_string();
+            let action = f.next()?.trim().to_string();
+            let port = f.next().unwrap_or("").trim().to_string();
+            let proto = f.next().unwrap_or("").trim().to_string();
+            let route = f.next().unwrap_or("").trim().to_string();
+            if mac.is_empty() || dst.is_empty() { None } else {
+                Some(DeviceRule { mac, dst, action, port, proto, route })
+            }
+        })
+        .collect()
+}
+
+/// Read `mac\tip` tab-separated file → mac (lower) → ip.
+/// Covers device-ips, device-ip6s, join-approved-ips.
+pub async fn read_mac_ip_map(path: &Path) -> HashMap<String, String> {
+    read_lines(path)
+        .await
+        .into_iter()
+        .filter_map(|l| {
+            let mut parts = l.splitn(2, '\t');
+            let mac = parts.next()?.trim().to_lowercase();
+            let ip = parts.next()?.trim().to_string();
+            if mac.is_empty() || ip.is_empty() { None } else { Some((mac, ip)) }
+        })
+        .collect()
+}
+
+/// Read `mac\tlimit` tab-separated file → mac (lower) → limit.
+pub async fn read_device_limits(path: &Path) -> HashMap<String, u32> {
+    read_lines(path)
+        .await
+        .into_iter()
+        .filter_map(|l| {
+            let mut parts = l.splitn(2, '\t');
+            let mac = parts.next()?.trim().to_lowercase();
+            let limit: u32 = parts.next()?.trim().parse().ok()?;
+            Some((mac, limit))
+        })
+        .collect()
+}
+
+pub async fn read_allowed_macs(path: &Path) -> Vec<AllowedMac> {
+    read_lines(path)
+        .await
+        .into_iter()
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            let mac = f.next()?.trim().to_lowercase();
+            let ip = f.next().unwrap_or("").trim().to_string();
+            let label = f.next().unwrap_or("").trim().to_string();
+            if mac.is_empty() { None } else { Some(AllowedMac { mac, ip, label }) }
+        })
+        .collect()
+}
+
+/// Read per-device pending connections from `<iface>-pending-<mac_n>`.
+pub async fn read_pending_conns(path: &Path) -> Vec<PendingConn> {
+    read_lines(path)
+        .await
+        .into_iter()
+        .filter_map(|l| {
+            let mut f = l.splitn(4, '\t');
+            let dst = f.next()?.trim().to_string();
+            let port = f.next().unwrap_or("").trim().to_string();
+            let proto = f.next().unwrap_or("").trim().to_string();
+            let ts: u64 = f.next().unwrap_or("0").trim().parse().unwrap_or(0);
+            if dst.is_empty() { None } else { Some(PendingConn { dst, port, proto, ts }) }
+        })
+        .collect()
+}
+
+/// Read OUI database: each line is `AABBCC\tVendor Name` (6/7/9 hex chars).
+pub async fn read_oui(path: &Path) -> HashMap<String, String> {
+    read_lines(path)
+        .await
+        .into_iter()
+        .filter_map(|l| {
+            let mut parts = l.splitn(2, '\t');
+            let prefix = parts.next()?.trim().to_uppercase();
+            let vendor = parts.next()?.trim().to_string();
+            if prefix.is_empty() { None } else { Some((prefix, vendor)) }
+        })
+        .collect()
+}
+
+/// Look up vendor for a MAC address in the OUI database.
+/// Tries 9-digit, 7-digit, then 6-digit prefix (most-specific first).
+pub fn oui_lookup<'a>(oui: &'a HashMap<String, String>, mac: &str) -> &'a str {
+    let hex: String = mac.replace(':', "").to_uppercase();
+    for len in [9, 7, 6] {
+        if hex.len() >= len {
+            if let Some(v) = oui.get(&hex[..len]) {
+                return v.as_str();
+            }
+        }
+    }
+    ""
+}
+
+// ── File mutation helpers ─────────────────────────────────────────────────────
+
+async fn write_atomic(path: &Path, content: String) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    tokio::fs::write(&tmp, &content).await?;
+    tokio::fs::rename(&tmp, path).await
+}
+
+/// Upsert a line in a tab-separated file, keyed on the first tab field (MAC, lowercase).
+/// If a line with this key exists, it is replaced; otherwise the new line is appended.
+pub async fn file_upsert_by_mac(path: &Path, mac: &str, new_line: &str) -> std::io::Result<()> {
+    let mac_lc = mac.to_lowercase();
+    let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let mut out = String::with_capacity(existing.len() + new_line.len() + 1);
+    let mut found = false;
+    for line in existing.lines() {
+        let key = line.split('\t').next().unwrap_or("").trim().to_lowercase();
+        if key == mac_lc {
+            out.push_str(new_line);
+            out.push('\n');
+            found = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !found {
+        out.push_str(new_line);
+        out.push('\n');
+    }
+    write_atomic(path, out).await
+}
+
+/// Remove all lines from a tab-separated file where the first tab field matches mac.
+pub async fn file_remove_by_mac(path: &Path, mac: &str) -> std::io::Result<()> {
+    let mac_lc = mac.to_lowercase();
+    let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let out: String = existing
+        .lines()
+        .filter(|l| {
+            let key = l.split('\t').next().unwrap_or("").trim().to_lowercase();
+            key != mac_lc
+        })
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    write_atomic(path, out).await
+}
+
+/// Remove lines from a tab-separated file matching mac (col 0) AND dst (col 1).
+pub async fn file_remove_rule(path: &Path, mac: &str, dst: &str) -> std::io::Result<()> {
+    let mac_lc = mac.to_lowercase();
+    let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let out: String = existing
+        .lines()
+        .filter(|l| {
+            let mut f = l.splitn(3, '\t');
+            let k0 = f.next().unwrap_or("").trim().to_lowercase();
+            let k1 = f.next().unwrap_or("").trim();
+            !(k0 == mac_lc && k1 == dst)
+        })
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    write_atomic(path, out).await
+}
+
+/// Remove a specific `dst\tport\tproto` entry from a pending-connections file.
+pub async fn file_remove_pending(path: &Path, dst: &str, port: &str, proto: &str) -> std::io::Result<()> {
+    let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let out: String = existing
+        .lines()
+        .filter(|l| {
+            let mut f = l.splitn(4, '\t');
+            let d = f.next().unwrap_or("").trim();
+            let p = f.next().unwrap_or("").trim();
+            let q = f.next().unwrap_or("").trim();
+            !(d == dst && p == port && q.to_lowercase() == proto.to_lowercase())
+        })
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    write_atomic(path, out).await
+}
+
+/// Remove a MAC from a simple one-per-line file.
+pub async fn file_remove_line(path: &Path, value: &str) -> std::io::Result<()> {
+    let val_lc = value.to_lowercase();
+    let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let out: String = existing
+        .lines()
+        .filter(|l| l.trim().to_lowercase() != val_lc)
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    write_atomic(path, out).await
+}
+
+/// Remove lines from a space-separated file where the first field matches `prefix` (case-insensitive).
+/// Used for files like join-pending (`mac ip`) and join-approved-ips (`mac ip`).
+pub async fn file_remove_space_prefix(path: &Path, prefix: &str) -> std::io::Result<()> {
+    let prefix_lc = prefix.to_lowercase();
+    let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let out: String = existing
+        .lines()
+        .filter(|l| {
+            let first = l.split_whitespace().next().unwrap_or("").to_lowercase();
+            first != prefix_lc
+        })
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    write_atomic(path, out).await
+}
+
+/// Append a line (with newline) to a file, creating it if necessary.
+pub async fn file_append(path: &Path, line: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut f = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    f.write_all(line.as_bytes()).await?;
+    if !line.ends_with('\n') {
+        f.write_all(b"\n").await?;
+    }
+    Ok(())
+}
+
+/// Prune lines from a pending file older than `cutoff_ts`, then return the remaining entries.
+pub async fn prune_and_read_pending(path: &Path, cutoff_ts: u64) -> Vec<PendingConn> {
+    let conns = read_pending_conns(path).await;
+    let kept: Vec<PendingConn> = conns.into_iter().filter(|c| c.ts >= cutoff_ts).collect();
+    if !kept.is_empty() {
+        let content: String = kept
+            .iter()
+            .map(|c| format!("{}\t{}\t{}\t{}\n", c.dst, c.port, c.proto, c.ts))
+            .collect();
+        let _ = write_atomic(path, content).await;
+    } else if path.exists() {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    kept
+}
+
 /// Read /tmp/extra-networks-joins: `mac<TAB>timestamp`
 pub async fn read_joins() -> HashMap<String, String> {
     let path = Path::new("/tmp/extra-networks-joins");

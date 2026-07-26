@@ -259,7 +259,7 @@ async fn build_networks(snap: &Snapshot, show_ip6_col: bool, show_join_col: bool
     result
 }
 
-async fn build_one_network(
+pub async fn build_one_network(
     snap: &Snapshot,
     conf: &crate::data::files::NetworkConf,
     _show_ip6_col: bool,

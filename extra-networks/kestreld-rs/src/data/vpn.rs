@@ -5,6 +5,7 @@ use tokio::process::Command;
 pub struct VpnTier {
     pub name: String,   // "bg"
     pub iface: String,  // "mv_bg"
+    pub fwmark: u32,
     pub state: VpnState,
 }
 
@@ -38,7 +39,7 @@ pub async fn fetch_tiers() -> Vec<VpnTier> {
         Err(_) => return Vec::new(),
     };
 
-    let mut confs: Vec<(String, String, u32)> = Vec::new(); // (name, iface, table)
+    let mut confs: Vec<(String, String, u32, u32)> = Vec::new(); // (name, iface, table, fwmark)
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -49,14 +50,17 @@ pub async fn fetch_tiers() -> Vec<VpnTier> {
         let vars = crate::data::files::parse_sh_vars(&content);
         let Some(iface) = vars.get("VPN_IFACE").cloned() else { continue };
         let table: u32 = vars.get("ROUTE_TABLE").and_then(|v| v.parse().ok()).unwrap_or(0);
-        confs.push((tier.to_string(), iface, table));
+        let fwmark: u32 = vars.get("FWMARK")
+            .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0);
+        confs.push((tier.to_string(), iface, table, fwmark));
     }
     confs.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut tiers = Vec::new();
-    for (name, iface, table) in confs {
+    for (name, iface, table, fwmark) in confs {
         let state = check_state(&iface, table).await;
-        tiers.push(VpnTier { name, iface, state });
+        tiers.push(VpnTier { name, iface, fwmark, state });
     }
     tiers
 }

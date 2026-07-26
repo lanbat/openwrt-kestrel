@@ -1,13 +1,234 @@
 <!DOCTYPE html><html><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Device</title>
+<title>Device — {{ display }}</title>
 <style>
+:root{color-scheme:light}
+*{box-sizing:border-box}
 body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:1rem;color:#111}
 h1{font-size:1.4rem;margin-bottom:.15rem}
 .sub{color:#888;font-size:.85rem;margin-bottom:2rem}
+h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:#888;
+   border-bottom:1px solid #e0e0e0;padding-bottom:.3rem;margin:1.75rem 0 .6rem}
+.card{background:#f5f5f5;border-radius:8px;padding:.7rem 1rem;margin:.4rem 0}
+.row{display:flex;justify-content:space-between;font-size:.9rem;padding:.18rem 0}
+.lbl{color:#666}.val{font-weight:600}
+.ok{color:#2e7d32}.warn{color:#c62828}.dim{color:#aaa}
+table{width:100%;border-collapse:collapse;font-size:.875rem;margin:.4rem 0}
+th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;
+   color:#888;padding:.35rem .5rem;border-bottom:1px solid #e0e0e0}
+td{padding:.35rem .5rem;border-bottom:1px solid #f0f0f0;vertical-align:top}
 a{color:#1976d2;text-decoration:none}
+form{display:inline}
+button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
+       color:#fff;border:none;border-radius:4px}
+.actions{display:inline-flex;gap:.25rem;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.actions form{display:inline-flex}
+.actions button{font-weight:600;padding:.22rem .55rem;border-radius:999px;box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.btn-ok{background:#2e7d32}
+.btn-deny{background:#c62828}
+.btn-danger{background:#c62828}
+input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
+   border:1px solid #ccc;border-radius:4px}
+.irow{display:flex;gap:.5rem;align-items:center;margin:.4rem 0}
+.tag-allow{color:#2e7d32;font-weight:600}.tag-deny{color:#c62828;font-weight:600}
+.badge{font-size:.7rem;font-weight:700;padding:.15rem .45rem;border-radius:999px;
+       text-transform:uppercase;letter-spacing:.04em;color:#fff}
+.badge-approved{background:#2e7d32}.badge-denied{background:#c62828}
+.badge-revoked{background:#e65100}.badge-connected{background:#1565c0}
+.badge-disconnected{background:#757575}.badge-deleted{background:#37474f}
+.badge-labelled{background:#6a1b9a}
 </style></head><body>
-<h1>Device</h1>
-<div class="sub"><a href="/cgi-bin/status">Dashboard</a></div>
-<p class="dim">Device page not yet implemented.</p>
+<h1>{{ display }}</h1>
+<div class="sub">{{ net }} &nbsp;&#183;&nbsp; {{ mac }} &nbsp;&#183;&nbsp; <a href="/cgi-bin/status">Dashboard</a></div>
+
+<h2>Device</h2>
+<div class="card">
+<div class="row"><span class="lbl">MAC</span><span class="val">{{ mac }}</span></div>
+<div class="row"><span class="lbl">Manufacturer</span><span class="val dim">{{ manufacturer }}</span></div>
+<div class="row"><span class="lbl">Online</span><span class="val {{ online_css }}">{{ online_text }}</span></div>
+<div class="row">
+  <span class="lbl">Label</span>
+  <span class="val">
+    <form id="label-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}" style="display:inline-flex;gap:.3rem;align-items:center">
+      <input type="hidden" name="action" value="set_label">
+      <input type="text" name="label" value="{{ label }}" placeholder="e.g. Living Room TV" maxlength="40" style="width:160px">
+      <button type="submit">Save</button>
+    </form>
+  </span>
+</div>
+<div class="row"><span class="lbl">Tracked IPv4</span><span class="val">{{ dev_ip }}</span></div>
+<div class="row"><span class="lbl">Tracked IPv6</span><span class="val">{{ dev_ip6 }}</span></div>
+<div class="row"><span class="lbl">DHCP hostname</span><span class="val">{{ hostname }}</span></div>
+<div class="row"><span class="lbl">Lease</span><span class="val">{{ lease_status }}</span></div>
+<div class="row"><span class="lbl">Network</span><span class="val">{{ net }}</span></div>
+{% if join_approval %}
+<div class="row"><span class="lbl">Join state</span>
+  <span class="val actions">
+    <span>{{ join_state }}</span>
+    {% if join_state == "Approved" %}
+    <form class="revoke-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+      <input type="hidden" name="action" value="revoke_join_approval">
+      <button class="btn-danger" type="submit">Revoke approval</button>
+    </form>
+    {% else %}
+    {% if !join_ip.is_empty() %}
+    <form class="approve-join-form" method="POST" action="/cgi-bin/approve-join?net={{ net }}&ip={{ join_ip }}&mac={{ mac }}&host={{ label }}">
+      <input type="hidden" name="action" value="approve">
+      <input type="hidden" name="label" value="{{ label }}">
+      <button class="btn-ok" type="submit">Approve</button>
+    </form>
+    <form class="deny-join-form" method="POST" action="/cgi-bin/approve-join?net={{ net }}&ip={{ join_ip }}&mac={{ mac }}&host={{ label }}">
+      <input type="hidden" name="action" value="deny">
+      <button class="btn-deny" type="submit">Deny</button>
+    </form>
+    {% endif %}
+    {% endif %}
+  </span>
+</div>
+{% endif %}
+</div>
+
+<h2>Connection rate limit</h2>
+<form id="limit-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+  <input type="hidden" name="action" value="set_limit">
+  <div class="irow">
+    <input type="number" name="limit" value="{{ limit }}" min="1" max="9999" style="width:80px">
+    <span style="font-size:.85rem;color:#666">new connections / minute</span>
+    <button type="submit">Save</button>
+  </div>
+</form>
+
+<h2>Approve domain</h2>
+<form id="domain-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+  <input type="hidden" name="action" value="approve_domain">
+  <div class="irow">
+    <input type="text" name="domain" placeholder="api.example.com" maxlength="253" style="width:220px">
+    <button type="submit">Allow</button>
+  </div>
+</form>
+
+<h2>Pending connections</h2>
+{% if pending.is_empty() %}
+<p class="dim">No pending connections.</p>
+{% else %}
+<table>
+  <tr><th>Destination</th><th>Port</th><th>Proto</th><th></th></tr>
+  {% for p in pending %}
+  <tr>
+    <td>{{ p.dst }}</td>
+    <td>{{ p.port }}</td>
+    <td>{{ p.proto }}</td>
+    <td>
+      <form class="ap-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+        <input type="hidden" name="action" value="approve_pending">
+        <input type="hidden" name="dst_ip" value="{{ p.dst }}">
+        <input type="hidden" name="dst_port" value="{{ p.port }}">
+        <input type="hidden" name="dst_proto" value="{{ p.proto }}">
+        <button type="submit">Allow</button>
+      </form>
+      <form class="dp-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+        <input type="hidden" name="action" value="deny_pending">
+        <input type="hidden" name="dst_ip" value="{{ p.dst }}">
+        <input type="hidden" name="dst_port" value="{{ p.port }}">
+        <input type="hidden" name="dst_proto" value="{{ p.proto }}">
+        <button class="btn-danger" type="submit">Deny</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>Rules</h2>
+{% if rules.is_empty() %}
+<p class="dim">No rules yet.</p>
+{% else %}
+<table>
+  <tr><th>Destination</th><th>Port</th><th>Proto</th><th>Action</th><th></th></tr>
+  {% for r in rules %}
+  <tr>
+    <td>{{ r.dst }}</td>
+    <td>{{ r.port }}</td>
+    <td>{{ r.proto }}</td>
+    <td class="{{ r.css }}">{{ r.action }}</td>
+    <td>
+      <form class="rr-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+        <input type="hidden" name="action" value="revoke_rule">
+        <input type="hidden" name="dst" value="{{ r.dst }}">
+        <input type="hidden" name="port" value="{{ r.port }}">
+        <input type="hidden" name="proto" value="{{ r.proto }}">
+        <button class="btn-danger" type="submit">Revoke</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>DNS query history</h2>
+{% if dns_queries.is_empty() %}
+<p class="dim">No recent DNS queries.</p>
+{% else %}
+<table>
+  <tr><th>Domain</th><th>Type</th></tr>
+  {% for q in dns_queries %}
+  <tr><td>{{ q.domain }}</td><td class="dim">{{ q.qtype }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>History</h2>
+{% if history.is_empty() %}
+<p class="dim">No history yet.</p>
+{% else %}
+<table>
+  <tr><th>When</th><th>Decision</th><th>Network</th><th>IPv4</th><th>IPv6</th><th>By</th></tr>
+  {% for h in history %}
+  <tr>
+    <td class="dim">{{ h.when }}</td>
+    <td><span class="badge badge-{{ h.css }}">{{ h.action }}</span></td>
+    <td>{{ h.net }}</td>
+    <td>{{ h.ip4 }}</td>
+    <td>{{ h.ip6 }}</td>
+    <td>{{ h.by }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2 style="margin-top:2rem;color:#b71c1c">Danger zone</h2>
+<p style="font-size:.875rem;color:#555">Removes this device completely: label, rules, approved status, and DNS entry. The device will be blocked immediately and must be re-approved if it reconnects.</p>
+<form id="delete-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+  <input type="hidden" name="action" value="delete">
+  <button type="submit" id="delete-btn" style="background:#b71c1c;color:#fff;border:none;padding:.6rem 1.25rem;border-radius:6px;cursor:pointer;font-size:.9rem">Remove device</button>
+</form>
+
+<script>
+(function(){
+  function jsonPost(form, opts) {
+    opts = opts || {};
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      if (opts.confirm && !confirm(opts.confirm)) return;
+      var data = new URLSearchParams(new FormData(form));
+      fetch(form.action, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:data.toString()})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if (j.ok) {
+            if (j.redirect) location.href = j.redirect;
+            else location.reload();
+          } else {
+            alert(j.error || 'Error');
+          }
+        })
+        .catch(function(){ form.submit(); });
+    });
+  }
+  document.querySelectorAll('.ap-form,.dp-form,.rr-form,.revoke-form,.approve-join-form,.deny-join-form').forEach(function(f){ jsonPost(f); });
+  jsonPost(document.getElementById('label-form'));
+  jsonPost(document.getElementById('limit-form'));
+  jsonPost(document.getElementById('domain-form'));
+  jsonPost(document.getElementById('delete-form'), {confirm: 'Remove {{ display }} from {{ net }}? This cannot be undone.'});
+})();
+</script>
 </body></html>
