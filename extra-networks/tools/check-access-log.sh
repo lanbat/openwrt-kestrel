@@ -28,7 +28,7 @@ echo "$total" > "$CHECKPOINT"
 
 # Extract only new lines from this run
 new=$(( total - last ))
-logread 2>/dev/null | tail -"$new" | grep 'EXTNET-2LAN\|EXTNET-DENY' > "$TMPLOG" || true
+logread 2>/dev/null | tail -"$new" | grep 'EXTNET-2LAN\|EXTNET-DENY\|EXTNET-.*-NEW:' > "$TMPLOG" || true
 
 [ -s "$TMPLOG" ] || { rm -f "$TMPLOG"; exit 0; }
 
@@ -70,6 +70,37 @@ ${src_label}${src_mac:+ [${src_mac}]} tried to use the ${iface} network but is n
             "view, View device, ${_view_url}"
         continue
         ;;
+    # ── internet connection (DEVICE_CONTROL networks) ────────────────────────
+    *EXTNET-*-NEW:*)
+        _t="${line##*EXTNET-}"; iface="${_t%%-NEW:*}"
+        [ -z "$iface" ] && continue
+
+        conf="${BASE_DIR}/${iface}-notify.conf"
+        [ -f "$conf" ] || continue
+        unset NOTIFY_URL SUBNET IFACE_NAME DEVICE_CONTROL
+        . "$conf"
+        [ "${DEVICE_CONTROL:-no}" = yes ] || continue
+
+        _t="${line##*SRC=}";   src="${_t%% *}"
+        _t="${line##*DST=}";   dst="${_t%% *}"
+        _t="${line##*PROTO=}"; proto=$(printf '%s' "${_t%% *}" | awk '{print tolower($0)}')
+        _t="${line##*DPT=}";   dpt="${_t%% *}"
+        [ -z "$src" ] || [ -z "$dst" ] || [ -z "$dpt" ] || [ -z "$proto" ] && continue
+
+        # Bytes 7–12 of the netfilter Ethernet header are the source device MAC
+        _mac_raw="${line##*MAC=}"; _mac_raw="${_mac_raw%% *}"
+        src_mac=$(printf '%s' "$_mac_raw" \
+            | awk -F: 'NF>=12{printf "%s:%s:%s:%s:%s:%s",$7,$8,$9,$10,$11,$12}')
+        [ -z "$src_mac" ] && continue
+
+        _mac_n=$(printf '%s' "$src_mac" | tr -d ':')
+        _pending_f="${BASE_DIR}/${iface}-pending-${_mac_n}"
+        _tab=$(printf '\t')
+        _key="${dst}${_tab}${dpt}${_tab}${proto}"
+        grep -iqF "${_key}${_tab}" "$_pending_f" 2>/dev/null \
+            || printf '%s\t%s\n' "$_key" "$(date +%s)" >> "$_pending_f"
+        continue
+        ;;
     # ── LAN access request ────────────────────────────────────────────────────
     *EXTNET-2LAN*) ;;
     *) continue ;;
@@ -86,7 +117,7 @@ ${src_label}${src_mac:+ [${src_mac}]} tried to use the ${iface} network but is n
 
     _t="${line##*SRC=}";   src="${_t%% *}"
     _t="${line##*DST=}";   dst="${_t%% *}"
-    _t="${line##*PROTO=}"; proto=$(printf '%s' "${_t%% *}" | tr '[:upper:]' '[:lower:]')
+    _t="${line##*PROTO=}"; proto=$(printf '%s' "${_t%% *}" | awk '{print tolower($0)}')
     _t="${line##*DPT=}";   port="${_t%% *}"
 
     [ -z "$src" ] || [ -z "$dst" ] || [ -z "$proto" ] || [ -z "$port" ] && continue

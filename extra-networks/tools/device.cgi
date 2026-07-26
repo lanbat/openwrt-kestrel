@@ -49,7 +49,7 @@ fi
 
 # Parse params
 if [ "${REQUEST_METHOD:-GET}" = "POST" ] && [ -n "${CONTENT_LENGTH:-}" ]; then
-    printf '%s' "$CONTENT_LENGTH" | grep -qE '^[0-9]+$' && [ "$CONTENT_LENGTH" -le 4096 ] \
+    printf '%s' "$CONTENT_LENGTH" | grep -qE '^[0-9]+$' && [ "$CONTENT_LENGTH" -le 16384 ] \
         || { printf 'Content-Type: text/html\r\n\r\nBad request'; exit 0; }
     _params=$(head -c "$CONTENT_LENGTH")
     [ -n "${QUERY_STRING:-}" ] && _params="${QUERY_STRING}&${_params}"
@@ -121,6 +121,22 @@ _BACK_URL="/cgi-bin/device?net=${NET}&mac=${MAC}"
 _rip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
 _rip="${_rip:-192.168.1.1}"
 _DEV_URL="http://${_rip}${_BACK_URL}"
+_split_dir="/etc/split-routing"
+_vpn_list=$(
+    for _vf in "${_split_dir}"/vpn-*.conf; do
+        [ -f "$_vf" ] || continue
+        _vn="${_vf##*/vpn-}"; _vn="${_vn%.conf}"
+        _vpi=$(awk -F= '/^VPN_IFACE/{gsub(/[" \t]/, "", $2); print $2; exit}' "$_vf" 2>/dev/null)
+        _vpfm=$(awk -F= '/^FWMARK/{gsub(/[" \t]/, "", $2); print $2; exit}' "$_vf" 2>/dev/null)
+        [ -n "$_vpi" ] && [ -n "$_vpfm" ] \
+            && printf '%s\t%s\t%s\n' "$_vn" "$_vpi" "$_vpfm"
+    done
+)
+_vpn_options=$(printf '%s\n' "$_vpn_list" | while IFS=$(printf '\t') read -r _vn _vi _vfm; do
+    [ -z "$_vn" ] && continue
+    _vlbl=$(printf '%s' "$_vn" | awk '{print toupper($0)}')
+    printf '<option value="%s">%s (%s)</option>\n' "$(_html "$_vn")" "$(_html "$_vlbl")" "$(_html "$_vi")"
+done)
 _JOIN_IP="${_DEV_IP:-$_DEV_IP6}"
 _JOIN_STATE=Untracked
 grep -qixF "$MAC" "$_join_approved_f" 2>/dev/null && _JOIN_STATE=Approved
@@ -233,20 +249,43 @@ The device is no longer approved on ${_iface}." \
     approve_domain)
         _dom=$(printf '%s' "$(_get_param "$_params" domain)" \
             | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-            | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+            | awk '{print tolower($0)}')
         printf '%s' "$_dom" | grep -qE '^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$' \
             || { printf '<h1>Invalid domain</h1>'; exit 0; }
-        _entry="${MAC}	${_dom}	allow		"
-        grep -qF "$_entry" "$_rules_f" 2>/dev/null \
-            || printf '%s\n' "$_entry" >> "$_rules_f"
+        _route=$(printf '%s' "$(_get_param "$_params" route)" \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        _route_fwmark=""
+        if [ -n "$_route" ]; then
+            _vpf="${_split_dir}/vpn-${_route}.conf"
+            [ -f "$_vpf" ] || { printf '<h1>Unknown VPN route</h1>'; exit 0; }
+            _route_fwmark=$(awk -F= '/^FWMARK/{gsub(/[" \t]/, "", $2); print $2; exit}' \
+                "$_vpf" 2>/dev/null)
+            [ -n "$_route_fwmark" ] || { printf '<h1>Invalid VPN config</h1>'; exit 0; }
+        fi
+        { grep -v "^${MAC}	${_dom}	" "$_rules_f" 2>/dev/null
+          printf '%s\t%s\tallow\t\t\t%s\n' "$MAC" "$_dom" "${_route:-}"; } \
+            > "${_rules_f}.tmp" && mv "${_rules_f}.tmp" "$_rules_f" || true
         _dconf="/etc/dnsmasq.d/${_iface}-device-${_mac_n}.conf"
-        _nftset="4#inet#fw4#${_iface}_allow_${_mac_n}_4,6#inet#fw4/${_iface}_allow_${_mac_n}_6"
-        _dentry="nftset=/${_dom}/${_nftset}"
-        grep -qF "$_dentry" "$_dconf" 2>/dev/null \
-            || printf '%s\n' "$_dentry" >> "$_dconf"
+        _nftset="4#inet#fw4#${_iface}_allow_${_mac_n}_4,6#inet#fw4#${_iface}_allow_${_mac_n}_6"
+        [ -n "$_route" ] && \
+            _nftset="${_nftset},4#inet#fw4#${_iface}_route_${_mac_n}_${_route}_4,6#inet#fw4#${_iface}_route_${_mac_n}_${_route}_6"
+        { grep -v "^nftset=/${_dom}/" "$_dconf" 2>/dev/null
+          printf 'nftset=/%s/%s\n' "$_dom" "$_nftset"; } \
+            > "${_dconf}.tmp" && mv "${_dconf}.tmp" "$_dconf" || true
+        if [ -n "$_route" ]; then
+            nft add set inet fw4 "${_iface}_route_${_mac_n}_${_route}_4" \
+                '{ type ipv4_addr; flags dynamic,timeout; timeout 24h; }' 2>/dev/null || true
+            nft add set inet fw4 "${_iface}_route_${_mac_n}_${_route}_6" \
+                '{ type ipv6_addr; flags dynamic,timeout; timeout 24h; }' 2>/dev/null || true
+        fi
         /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+        if [ -n "$_route" ]; then
+            setsid sh -c "sh /etc/extra-networks/_regen-inspect.sh ${_iface} >/dev/null 2>&1; \
+                ACTION=ifup INTERFACE=${_iface} sh /etc/hotplug.d/iface/51-${_iface}-macfilter \
+                >/dev/null 2>&1" &
+        fi
         _ntfy "Rule added — ${_iface}" default shield \
-            "${_DEV_DISPLAY}: ${_dom} allowed on ${_iface}.
+            "${_DEV_DISPLAY}: ${_dom} allowed on ${_iface}${_route:+ via ${_route} VPN}.
 
 ${_actor_info}" \
             "view, Device, ${_DEV_URL}"
@@ -347,6 +386,43 @@ ${_actor_info}" \
         exit 0
         ;;
 
+    bulk_revoke)
+        _n=$(_get_param "$_params" n)
+        printf '%s' "$_n" | grep -qE '^[0-9]+$' || _n=0
+        _bi=0
+        _need_dnsmasq=no
+        _dconf="/etc/dnsmasq.d/${_iface}-device-${_mac_n}.conf"
+        while [ "$_bi" -lt "$_n" ]; do
+            [ "$(_get_param "$_params" "sel_${_bi}")" = 1 ] || { _bi=$((_bi+1)); continue; }
+            _bdst=$(_get_param "$_params"   "dst_${_bi}")
+            _bport=$(_get_param "$_params"  "port_${_bi}")
+            _bproto=$(_get_param "$_params" "proto_${_bi}")
+            [ -f "$_rules_f" ] && {
+                grep -v "^${MAC}	${_bdst}	" "$_rules_f" \
+                    > "${_rules_f}.tmp" 2>/dev/null \
+                    && mv "${_rules_f}.tmp" "$_rules_f" || true
+            }
+            case "$_bdst" in
+                *.*.*.*)
+                    nft delete element inet fw4 "${_iface}_allow_${_mac_n}_4" \
+                        "{ ${_bdst} }" 2>/dev/null || true ;;
+                *:*)
+                    nft delete element inet fw4 "${_iface}_allow_${_mac_n}_6" \
+                        "{ ${_bdst} }" 2>/dev/null || true ;;
+                *)
+                    [ -f "$_dconf" ] && {
+                        grep -v "/${_bdst}/" "$_dconf" > "${_dconf}.tmp" 2>/dev/null \
+                            && mv "${_dconf}.tmp" "$_dconf" || true
+                    }
+                    _need_dnsmasq=yes ;;
+            esac
+            _bi=$((_bi+1))
+        done
+        [ "$_need_dnsmasq" = yes ] && /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+        printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
+        exit 0
+        ;;
+
     delete)
         _notify_ip="${_DEV_IP:-${_DEV_IP6:-}}"
         _dns=$([ -n "$_notify_ip" ] && nslookup "$_notify_ip" 2>/dev/null \
@@ -412,6 +488,98 @@ ${_actor_info}"
         exit 0
         ;;
 
+    bulk_approve)
+        _n=$(_get_param "$_params" n)
+        printf '%s' "$_n" | grep -qE '^[0-9]+$' && [ "$_n" -le 50 ] \
+            || { printf '<h1>Invalid count</h1>'; exit 0; }
+        _need_dnsmasq=no
+        _need_regen=no
+        _bi=0
+        while [ "$_bi" -lt "$_n" ]; do
+            _bact=$(_get_param "$_params" "act_${_bi}")
+            _btype=$(_get_param "$_params" "type_${_bi}")
+            _broute=$(printf '%s' "$(_get_param "$_params" "route_${_bi}")" \
+                | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            _bdst=$(_get_param "$_params" "dst_${_bi}")
+            _bport=$(_get_param "$_params" "port_${_bi}")
+            _bproto=$(_get_param "$_params" "proto_${_bi}")
+            _bdom=$(printf '%s' "$(_get_param "$_params" "domain_${_bi}")" \
+                | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk '{print tolower($0)}')
+            case "$_bact" in
+            allow_ip)
+                _valid_ip "$_bdst" || { _bi=$((_bi+1)); continue; }
+                printf '%s' "$_bport" | grep -qE '^[0-9]{1,5}$' || { _bi=$((_bi+1)); continue; }
+                printf '%s' "$_bproto" | grep -qE '^(tcp|udp|icmp)$' || { _bi=$((_bi+1)); continue; }
+                _bentry="${MAC}	${_bdst}	allow	${_bport}	${_bproto}"
+                grep -qF "$_bentry" "$_rules_f" 2>/dev/null \
+                    || printf '%s\n' "$_bentry" >> "$_rules_f"
+                case "$_bdst" in
+                    *:*) nft add element inet fw4 "${_iface}_allow_${_mac_n}_6" "{ ${_bdst} }" 2>/dev/null || true ;;
+                    *)   nft add element inet fw4 "${_iface}_allow_${_mac_n}_4" "{ ${_bdst} }" 2>/dev/null || true ;;
+                esac
+                [ -f "$_pending_f" ] && {
+                    grep -v "^${_bdst}	${_bport}	${_bproto}	" "$_pending_f" \
+                        > "${_pending_f}.tmp" 2>/dev/null \
+                        && mv "${_pending_f}.tmp" "$_pending_f" || true
+                }
+                ;;
+            allow_domain)
+                printf '%s' "$_bdom" | grep -qE '^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$' \
+                    || { _bi=$((_bi+1)); continue; }
+                _broute_fwmark=""
+                if [ -n "$_broute" ]; then
+                    _bvpf="${_split_dir}/vpn-${_broute}.conf"
+                    [ -f "$_bvpf" ] || _broute=""
+                    [ -n "$_broute" ] && _broute_fwmark=$(awk -F= '/^FWMARK/{gsub(/[" \t]/, "", $2); print $2; exit}' \
+                        "$_bvpf" 2>/dev/null)
+                fi
+                { grep -v "^${MAC}	${_bdom}	" "$_rules_f" 2>/dev/null
+                  printf '%s\t%s\tallow\t\t\t%s\n' "$MAC" "$_bdom" "${_broute:-}"; } \
+                    > "${_rules_f}.tmp" && mv "${_rules_f}.tmp" "$_rules_f" || true
+                _bdconf="/etc/dnsmasq.d/${_iface}-device-${_mac_n}.conf"
+                _bnftset="4#inet#fw4#${_iface}_allow_${_mac_n}_4,6#inet#fw4#${_iface}_allow_${_mac_n}_6"
+                [ -n "$_broute" ] && \
+                    _bnftset="${_bnftset},4#inet#fw4#${_iface}_route_${_mac_n}_${_broute}_4,6#inet#fw4#${_iface}_route_${_mac_n}_${_broute}_6"
+                { grep -v "^nftset=/${_bdom}/" "$_bdconf" 2>/dev/null
+                  printf 'nftset=/%s/%s\n' "$_bdom" "$_bnftset"; } \
+                    > "${_bdconf}.tmp" && mv "${_bdconf}.tmp" "$_bdconf" || true
+                if [ -n "$_broute" ]; then
+                    nft add set inet fw4 "${_iface}_route_${_mac_n}_${_broute}_4" \
+                        '{ type ipv4_addr; flags dynamic,timeout; timeout 24h; }' 2>/dev/null || true
+                    nft add set inet fw4 "${_iface}_route_${_mac_n}_${_broute}_6" \
+                        '{ type ipv6_addr; flags dynamic,timeout; timeout 24h; }' 2>/dev/null || true
+                    _need_regen=yes
+                fi
+                _need_dnsmasq=yes
+                ;;
+            deny)
+                [ -f "$_pending_f" ] && {
+                    grep -v "^${_bdst}	${_bport}	${_bproto}	" "$_pending_f" \
+                        > "${_pending_f}.tmp" 2>/dev/null \
+                        && mv "${_pending_f}.tmp" "$_pending_f" || true
+                }
+                ;;
+            allow_lan)
+                _valid_ip "$_bdst" || { _bi=$((_bi+1)); continue; }
+                printf '%s' "$_bport" | grep -qE '^[0-9]{1,5}$' || { _bi=$((_bi+1)); continue; }
+                printf '%s' "$_bproto" | grep -qE '^(tcp|udp)$' || { _bi=$((_bi+1)); continue; }
+                _bscript=$(awk -F= '/^REPO_DIR/{print $2;exit}' "${BASE_DIR}/config" 2>/dev/null)
+                sh "${_bscript}/tools/allow-service.sh" \
+                    "$_iface" "$_bdst" "$_bproto" "$_bport" "${DEFAULT_DURATION:-24h}" lan \
+                    >/dev/null 2>&1 || true
+                ;;
+            esac
+            _bi=$((_bi+1))
+        done
+        [ "$_need_dnsmasq" = yes ] && /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+        [ "$_need_regen" = yes ] && setsid sh -c \
+            "sh /etc/extra-networks/_regen-inspect.sh ${_iface} >/dev/null 2>&1; \
+             ACTION=ifup INTERFACE=${_iface} sh /etc/hotplug.d/iface/51-${_iface}-macfilter \
+             >/dev/null 2>&1" & true
+        printf '<meta http-equiv="refresh" content="0;url=%s">' "$(_html "$_BACK_URL")"
+        exit 0
+        ;;
+
     esac
     printf '<h1>Unknown action</h1>'
     exit 0
@@ -438,7 +606,7 @@ if [ -n "$_DEV_IP$_DEV_IP6" ]; then
     | while IFS=$(printf '\t') read -r _dst _dpt _proto; do
         grep -qF "${MAC}	${_dst}	" "$_rules_f" 2>/dev/null && continue
         _key="${_dst}	${_dpt}	${_proto}"
-        grep -qF "${_key}	" "$_pending_f" 2>/dev/null \
+        grep -iqF "${_key}	" "$_pending_f" 2>/dev/null \
             || printf '%s\t%s\n' "$_key" "$_now_ts" >> "$_pending_f" 2>/dev/null || true
     done
 fi
@@ -493,6 +661,10 @@ if [ -n "$_DEV_IP" ]; then
 fi
 
 if [ -f "$_pending_f" ]; then
+    _cutoff=$(( $(date +%s) - 86400 ))
+    awk -F'\t' -v cut="$_cutoff" '$4+0 >= cut' "$_pending_f" \
+        > "${_pending_f}.tmp" 2>/dev/null \
+        && mv "${_pending_f}.tmp" "$_pending_f" || rm -f "${_pending_f}.tmp"
     while IFS=$(printf '\t') read -r _dst _dpt _proto _ts; do
         [ -z "$_dst" ] && continue
         grep -qF "${MAC}	${_dst}	" "$_rules_f" 2>/dev/null && continue
@@ -500,85 +672,290 @@ if [ -f "$_pending_f" ]; then
     done < "$_pending_f" >> "$_conn_tmp" 2>/dev/null || true
 fi
 
-# Build grouped rows: network → host → port/proto
-_conn_rows=""
+# Build bulk approval form rows (sorted: LAN first, then inet; unique by dst+port+proto)
+# Cap inet rows at 50 most recent to keep the page small
+sort -t "$(printf '\t')" -k2,2 -k3,3 -k4,4n -k5,5 -u "$_conn_tmp" \
+    > "${_conn_tmp}.s" 2>/dev/null && mv "${_conn_tmp}.s" "$_conn_tmp" || true
+_bulk_total=$(awk 'END{print NR+0}' "$_conn_tmp" 2>/dev/null)
+if [ "$_bulk_total" -gt 50 ] 2>/dev/null; then
+    _bulk_hidden=$(( _bulk_total - 50 ))
+    { head -50 "$_conn_tmp"; } > "${_conn_tmp}.t" 2>/dev/null \
+        && mv "${_conn_tmp}.t" "$_conn_tmp" || true
+else
+    _bulk_hidden=0
+fi
+_bulk_n=$(awk 'END{print NR+0}' "$_conn_tmp" 2>/dev/null)
+_bulk_form_rows=""
 if [ -s "$_conn_tmp" ]; then
-    _conn_rows=$(sort -t "$(printf '\t')" -k1,1 -k3,3 -k4,4n "$_conn_tmp" \
-        | while IFS=$(printf '\t') read -r _lbl _atype _dst _dpt _proto; do
-            if [ "$_lbl" != "${_prev_conn_net:-}" ]; then
-                printf '<tr class="net-hdr"><td colspan="2">%s</td></tr>\n' \
-                    "$(_html "$_lbl")"
-                _prev_conn_net="$_lbl"
-                _prev_conn_dst=""
-            fi
-            if [ "$_dst" != "${_prev_conn_dst:-}" ]; then
-                _rdns=$(nslookup "$_dst" 2>/dev/null \
-                    | awk '/name =/{gsub(/\.$/,"",$NF); print $NF; exit}')
-                printf '<tr class="host-hdr"><td colspan="2"><strong>%s</strong>' \
-                    "$(_html "$_dst")"
-                [ -n "$_rdns" ] && \
-                    printf ' <span class="dim">— %s</span>' "$(_html "$_rdns")"
-                printf '</td></tr>\n'
-                _prev_conn_dst="$_dst"
-            fi
-            printf '<tr><td class="dim">%s/%s</td><td>' "$_dpt" "$_proto"
+    _ss='font-size:.8rem;padding:.2rem .35rem;border:1px solid #ccc;border-radius:4px'
+    _bulk_form_rows=$(
+        _i=0
+        while IFS=$(printf '\t') read -r _lbl _atype _dst _dpt _proto; do
+            _rdns=$(nslookup "$_dst" 2>/dev/null \
+                | awk '/name =/{gsub(/\.$/,"",$NF); print $NF; exit}')
+            _apex=$(printf '%s' "${_rdns:-}" \
+                | awk -F. 'NF>=2{print $(NF-1)"."$NF}')
+            printf '<tr><td>%s' "$(_html "$_dst")"
+            [ -n "$_rdns" ] \
+                && printf '<br><span class="dim" style="font-size:.78rem">%s</span>' \
+                    "$(_html "$_rdns")"
+            printf '</td><td class="dim">%s/%s</td><td>' "$_dpt" "$_proto"
             case "$_atype" in
-                lan)
-                    printf '<form method="POST" action="/cgi-bin/device" style="display:inline">'
-                    printf '<input type="hidden" name="net"       value="%s">' "$(_html "$NET")"
-                    printf '<input type="hidden" name="mac"       value="%s">' "$(_html "$MAC")"
-                    printf '<input type="hidden" name="action"    value="allow_lan">'
-                    printf '<input type="hidden" name="dst_ip"    value="%s">' "$(_html "$_dst")"
-                    printf '<input type="hidden" name="dst_port"  value="%s">' "$(_html "$_dpt")"
-                    printf '<input type="hidden" name="dst_proto" value="%s">' "$(_html "$_proto")"
-                    printf '<input type="hidden" name="duration"  value="%s">' "${DEFAULT_DURATION:-24h}"
-                    printf '<button type="submit">Allow</button></form>'
-                    ;;
-                inet)
-                    printf '<form method="POST" action="/cgi-bin/device" style="display:inline">'
-                    printf '<input type="hidden" name="net"       value="%s">' "$(_html "$NET")"
-                    printf '<input type="hidden" name="mac"       value="%s">' "$(_html "$MAC")"
-                    printf '<input type="hidden" name="action"    value="approve_pending">'
-                    printf '<input type="hidden" name="dst_ip"    value="%s">' "$(_html "$_dst")"
-                    printf '<input type="hidden" name="dst_port"  value="%s">' "$(_html "$_dpt")"
-                    printf '<input type="hidden" name="dst_proto" value="%s">' "$(_html "$_proto")"
-                    printf '<button type="submit">Allow</button></form> '
-                    printf '<form method="POST" action="/cgi-bin/device" style="display:inline">'
-                    printf '<input type="hidden" name="net"       value="%s">' "$(_html "$NET")"
-                    printf '<input type="hidden" name="mac"       value="%s">' "$(_html "$MAC")"
-                    printf '<input type="hidden" name="action"    value="deny_pending">'
-                    printf '<input type="hidden" name="dst_ip"    value="%s">' "$(_html "$_dst")"
-                    printf '<input type="hidden" name="dst_port"  value="%s">' "$(_html "$_dpt")"
-                    printf '<input type="hidden" name="dst_proto" value="%s">' "$(_html "$_proto")"
-                    printf '<button class="btn-danger" type="submit">Deny</button></form>'
-                    ;;
+            inet)
+                printf '<select name="act_%d" style="%s">' "$_i" "$_ss"
+                printf '<option value="skip">Skip</option>'
+                printf '<option value="allow_ip">Allow IP</option>'
+                printf '<option value="allow_domain">Allow domain</option>'
+                printf '<option value="deny">Deny</option>'
+                printf '</select>'
+                ;;
+            lan)
+                printf '<select name="act_%d" style="%s">' "$_i" "$_ss"
+                printf '<option value="skip">Skip</option>'
+                printf '<option value="allow_lan">Allow</option>'
+                printf '<option value="deny">Remove</option>'
+                printf '</select>'
+                ;;
             esac
+            printf '</td><td>'
+            if [ "$_atype" = inet ]; then
+                printf '<select name="route_%d" style="%s;margin-right:.35rem"><option value="">WAN</option>%s</select>' \
+                    "$_i" "$_ss" "$_vpn_options"
+                printf '<input type="text" name="domain_%d" value="%s" placeholder="domain.com" style="%s;width:148px">' \
+                    "$_i" "$(_html "$_apex")" "$_ss"
+            fi
+            printf '<input type="hidden" name="dst_%d"  value="%s">' "$_i" "$(_html "$_dst")"
+            printf '<input type="hidden" name="port_%d" value="%s">' "$_i" "$(_html "$_dpt")"
+            printf '<input type="hidden" name="proto_%d" value="%s">' "$_i" "$(_html "$_proto")"
+            printf '<input type="hidden" name="type_%d" value="%s">' "$_i" "$_atype"
             printf '</td></tr>\n'
-          done)
+            _i=$((_i+1))
+        done < "$_conn_tmp"
+    )
 fi
 rm -f "$_conn_tmp"
 
-# Build rules rows
-_rules_rows=$([ -f "$_rules_f" ] && \
-    awk -v m="$MAC" -F'\t' 'tolower($1)==tolower(m) && NF>=3{print}' \
+# Collect DNS queries from dnsmasq log for this device
+_dns_tmp="/tmp/devcgi_dns_$$"
+: > "$_dns_tmp"
+if [ -n "$_DEV_IP" ]; then
+    _app_doms=$([ -f "$_rules_f" ] && \
+        awk -v m="$MAC" -F'\t' \
+            'tolower($1)==tolower(m) && $4=="" && $3=="allow"{print tolower($2)}' \
+            "$_rules_f" 2>/dev/null || true)
+    logread 2>/dev/null \
+    | awk -v ip="$_DEV_IP" '
+        (index($0,"query[A]")||index($0,"query[AAAA]")) && index($0,"from " ip) {
+            n=split($0,f," ")
+            for(i=1;i<=n;i++) if(f[i]=="query[A]"||f[i]=="query[AAAA]") {dom=f[i+1];break}
+            if(!dom||index(dom,".arpa")||dom~/^[0-9.]+$/) next
+            print dom
+        }
+    ' | awk '{print tolower($0)}' | sort | uniq -c | sort -rn | head -50 \
+    | while read -r _cnt _dom; do
+        [ -z "$_dom" ] && continue
+        printf '%s\n' "$_app_doms" | grep -qxF "$_dom" 2>/dev/null && continue
+        printf '%s\t%s\n' "$_cnt" "$_dom" >> "$_dns_tmp"
+    done
+fi
+_dns_n=$(awk 'END{print NR+0}' "$_dns_tmp" 2>/dev/null)
+
+# Threat intelligence: local blocklists + Spamhaus DBL; 24h file cache per apex domain
+_threat_dir="${BASE_DIR}/threat-cache"
+mkdir -p "$_threat_dir" 2>/dev/null || true
+
+_threat_apex() {
+    printf '%s' "$1" | awk -F. '{
+        n=NF
+        if(n>=3 && ($n=="uk"||$n=="au"||$n=="br"||$n=="nz"||$n=="za") \
+           && $(n-1)~/^(co|com|org|net|gov|edu|ac)$/)
+            {print $(n-2)"."$(n-1)"."$n}
+        else if(n>=2) {print $(n-1)"."$n}
+        else {print $0}
+    }'
+}
+
+_threat_check() {
+    _tf="$1" _ta="$2" _tt=""
+    # Local torrent/adult/ad blocklists (nftset=/domain/... format)
+    grep -qF "/${_tf}/" /etc/dnsmasq.d/bg_torrentsites.conf 2>/dev/null \
+        || grep -qF "/${_ta}/" /etc/dnsmasq.d/bg_torrentsites.conf 2>/dev/null \
+        && _tt="${_tt:+${_tt},}Torrent"
+    grep -qF "/${_tf}/" /etc/dnsmasq.d/bg_pornsites.conf 2>/dev/null \
+        || grep -qF "/${_ta}/" /etc/dnsmasq.d/bg_pornsites.conf 2>/dev/null \
+        && _tt="${_tt:+${_tt},}Adult"
+    [ -s /etc/dnsmasq.d/adb_list.overall ] && {
+        grep -qF "/${_tf}/" /etc/dnsmasq.d/adb_list.overall 2>/dev/null \
+            || grep -qF "/${_ta}/" /etc/dnsmasq.d/adb_list.overall 2>/dev/null \
+            && _tt="${_tt:+${_tt},}Ad/Tracker"
+    }
+    # Spamhaus DBL: returns 127.0.1.x for listed domains, 127.255.255.254 or NXDOMAIN if clean
+    _dbl=$(nslookup "${_ta}.dbl.spamhaus.org" 2>/dev/null \
+        | awk '/^Address/ && !/127\.0\.0\.1/ && !/127\.255\.255/{print $2; exit}')
+    case "$_dbl" in
+        127.0.1.2)   _tt="${_tt:+${_tt},}Spam" ;;
+        127.0.1.4)   _tt="${_tt:+${_tt},}Phishing" ;;
+        127.0.1.5)   _tt="${_tt:+${_tt},}Malware" ;;
+        127.0.1.6)   _tt="${_tt:+${_tt},}Botnet C&C" ;;
+        127.0.1.10*) _tt="${_tt:+${_tt},}Abused Domain" ;;
+    esac
+    printf '%s' "$_tt"
+}
+
+_threat_any_new=0
+# Pre-fetch for unapproved queried domains
+if [ -s "$_dns_tmp" ]; then
+    while IFS=$(printf '\t') read -r _frc _frd; do
+        [ -z "$_frd" ] && continue
+        _fra=$(_threat_apex "$_frd")
+        _frf="${_threat_dir}/${_fra}"
+        _frage=$(( $(date +%s) - $(stat -c '%Y' "$_frf" 2>/dev/null || echo 0) ))
+        if [ ! -f "$_frf" ] || [ "$_frage" -ge 86400 ]; then
+            _threat_any_new=1
+            (_threat_check "$_frd" "$_fra" > "${_frf}.tmp" \
+                && mv "${_frf}.tmp" "$_frf" || rm -f "${_frf}.tmp") &
+        fi
+    done < "$_dns_tmp"
+fi
+# Pre-fetch for already-approved domain rules (so Approved Domains section shows threat info)
+if [ -f "$_rules_f" ]; then
+    awk -v m="$MAC" -F'\t' 'tolower($1)==tolower(m) && $4=="" && $3=="allow"{print $2}' \
         "$_rules_f" 2>/dev/null \
-    | while IFS=$(printf '\t') read -r _rmac _rdst _ract _rport _rproto; do
-        [ -z "$_rdst" ] && continue
-        _tc=$([ "$_ract" = allow ] && echo "tag-allow" || echo "tag-deny")
-        _tl=$([ "$_ract" = allow ] && echo "Allow" || echo "Deny")
-        printf '<tr><td>%s</td><td>%s</td><td>%s</td><td class="%s">%s</td><td>' \
-            "$(_html "$_rdst")" "${_rport:----}" "${_rproto:----}" "$_tc" "$_tl"
-        printf '<form method="POST" action="/cgi-bin/device">'
-        printf '<input type="hidden" name="net"   value="%s">' "$(_html "$NET")"
-        printf '<input type="hidden" name="mac"   value="%s">' "$(_html "$MAC")"
-        printf '<input type="hidden" name="action" value="revoke_rule">'
-        printf '<input type="hidden" name="dst"   value="%s">' "$(_html "$_rdst")"
-        printf '<input type="hidden" name="port"  value="%s">' "$(_html "${_rport:-}")"
-        printf '<input type="hidden" name="proto" value="%s">' "$(_html "${_rproto:-}")"
-        printf '<button class="btn-danger" type="submit">Revoke</button></form>'
-        printf '</td></tr>\n'
-    done \
-|| true)
+    | while read -r _adm; do
+        [ -z "$_adm" ] && continue
+        _fra=$(_threat_apex "$_adm")
+        _frf="${_threat_dir}/${_fra}"
+        _frage=$(( $(date +%s) - $(stat -c '%Y' "$_frf" 2>/dev/null || echo 0) ))
+        if [ ! -f "$_frf" ] || [ "$_frage" -ge 86400 ]; then
+            _threat_any_new=1
+            (_threat_check "$_adm" "$_fra" > "${_frf}.tmp" \
+                && mv "${_frf}.tmp" "$_frf" || rm -f "${_frf}.tmp") &
+        fi
+    done
+fi
+[ "$_threat_any_new" = 1 ] && { sleep 4; wait; } 2>/dev/null || true
+
+_dns_rows=""
+if [ -s "$_dns_tmp" ]; then
+    _ss='font-size:.8rem;padding:.2rem .35rem;border:1px solid #ccc;border-radius:4px'
+    _dns_rows=$(
+        _i=0
+        while IFS=$(printf '\t') read -r _cnt _dom; do
+            [ -z "$_dom" ] && continue
+            _dapx=$(_threat_apex "$_dom")
+            _dcf="${_threat_dir}/${_dapx}"
+            if [ -f "$_dcf" ]; then
+                _dtags=$(cat "$_dcf" 2>/dev/null)
+                if [ -z "$_dtags" ]; then
+                    _drep='<span class="dim">—</span>'
+                else
+                    _ts='font-size:.7rem;font-weight:700;padding:.1rem .35rem;border-radius:999px;color:#fff;margin-right:.2rem'
+                    _drep=$(printf '%s' "$_dtags" | awk -F, -v ts="$_ts" '{
+                        for(i=1;i<=NF;i++){
+                            t=$i
+                            if(t~/Malware|Phishing|Botnet/) c="#b71c1c"
+                            else if(t~/Spam|Abused/)        c="#e65100"
+                            else if(t~/Torrent/)            c="#1565c0"
+                            else if(t~/Adult/)              c="#6a1b9a"
+                            else if(t~/Ad.Tracker/)         c="#f57c00"
+                            else                            c="#555"
+                            printf "<span style=\"%s;background:%s\">%s</span>",ts,c,t
+                        }
+                    }')
+                fi
+            else
+                _drep='<span class="dim">…</span>'
+            fi
+            printf '<tr><td>%s<br>%s</td>' "$(_html "$_dom")" "$_drep"
+            printf '<td class="dim">%s&times;</td><td>' "$_cnt"
+            printf '<select name="act_%d" style="%s">' "$_i" "$_ss"
+            printf '<option value="skip">Skip</option>'
+            printf '<option value="allow_domain">Allow</option>'
+            printf '</select></td><td>'
+            printf '<select name="route_%d" style="%s;margin-right:.35rem">' "$_i" "$_ss"
+            printf '<option value="">WAN</option>%s</select>' "$_vpn_options"
+            printf '<input type="hidden" name="domain_%d" value="%s">' "$_i" "$(_html "$_dom")"
+            printf '<input type="hidden" name="type_%d" value="dns">' "$_i"
+            printf '</td></tr>\n'
+            _i=$((_i+1))
+        done < "$_dns_tmp"
+    )
+fi
+rm -f "$_dns_tmp"
+
+# Build combined active rules (domain allows + IP/port rules) into temp file
+_arules_tmp="/tmp/devcgi_ar_$$"
+{
+    [ -f "$_rules_f" ] && awk -v m="$MAC" -F'\t' '
+        tolower($1)==tolower(m) && $3=="allow" && $4=="" {
+            print "dom\t"$2"\t\t\t"(NF>=6 ? $6 : "")"\tallow"
+        }
+        tolower($1)==tolower(m) && $4!="" {
+            print "ip\t"$2"\t"$4"\t"$5"\t"(NF>=6 ? $6 : "")"\t"$3
+        }
+    ' "$_rules_f" 2>/dev/null
+} > "$_arules_tmp" 2>/dev/null || true
+
+_ts_badge='font-size:.7rem;font-weight:700;padding:.1rem .35rem;border-radius:999px;color:#fff;margin-right:.2rem'
+_all_rules_n=$(awk 'END{print NR+0}' "$_arules_tmp" 2>/dev/null)
+_all_rules_rows=""
+if [ -s "$_arules_tmp" ]; then
+    _all_rules_rows=$(
+        _ri=0
+        while IFS=$(printf '\t') read -r _rtype _rdst _rport _rproto _rroute _ract; do
+            [ -z "$_rdst" ] && continue
+            _rvlabel="${_rroute:-WAN}"
+            _rtrep='<span class="dim">—</span>'
+            if [ "$_rtype" = dom ]; then
+                _drapx=$(_threat_apex "$_rdst")
+                _drcf="${_threat_dir}/${_drapx}"
+                if [ -f "$_drcf" ]; then
+                    _drtags=$(cat "$_drcf" 2>/dev/null)
+                    [ -n "$_drtags" ] && _rtrep=$(printf '%s' "$_drtags" | awk -F, -v ts="$_ts_badge" '{
+                        for(i=1;i<=NF;i++){
+                            t=$i
+                            if(t~/Malware|Phishing|Botnet/) c="#b71c1c"
+                            else if(t~/Spam|Abused/)        c="#e65100"
+                            else if(t~/Torrent/)            c="#1565c0"
+                            else if(t~/Adult/)              c="#6a1b9a"
+                            else if(t~/Ad.Tracker/)         c="#f57c00"
+                            else                            c="#555"
+                            printf "<span style=\"%s;background:%s\">%s</span>",ts,c,t
+                        }
+                    }')
+                else
+                    _rtrep='<span class="dim">…</span>'
+                fi
+            fi
+            printf '<tr><td>'
+            if [ "$_rtype" = dom ]; then
+                printf '<label style="display:flex;align-items:center;gap:.4rem">'
+                printf '<input type="checkbox" name="sel_%d" value="1">%s</label>' \
+                    "$_ri" "$(_html "$_rdst")"
+            else
+                _tc=$([ "$_ract" = allow ] && echo "tag-allow" || echo "tag-deny")
+                _tl=$([ "$_ract" = allow ] && echo "Allow" || echo "Deny")
+                printf '<label style="display:flex;align-items:center;gap:.4rem">'
+                printf '<input type="checkbox" name="sel_%d" value="1">' "$_ri"
+                printf '<span>%s <span class="%s" style="font-size:.7rem">%s</span></span></label>' \
+                    "$(_html "$_rdst")" "$_tc" "$_tl"
+            fi
+            printf '<input type="hidden" name="dst_%d"   value="%s">' "$_ri" "$(_html "$_rdst")"
+            printf '<input type="hidden" name="port_%d"  value="%s">' "$_ri" "$(_html "${_rport:-}")"
+            printf '<input type="hidden" name="proto_%d" value="%s">' "$_ri" "$(_html "${_rproto:-}")"
+            printf '</td>'
+            if [ "$_rtype" = dom ]; then
+                printf '<td class="dim">—</td>'
+            else
+                printf '<td class="dim">%s/%s</td>' "$_rport" "$_rproto"
+            fi
+            printf '<td class="dim">%s</td><td>%s</td>' "$(_html "$_rvlabel")" "$_rtrep"
+            printf '</tr>\n'
+            _ri=$((_ri+1))
+        done < "$_arules_tmp"
+    )
+fi
+rm -f "$_arules_tmp"
 
 _approval_controls=""
 _approval_row=""
@@ -759,6 +1136,7 @@ if [ -n "$_lease_line" ]; then
     fi
 fi
 
+
 printf 'Content-Type: text/html\r\n\r\n'
 
 cat <<HTML
@@ -846,6 +1224,10 @@ ${_approval_row}
 <input type="hidden" name="action" value="approve_domain">
 <div class="irow">
 <input type="text" name="domain" placeholder="api.example.com" maxlength="253" style="width:220px">
+<select name="route" style="font-size:.875rem;padding:.3rem .5rem;border:1px solid #ccc;border-radius:4px">
+<option value="">WAN (default)</option>
+${_vpn_options}
+</select>
 <button type="submit">Allow</button>
 </div>
 </form>
@@ -853,21 +1235,73 @@ ${_approval_row}
 <h2>Connection approvals</h2>
 HTML
 
-if [ -n "$_conn_rows" ]; then
-    printf '<table><tr><th>Port/Proto</th><th></th></tr>\n'
-    printf '%s\n' "$_conn_rows"
+if [ -n "$_bulk_form_rows" ]; then
+    printf '<form method="POST" action="/cgi-bin/device">\n'
+    printf '<input type="hidden" name="net"    value="%s">\n' "$(_html "$NET")"
+    printf '<input type="hidden" name="mac"    value="%s">\n' "$(_html "$MAC")"
+    printf '<input type="hidden" name="action" value="bulk_approve">\n'
+    printf '<input type="hidden" name="n"      value="%s">\n' "$_bulk_n"
+    printf '<table><tr><th>Destination</th><th>Port/Proto</th><th>Action</th><th>Route</th></tr>\n'
+    printf '%s\n' "$_bulk_form_rows"
     printf '</table>\n'
+    printf '<div class="irow" style="margin-top:.75rem"><button type="submit">Apply</button></div>\n'
+    printf '</form>\n'
+    printf '<script>(function(){'
+    printf 'document.querySelectorAll("select[name^=\\"act_\\"]").forEach(function(s){'
+    printf 'var i=s.name.slice(4);'
+    printf 'var d=document.querySelector("input[type=text][name=\\"domain_"+i+"\\"]");'
+    printf 'if(!d)return;'
+    printf 'function u(){d.style.display=s.value==="allow_domain"?"":"none"}'
+    printf 's.addEventListener("change",u);u();});'
+    printf '})()</script>\n'
+[ "$_bulk_hidden" -gt 0 ] 2>/dev/null && \
+    printf '<p class="dim" style="margin-top:.4rem">…and %d more older entries not shown.</p>\n' \
+        "$_bulk_hidden"
 else
     printf '<p class="dim">No pending connections.</p>\n'
 fi
 
-printf '<h2>Rules</h2>\n'
-if [ -n "$_rules_rows" ]; then
-    printf '<table><tr><th>Destination</th><th>Port</th><th>Proto</th><th>Action</th><th></th></tr>\n'
-    printf '%s\n' "$_rules_rows"
+printf '<h2>DNS query history</h2>\n'
+if [ -n "$_dns_rows" ]; then
+    printf '<form method="POST" action="/cgi-bin/device">\n'
+    printf '<input type="hidden" name="net"    value="%s">\n' "$(_html "$NET")"
+    printf '<input type="hidden" name="mac"    value="%s">\n' "$(_html "$MAC")"
+    printf '<input type="hidden" name="action" value="bulk_approve">\n'
+    printf '<input type="hidden" name="n"      value="%s">\n' "$_dns_n"
+    printf '<table><tr><th>Domain</th><th>Queries</th><th>Action</th><th>Route</th></tr>\n'
+    printf '%s\n' "$_dns_rows"
     printf '</table>\n'
+    printf '<div class="irow" style="margin-top:.75rem"><button type="submit">Apply</button></div>\n'
+    printf '</form>\n'
 else
-    printf '<p class="dim">No rules yet.</p>\n'
+    if [ -z "$_DEV_IP" ]; then
+        printf '<p class="dim">No DNS queries logged (device IP unknown).</p>\n'
+    elif [ -n "$_app_doms" ]; then
+        printf '<p class="dim">All recent DNS queries are already in Active rules.</p>\n'
+    else
+        printf '<p class="dim">No DNS queries logged yet.</p>\n'
+    fi
+fi
+
+printf '<h2>Active rules</h2>\n'
+if [ -n "$_all_rules_rows" ]; then
+    printf '<form method="POST" action="/cgi-bin/device">\n'
+    printf '<input type="hidden" name="net"    value="%s">\n' "$(_html "$NET")"
+    printf '<input type="hidden" name="mac"    value="%s">\n' "$(_html "$MAC")"
+    printf '<input type="hidden" name="action" value="bulk_revoke">\n'
+    printf '<input type="hidden" name="n"      value="%s">\n' "$_all_rules_n"
+    printf '<table><tr>'
+    printf '<th><input type="checkbox" title="Select all" onchange="this.form.querySelectorAll('"'"'input[name^=sel_]'"'"').forEach(function(c){c.checked=this.checked},this)"></th>'
+    printf '<th>Rule</th><th>Port/Proto</th><th>Via</th><th>Threat</th>'
+    printf '</tr>\n'
+    printf '%s\n' "$_all_rules_rows"
+    printf '</table>\n'
+    printf '<div class="irow" style="margin-top:.75rem">'
+    printf '<button type="submit" class="btn-danger">Revoke selected</button>'
+    printf '</div>\n'
+    printf '</form>\n'
+else
+    printf '<p class="dim">No active rules.</p>\n'
 fi
 
 printf '<h2>History</h2>\n'
