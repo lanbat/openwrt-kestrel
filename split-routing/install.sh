@@ -368,6 +368,53 @@ done
 EOF
 chmod 0755 "$HOTPLUG"
 
+# ── firewall zones ─────────────────────────────────────────────────────────────
+# For each VPN interface: ensure a firewall zone with masquerade exists, and a
+# lan→vpn forwarding rule exists.  Idempotent — safe to re-run on every install.
+
+_fw_changed=0
+for _conf in "$LISTS_DIR"/vpn-*.conf; do
+  [ -f "$_conf" ] || continue
+  unset VPN_IFACE
+  . "$_conf"
+  [ -n "${VPN_IFACE:-}" ] || continue
+
+  # Find the zone index that contains this interface.
+  _zi=0; _found_zone=""
+  while uci get "firewall.@zone[$_zi].name" >/dev/null 2>&1; do
+    if uci show "firewall.@zone[$_zi]" 2>/dev/null | grep -qF "'$VPN_IFACE'"; then
+      _found_zone=$_zi; break
+    fi
+    _zi=$((_zi+1))
+  done
+
+  if [ -n "$_found_zone" ]; then
+    # Zone exists — patch masquerade if missing.
+    if [ "$(uci get "firewall.@zone[$_found_zone].masq" 2>/dev/null)" != 1 ]; then
+      uci set "firewall.@zone[$_found_zone].masq=1"
+      uci set "firewall.@zone[$_found_zone].masq6=1"
+      echo "  Enabled masquerade on firewall zone $_found_zone for $VPN_IFACE"
+      _fw_changed=1
+    fi
+  else
+    # Zone missing — create it with lan forwarding and masquerade.
+    uci add firewall zone >/dev/null
+    uci set "firewall.@zone[-1].name=$VPN_IFACE"
+    uci set "firewall.@zone[-1].network=$VPN_IFACE"
+    uci set "firewall.@zone[-1].input=REJECT"
+    uci set "firewall.@zone[-1].output=ACCEPT"
+    uci set "firewall.@zone[-1].forward=REJECT"
+    uci set "firewall.@zone[-1].masq=1"
+    uci set "firewall.@zone[-1].masq6=1"
+    uci add firewall forwarding >/dev/null
+    uci set "firewall.@forwarding[-1].src=lan"
+    uci set "firewall.@forwarding[-1].dest=$VPN_IFACE"
+    echo "  Created firewall zone and lan forwarding for $VPN_IFACE"
+    _fw_changed=1
+  fi
+done
+[ "$_fw_changed" = 1 ] && uci commit firewall
+
 fw4 -q reload 2>/dev/null || true
 
 # Set up policy routing rules for all currently-up VPN interfaces.
