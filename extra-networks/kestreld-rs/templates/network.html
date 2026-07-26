@@ -90,7 +90,7 @@ tr.highlight td{animation:hl 2s ease-out forwards}
     <span class="q-lbl">SSID</span><strong>{{ net.ssid }}</strong>
     <span class="q-lbl">Password</span><code>{{ net.wifi_key }}</code>
     {% if net.rotate_password %}
-    <form method="POST" action="/cgi-bin/rotate-password" style="margin-top:auto;padding-top:.6rem;text-align:right">
+    <form class="rotate-form" method="POST" action="/cgi-bin/rotate-password" style="margin-top:auto;padding-top:.6rem;text-align:right">
       <input type="hidden" name="net" value="{{ net.iface }}">
       <button class="btn-danger" type="submit" onclick="return confirm('Rotate the WiFi password for {{ net.iface }}? All connected devices will need to reconnect with the new password.')">Rotate password</button>
     </form>
@@ -121,7 +121,7 @@ tr.highlight td{animation:hl 2s ease-out forwards}
       {% if dev.has_label %}
         <a href="/cgi-bin/device?net={{ net.iface }}&amp;mac={{ dev.mac }}">{{ dev.label }}</a>
       {% else %}
-        <form method="POST" action="/cgi-bin/approve-join" style="margin:0">
+        <form class="label-form" method="POST" action="/cgi-bin/approve-join" style="margin:0">
           <input type="hidden" name="net" value="{{ net.iface }}">
           <input type="hidden" name="mac" value="{{ dev.mac }}">
           <input type="hidden" name="action" value="set_label">
@@ -141,7 +141,7 @@ tr.highlight td{animation:hl 2s ease-out forwards}
       <span class="badge badge-{{ dev.join_css }}">{{ dev.join_state }}</span>
       <span class="actions">
         {% if dev.show_approve %}
-        <form method="POST" action="/cgi-bin/approve-join">
+        <form class="approve-form" method="POST" action="/cgi-bin/approve-join">
           <input type="hidden" name="net" value="{{ net.iface }}">
           <input type="hidden" name="ip" value="{{ dev.approve_ip }}">
           <input type="hidden" name="mac" value="{{ dev.mac }}">
@@ -153,7 +153,7 @@ tr.highlight td{animation:hl 2s ease-out forwards}
         </form>
         {% endif %}
         {% if dev.show_deny %}
-        <form method="POST" action="/cgi-bin/approve-join">
+        <form class="deny-form" method="POST" action="/cgi-bin/approve-join">
           <input type="hidden" name="net" value="{{ net.iface }}">
           <input type="hidden" name="ip" value="{{ dev.approve_ip }}">
           <input type="hidden" name="mac" value="{{ dev.mac }}">
@@ -204,7 +204,7 @@ tr.highlight td{animation:hl 2s ease-out forwards}
     <td>{{ p.dst_name }}</td>
     <td>{{ p.port }}/{{ p.proto }}</td>
     <td>
-      <form method="POST" action="/cgi-bin/approve-access">
+      <form class="grant-form" method="POST" action="/cgi-bin/approve-access">
         <input type="hidden" name="net" value="{{ net.iface }}">
         <input type="hidden" name="src" value="{{ p.src }}">
         <input type="hidden" name="dst" value="{{ p.dst }}">
@@ -274,6 +274,26 @@ tr.highlight td{animation:hl 2s ease-out forwards}
         if(lines[y][x]==='#')ctx.fillRect(x>>1,y,1,1);
     el.parentNode.replaceChild(cv,el);
   }
+})();
+(function(){
+  function jsonPost(form) {
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      var data = new URLSearchParams(new FormData(form));
+      fetch(form.action, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:data.toString()})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if (j.ok) {
+            if (j.redirect) location.href = j.redirect;
+            else location.reload();
+          } else {
+            alert(j.error || 'Error');
+          }
+        })
+        .catch(function(){ form.submit(); });
+    });
+  }
+  document.querySelectorAll('.label-form,.approve-form,.deny-form,.grant-form,.rotate-form').forEach(function(f){ jsonPost(f); });
 })();
 </script>
 </body></html>

@@ -39,13 +39,7 @@ pub async fn get(
         return err(StatusCode::NOT_FOUND, "SSID or key missing");
     }
 
-    let wtype = if enc.starts_with("sae") || enc.starts_with("psk") {
-        "WPA"
-    } else if enc.starts_with("wep") {
-        "WEP"
-    } else {
-        "nopass"
-    };
+    let wtype = wifi_type(&enc);
 
     let wifi_str = format!("WIFI:S:{ssid};T:{wtype};P:{key};;");
 
@@ -73,4 +67,38 @@ fn err(status: StatusCode, msg: &str) -> Response<String> {
         .header(header::CONTENT_TYPE, "text/plain")
         .body(msg.to_string())
         .unwrap()
+}
+
+/// Map a UCI wireless `encryption` value to the WIFI: QR code auth type.
+fn wifi_type(enc: &str) -> &'static str {
+    if enc.starts_with("sae") || enc.starts_with("psk") {
+        "WPA"
+    } else if enc.starts_with("wep") {
+        "WEP"
+    } else {
+        "nopass"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wifi_type_psk_and_sae_map_to_wpa() {
+        assert_eq!(wifi_type("psk2"), "WPA");
+        assert_eq!(wifi_type("sae"), "WPA");
+        assert_eq!(wifi_type("sae-mixed"), "WPA");
+    }
+
+    #[test]
+    fn wifi_type_wep_maps_to_wep() {
+        assert_eq!(wifi_type("wep"), "WEP");
+    }
+
+    #[test]
+    fn wifi_type_open_or_unknown_maps_to_nopass() {
+        assert_eq!(wifi_type("none"), "nopass");
+        assert_eq!(wifi_type(""), "nopass");
+    }
 }

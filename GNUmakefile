@@ -1,9 +1,12 @@
 # GNUmakefile — build, package, and release the openwrt-kestrel Rust binaries
 #
 # Produces both .apk (OpenWrt snapshot) and .ipk (OpenWrt stable) containing:
-#   /usr/bin/kestreld    — HTTP status/device daemon (extra-networks/kestreld-rs)
-#   /usr/bin/nft-resolve  — DNS blocklist resolver   (split-routing/nft-resolve-rs)
-#   /etc/init.d/kestreld — procd service script
+#   /usr/bin/kestreld    — router UI, run by uhttpd as a CGI binary via
+#                          symlinks under /www/cgi-bin/ (extra-networks/kestreld-rs)
+#   /usr/bin/nft-resolve — DNS blocklist resolver (split-routing/nft-resolve-rs)
+#
+# No daemon, no extra port, no reverse proxy: uhttpd invokes kestreld fresh
+# per request, same as any other CGI script.
 #
 # Targets:
 #   make build    — cross-compile both binaries for aarch64 musl
@@ -67,8 +70,9 @@ $(STAGING)/.staged: $(UI_BIN) $(NFT_BIN)
 	mkdir -p $(STAGING)/usr/bin $(STAGING)/www/cgi-bin $(CONTROL)
 	install -m 0755 $(UI_BIN)  $(STAGING)/usr/bin/kestreld
 	install -m 0755 $(NFT_BIN) $(STAGING)/usr/bin/nft-resolve
-	ln -sf /usr/bin/kestreld   $(STAGING)/www/cgi-bin/status
-	ln -sf /usr/bin/kestreld   $(STAGING)/www/cgi-bin/device
+	for ep in status device network qr approve-access approve-join rotate-password; do \
+	  ln -sf /usr/bin/kestreld $(STAGING)/www/cgi-bin/$$ep; \
+	done
 	touch $@
 
 # ── .apk (OpenWrt snapshot / apk) ────────────────────────────────────────────
@@ -101,7 +105,7 @@ $(IPK_OUT): $(STAGING)/.staged
 	  'Maintainer: Kiril Momchilov <momchilov@gmail.com>' \
 	  'Source: https://github.com/lanbat/openwrt-kestrel' \
 	  'Description: Extra-networks router UI + nft-resolve blocklist resolver' \
-	  ' /usr/bin/kestreld   — HTTP daemon for /cgi-bin/status and /cgi-bin/device' \
+	  ' /usr/bin/kestreld   — CGI binary for /cgi-bin/{status,device,network,qr,approve-access,approve-join,rotate-password}' \
 	  ' /usr/bin/nft-resolve — DNS blocklist to nftables set resolver' \
 	  > $(CONTROL)/control
 	mkdir -p $(OUTDIR)

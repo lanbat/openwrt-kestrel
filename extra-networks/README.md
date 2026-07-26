@@ -200,33 +200,64 @@ All notifications include a link to the status dashboard. LAN access requests in
 | Router reboot | Router comes back online (30s delay) | Low |
 | VPN state change | VPN goes down or recovers | High / Default |
 
+### Approval workflows at a glance
+
+There are two independent approval flows. Both work the same way on every network — a push notification with a button, tap it, decide on your phone — but they answer different questions:
+
+| | Join approval | LAN access approval |
+|---|---|---|
+| **Question it answers** | "Should this device be allowed on the internet at all?" | "Should this isolated device be allowed to reach something on my home LAN?" |
+| **Turned on with** | `JOIN_APPROVAL=yes` | Always on — no config needed, just set `NOTIFY_URL` |
+| **Triggers when** | A new device gets a DHCP lease | An isolated device tries to reach a 192.168.1.x (LAN) service |
+| **What you approve** | The device, once — future reconnects are silent | One specific destination + port, for a chosen duration |
+| **Approval page** | `/cgi-bin/approve-join` | `/cgi-bin/approve-access` |
+
+Use **join approval** to control who's allowed on a network at all (e.g. vetting every guest's phone before it gets internet). Use **LAN access approval** to make one-off exceptions when an otherwise-isolated device legitimately needs to reach something of yours (e.g. a smart TV needing your Plex server) — you don't need to configure anything for this one; it works automatically as soon as `NOTIFY_URL` is set.
+
+#### guest vs. untrusted: which approvals make sense where
+
+The two example networks are built for different situations, so the right approval settings differ:
+
+- **`guest`** is open — any device can connect with the WiFi password, there's no MAC allowlist. If you want to know (and approve) every device before it gets online, this is the network where `JOIN_APPROVAL=yes` earns its keep: a friend's phone joins, you get a push, you tap Approve, done. If you're fine with "anyone with the password is trusted enough," leave it off (the default) — `NOTIFY_JOIN=yes` still tells you when someone new shows up, just without blocking them first.
+- **`untrusted`** (IoT) already gates membership a different way: `ALLOWLIST=yes` means a device needs its MAC pre-registered in `/etc/extra-networks/untrusted-allowed-macs` just to get a DHCP lease at all — unlisted hardware is blocked before it ever reaches the join-approval step. Since you're already vetting devices by MAC, `JOIN_APPROVAL=yes` by itself adds little here — but it's worth turning on anyway as the prerequisite for **`DEVICE_CONTROL=yes`** ([below](#per-device-control)), which is where `untrusted` really earns its name: every allowlisted IoT device still has to explicitly allow each destination it talks to, so a device phoning home somewhere unexpected gets caught and blocked rather than waved through just because its MAC was on the list.
+
+In short: `guest` → gate who joins; `untrusted` → gate what already-known devices can reach.
+
 ### LAN access approval
 
-When an isolated device tries to reach a service on your LAN (192.168.1.x or its IPv6 equivalent), nftables logs the new connection and `check-access-log.sh` (runs every minute via cron) detects it and fires a push notification with an **Approve** button. Tapping it opens a form on the router showing the requesting device's IP, MAC, and hostname alongside the LAN destination. You pick how long to allow access, optionally enter a reason, and submit — the rule is added immediately and removed automatically when it expires. A confirmation push is sent with both devices' IP, MAC, and hostname.
+When an isolated device tries to reach a service on your LAN (192.168.1.x or its IPv6 equivalent), nftables logs the connection attempt and `check-access-log.sh` (runs every minute via cron) catches it and sends you a push notification with an **Approve** button.
 
-`DEFAULT_DURATION` pre-selects a duration in the form (default `24h`). `MAX_DURATION` hides longer options. Set `REASON_REQUIRED=yes` to make the reason field mandatory — enforced both client-side and server-side.
+What happens, step by step:
 
-The approval page (`/cgi-bin/approve-access`) is only reachable from your home LAN — isolated zones have `INPUT=REJECT`. Both IPv4 and IPv6 source/destination addresses are supported in the approval flow.
+1. A device on `guest` or `untrusted` tries to connect to something on your LAN — say, a smart display trying to reach your Plex server.
+2. nftables logs the blocked attempt; within a minute, a push notification arrives on your phone naming both devices.
+3. Tap the notification → a form opens on the router (`/cgi-bin/approve-access`) showing the requesting device (IP, MAC, hostname) and the LAN destination it's after.
+4. Pick how long to allow it (1 hour up to 30 days — `DEFAULT_DURATION` pre-selects one, `MAX_DURATION` hides longer options), optionally explain why, and submit.
+5. The firewall rule goes live immediately. It's removed automatically when the chosen duration expires — no cleanup needed.
+6. You get a confirmation push once it's granted, and another when it later expires.
+
+Set `REASON_REQUIRED=yes` if you want the reason field to be mandatory rather than optional (enforced both in the form and on the router). The approval page itself is only reachable from your home LAN — isolated zones have `INPUT=REJECT`, so a compromised guest device can't even load the form. Both IPv4 and IPv6 are supported throughout.
 
 ### Join approval
 
-When `JOIN_APPROVAL=yes`, every device that connects to the network is initially **blocked from internet access** until you approve it. This lets you control exactly which devices can use the network even if they know the WiFi password.
+`JOIN_APPROVAL=yes` flips a network from "anyone with the password gets online" to "every new device is blocked from the internet until you personally approve it" — useful the moment you want to know exactly which devices are using your WiFi, not just that *something* joined.
 
-How it works:
+What happens, step by step:
 
-1. Device connects and gets a DHCP lease → its IP is added to an nftables block set; internet traffic is dropped immediately
-2. A push notification fires: *"unknown (aa:bb:cc:dd:ee:ff) joined guest at 192.168.3.105 and needs internet approval"* with an **Approve** button
-3. Tap **Approve** → opens `/cgi-bin/approve-join` showing the device's hostname, IP, and MAC — two buttons: **Approve internet access** or **Deny internet access**
-4. Approving records the device's MAC in `/etc/extra-networks/${IFACE}-join-approved` and unblocks it immediately
-5. On all future joins (same MAC, any IP) the device passes straight through with no notification
+1. A device connects and gets a DHCP lease. Its IP is immediately added to an nftables block set — it has a working local address but no path to the internet.
+2. A push notification fires: *"unknown (aa:bb:cc:dd:ee:ff) joined guest at 192.168.3.105 and needs internet approval"*, with an **Approve** button.
+3. Tap it → a form opens (`/cgi-bin/approve-join`) showing the device's hostname, IP, and MAC, with two buttons: **Approve internet access** and **Deny internet access**. Approving requires giving the device a label (e.g. "Alice's Phone") — that label is what you'll see everywhere else in the dashboard from now on.
+4. Approve → the device's MAC is recorded and it's unblocked immediately, typically within a second or two.
+5. From then on, that MAC passes straight through with no notification at all, on any IP it's later assigned — you only get asked once per device, ever (unless you revoke it or rotate the WiFi password).
 
-The dashboard shows join state in the connected-device table: pending, approved, or denied. Denied devices stay blocked and can be approved later from the same row. Approval, denial, and revocation all send a push notification naming the device (IP, DNS, hostname, MAC) and the LAN client that made the decision.
+If you tap **Deny** instead, the device stays blocked. It's not gone from the dashboard, though — the device row shows "Denied" and you can flip it to Approved later from the same row without waiting for it to reconnect.
 
-Join decisions are also written to `/etc/extra-networks/${IFACE}-join-history` and shown on the dashboard. `JOIN_HISTORY_RETENTION` controls how long entries are kept; the default is `90d`. The installer adds `/etc/extra-networks` to `sysupgrade.conf` so history survives reboots and normal OpenWrt sysupgrades.
+Everything is visible afterwards: the dashboard's device table shows each device's join state (Pending / Approved / Denied) at a glance, and every approval, denial, and revocation sends a push notification naming the device and who made the call. The full history (with timestamps) lives on each device's own page and in `/etc/extra-networks/${IFACE}-join-history`, kept for `JOIN_HISTORY_RETENTION` (default 90 days) and preserved across reboots and sysupgrades.
 
-When the WiFi password is rotated, labeled approved devices stay approved; unlabeled approvals, pending requests, and denied requests are cleared because those devices must reconnect with the new password.
+Two things worth knowing before you turn this on:
 
-The block set is rebuilt from the pending state file on `fw4 reload` and reboot, so blocked devices stay blocked across restarts until explicitly approved.
+- **Rotating the WiFi password resets unlabeled approvals.** Devices you've already labeled stay approved through a password change; anything still pending, denied, or approved-but-never-labeled gets cleared, since those devices have to reconnect with the new password anyway.
+- **The block is enforced at the firewall, not just in the app.** The pending-devices block set is rebuilt from the state file on every `fw4 reload` and on boot, so a device you haven't approved stays blocked even across router restarts — there's no window where a pending device sneaks online.
 
 ### Per-device control
 

@@ -558,4 +558,265 @@ JOIN_HISTORY_RETENTION=30d
         assert_eq!(vars.get("LAN_ACCESS").map(|s| s.as_str()), Some("no"));
         assert_eq!(vars.get("BANDWIDTH_THRESHOLD_MB").map(|s| s.as_str()), Some("100"));
     }
+
+    // ── read_lines / read_labels / mac_in_file / read_pending ────────────────
+
+    #[tokio::test]
+    async fn read_lines_filters_blank_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        tokio::fs::write(&path, "a\n\nb\n   \nc\n").await.unwrap();
+        assert_eq!(read_lines(&path).await, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn read_lines_missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing");
+        assert!(read_lines(&path).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_labels_parses_tab_separated_mac_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\tAlice's Phone\n").await.unwrap();
+        let labels = read_labels(&path).await;
+        assert_eq!(labels.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()), Some("Alice's Phone"));
+    }
+
+    #[tokio::test]
+    async fn read_labels_skips_missing_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels");
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\n").await.unwrap();
+        assert!(read_labels(&path).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mac_in_file_case_insensitive_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("macs");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\n").await.unwrap();
+        assert!(mac_in_file(&path, "aa:bb:cc:dd:ee:ff").await);
+        assert!(!mac_in_file(&path, "11:22:33:44:55:66").await);
+    }
+
+    #[tokio::test]
+    async fn read_pending_parses_mac_space_ip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF 10.0.0.5\n").await.unwrap();
+        let pending = read_pending(&path).await;
+        assert_eq!(pending.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()), Some("10.0.0.5"));
+    }
+
+    // ── read_device_rules / read_mac_ip_map / read_device_limits ─────────────
+
+    #[tokio::test]
+    async fn read_device_rules_parses_full_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\texample.com\tallow\t443\ttcp\troute1\n").await.unwrap();
+        let rules = read_device_rules(&path).await;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(rules[0].dst, "example.com");
+        assert_eq!(rules[0].action, "allow");
+        assert_eq!(rules[0].port, "443");
+        assert_eq!(rules[0].proto, "tcp");
+        assert_eq!(rules[0].route, "route1");
+    }
+
+    #[tokio::test]
+    async fn read_device_rules_skips_row_missing_dst() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules");
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\n").await.unwrap();
+        assert!(read_device_rules(&path).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_mac_ip_map_parses_two_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ips");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t10.0.0.5\n").await.unwrap();
+        let map = read_mac_ip_map(&path).await;
+        assert_eq!(map.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()), Some("10.0.0.5"));
+    }
+
+    #[tokio::test]
+    async fn read_device_limits_parses_numeric_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limits");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t250\n").await.unwrap();
+        let map = read_device_limits(&path).await;
+        assert_eq!(map.get("aa:bb:cc:dd:ee:ff").copied(), Some(250));
+    }
+
+    #[tokio::test]
+    async fn read_device_limits_skips_non_numeric_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limits");
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\tunlimited\n").await.unwrap();
+        assert!(read_device_limits(&path).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_allowed_macs_parses_three_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allowed");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t10.0.0.5\tAlice\n").await.unwrap();
+        let macs = read_allowed_macs(&path).await;
+        assert_eq!(macs.len(), 1);
+        assert_eq!(macs[0].mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(macs[0].ip, "10.0.0.5");
+        assert_eq!(macs[0].label, "Alice");
+    }
+
+    #[tokio::test]
+    async fn read_pending_conns_parses_four_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-conn");
+        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t1000\n").await.unwrap();
+        let conns = read_pending_conns(&path).await;
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].dst, "1.2.3.4");
+        assert_eq!(conns[0].port, "443");
+        assert_eq!(conns[0].proto, "tcp");
+        assert_eq!(conns[0].ts, 1000);
+    }
+
+    #[tokio::test]
+    async fn read_pending_conns_defaults_missing_ts_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-conn");
+        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\n").await.unwrap();
+        let conns = read_pending_conns(&path).await;
+        assert_eq!(conns[0].ts, 0);
+    }
+
+    // ── OUI lookup ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_oui_and_lookup_prefers_most_specific_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oui");
+        // 6-char (MA-L) and 9-char (MA-S) prefixes, per oui_lookup's [9, 7, 6] search order.
+        tokio::fs::write(&path, "AABBCC\tGeneric Corp\nAABBCCDDE\tSpecific Corp\n").await.unwrap();
+        let oui = read_oui(&path).await;
+        assert_eq!(oui_lookup(&oui, "AA:BB:CC:DD:E0:00"), "Specific Corp");
+        assert_eq!(oui_lookup(&oui, "AA:BB:CC:11:22:33"), "Generic Corp");
+    }
+
+    #[test]
+    fn oui_lookup_unknown_mac_returns_empty() {
+        let oui = HashMap::new();
+        assert_eq!(oui_lookup(&oui, "AA:BB:CC:DD:EE:FF"), "");
+    }
+
+    // ── File mutation helpers ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn file_upsert_by_mac_appends_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        file_upsert_by_mac(&path, "aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff\tAlice").await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "aa:bb:cc:dd:ee:ff\tAlice\n");
+    }
+
+    #[tokio::test]
+    async fn file_upsert_by_mac_replaces_existing_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\tOldLabel\nbb:bb:bb:bb:bb:bb\tOther\n").await.unwrap();
+        file_upsert_by_mac(&path, "AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff\tNewLabel").await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "aa:bb:cc:dd:ee:ff\tNewLabel\nbb:bb:bb:bb:bb:bb\tOther\n");
+    }
+
+    #[tokio::test]
+    async fn file_remove_by_mac_removes_matching_line_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\tAlice\nbb:bb:bb:bb:bb:bb\tBob\n").await.unwrap();
+        file_remove_by_mac(&path, "AA:BB:CC:DD:EE:FF").await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "bb:bb:bb:bb:bb:bb\tBob\n");
+    }
+
+    #[tokio::test]
+    async fn file_remove_rule_matches_mac_and_dst_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules");
+        tokio::fs::write(&path,
+            "aa:bb:cc:dd:ee:ff\texample.com\tallow\t\t\naa:bb:cc:dd:ee:ff\tother.com\tallow\t\t\n"
+        ).await.unwrap();
+        file_remove_rule(&path, "aa:bb:cc:dd:ee:ff", "example.com").await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "aa:bb:cc:dd:ee:ff\tother.com\tallow\t\t\n");
+    }
+
+    #[tokio::test]
+    async fn file_remove_pending_matches_dst_port_proto_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-conn");
+        tokio::fs::write(&path, "1.2.3.4\t443\tTCP\t1000\n1.2.3.4\t80\ttcp\t1000\n").await.unwrap();
+        file_remove_pending(&path, "1.2.3.4", "443", "tcp").await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "1.2.3.4\t80\ttcp\t1000\n");
+    }
+
+    #[tokio::test]
+    async fn file_remove_line_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\nbb:bb:bb:bb:bb:bb\n").await.unwrap();
+        file_remove_line(&path, "aa:bb:cc:dd:ee:ff").await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "bb:bb:bb:bb:bb:bb\n");
+    }
+
+    #[tokio::test]
+    async fn file_remove_space_prefix_matches_first_token_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF 10.0.0.5\nbb:bb:bb:bb:bb:bb 10.0.0.6\n").await.unwrap();
+        file_remove_space_prefix(&path, "aa:bb:cc:dd:ee:ff").await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "bb:bb:bb:bb:bb:bb 10.0.0.6\n");
+    }
+
+    #[tokio::test]
+    async fn file_append_creates_file_and_adds_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        file_append(&path, "first").await.unwrap();
+        file_append(&path, "second\n").await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "first\nsecond\n");
+    }
+
+    #[tokio::test]
+    async fn prune_and_read_pending_drops_entries_older_than_cutoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-conn");
+        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t100\n1.2.3.4\t80\ttcp\t2000\n").await.unwrap();
+        let kept = prune_and_read_pending(&path, 1000).await;
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].port, "80");
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "1.2.3.4\t80\ttcp\t2000\n");
+    }
+
+    #[tokio::test]
+    async fn prune_and_read_pending_removes_file_when_all_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-conn");
+        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t100\n").await.unwrap();
+        let kept = prune_and_read_pending(&path, 1000).await;
+        assert!(kept.is_empty());
+        assert!(!path.exists());
+    }
 }

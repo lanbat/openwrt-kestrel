@@ -6,14 +6,19 @@ Two cooperating toolkits for OpenWrt routers, delivered as a single native packa
 
 ### kestreld
 
-A CGI binary (`/usr/bin/kestreld`) served directly by uhttpd via symlinks at `/www/cgi-bin/`. Serves two endpoints:
+A CGI binary (`/usr/bin/kestreld`) served directly by uhttpd via symlinks at `/www/cgi-bin/`. uhttpd runs it fresh per request, same as any other CGI script — no daemon, no extra port, no reverse proxy, and uhttpd handles HTTPS and authentication as normal. Serves the whole router UI:
 
 - `GET /cgi-bin/status` — live dashboard: WiFi clients, nftables traffic counters, WireGuard peers, DHCP leases, neighbor table
-- `GET /cgi-bin/device` — per-device management page
+- `GET /cgi-bin/network` — single-network detail page
+- `GET|POST /cgi-bin/device` — per-device management page and actions (label, rate limit, approve/revoke rules, delete)
+- `GET /cgi-bin/qr` — WiFi QR code (SVG)
+- `GET|POST /cgi-bin/approve-access` — LAN access approval form and grant action
+- `GET|POST /cgi-bin/approve-join` — join approval form and approve/deny/label actions
+- `POST /cgi-bin/rotate-password` — WiFi password rotation
 
-Renders HTML on demand and caches the result in `/tmp/kestreld/` for 5 seconds, so repeated page loads within the TTL are instant. No daemon, no extra port, no proxy — uhttpd handles HTTPS and authentication as normal.
+The status page's rendered HTML is cached in `/tmp/kestreld/` for 5 seconds, so repeated dashboard loads within the TTL are instant; the other pages are low-traffic, human-triggered actions and are rebuilt fresh on every request.
 
-Also runnable as a standalone HTTP server (`kestreld 8080`) for local development.
+Also runnable as a standalone HTTP server (`kestreld 8080`) for local development — not needed on the router itself.
 
 Source: [`extra-networks/kestreld-rs/`](extra-networks/kestreld-rs/)
 
@@ -155,7 +160,7 @@ The installer adds paths to `/etc/sysupgrade.conf` and packages add their own pa
 ```sh
 apk update
 apk add dnsmasq-full crowdsec crowdsec-firewall-bouncer banip pbr \
-        https-dns-proxy tmux qrencode nginx
+        https-dns-proxy tmux qrencode
 apk add --allow-untrusted /tmp/extra-networks-*.aarch64.apk
 ```
 

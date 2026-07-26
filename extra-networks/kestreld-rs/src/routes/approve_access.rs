@@ -28,6 +28,7 @@ pub struct AccessForm {
     pub duration: Option<String>,
     pub reason: Option<String>,
     pub dest_zone: Option<String>,
+    pub redirect: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -66,6 +67,14 @@ fn is_private_origin(origin: &str) -> bool {
         "http://[fe80", "http://[::1]",
     ];
     prefixes.iter().any(|p| origin.starts_with(p))
+}
+
+/// Only honor same-origin, same-app redirect targets requested by the caller.
+fn safe_redirect(redirect: Option<&str>) -> Option<String> {
+    redirect
+        .map(str::trim)
+        .filter(|s| s.starts_with("/cgi-bin/"))
+        .map(str::to_string)
 }
 
 pub async fn get(
@@ -154,13 +163,28 @@ button:active{{background:#1565c0}}
   <div class="value">{dst_label}:{port}/{proto}</div>
 </div>
 <div class="note">This page is only accessible from your home LAN.</div>
-<form method="POST" action="/cgi-bin/approve-access?{qs}">
+<form id="access-form" method="POST" action="/cgi-bin/approve-access?{qs}">
+  <input type="hidden" name="redirect" value="/cgi-bin/status">
   <div class="label" style="margin-top:1.25rem">Allow for</div>
   <select name="duration">{opts_html}</select>
   <div class="label" style="margin-top:1.25rem">Reason{req_mark}</div>
   <textarea name="reason" placeholder="Why is this access needed?"{req_attr}></textarea>
   <button type="submit">Allow access</button>
 </form>
+<script>
+(function(){{
+  var form = document.getElementById('access-form');
+  form.addEventListener('submit', function(e) {{
+    e.preventDefault();
+    var data = new URLSearchParams(new FormData(form));
+    fetch(form.action, {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}}, body: data.toString()}})
+      .then(r => r.json())
+      .then(j => {{ if (j.ok) location.href = j.redirect || '/cgi-bin/status';
+                    else alert(j.error || 'Error'); }})
+      .catch(() => form.submit());
+  }});
+}})();
+</script>
 </body></html>"#))
 }
 
@@ -221,8 +245,76 @@ pub async fn post(
     }
 
     if ok {
-        Json(ApiResult { ok: true, error: None, redirect: None })
+        Json(ApiResult { ok: true, error: None, redirect: safe_redirect(form.redirect.as_deref()) })
     } else {
         Json(ApiResult { ok: false, error: Some("allow-service.sh failed".into()), redirect: None })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dur_secs_converts_days_hours_minutes() {
+        assert_eq!(dur_secs("2d"), 172800);
+        assert_eq!(dur_secs("6h"), 21600);
+        assert_eq!(dur_secs("30m"), 1800);
+    }
+
+    #[test]
+    fn dur_secs_unknown_suffix_returns_zero() {
+        assert_eq!(dur_secs("30s"), 0);
+        assert_eq!(dur_secs(""), 0);
+    }
+
+    #[test]
+    fn valid_ip_accepts_ipv4_and_ipv6() {
+        assert!(valid_ip("192.168.1.1"));
+        assert!(valid_ip("fe80::1"));
+    }
+
+    #[test]
+    fn valid_ip_rejects_out_of_range_octet() {
+        assert!(!valid_ip("10.0.0.256"));
+    }
+
+    #[test]
+    fn valid_port_accepts_in_range() {
+        assert!(valid_port("1"));
+        assert!(valid_port("65535"));
+    }
+
+    #[test]
+    fn valid_port_rejects_zero_and_out_of_range() {
+        assert!(!valid_port("0"));
+        assert!(!valid_port("65536"));
+        assert!(!valid_port("not-a-port"));
+    }
+
+    #[test]
+    fn is_private_origin_allows_empty_and_lan_prefixes() {
+        assert!(is_private_origin(""));
+        assert!(is_private_origin("http://192.168.0.1"));
+    }
+
+    #[test]
+    fn is_private_origin_rejects_non_lan() {
+        assert!(!is_private_origin("http://attacker.example.com"));
+    }
+
+    #[test]
+    fn safe_redirect_accepts_cgi_bin_path() {
+        assert_eq!(safe_redirect(Some("/cgi-bin/status")), Some("/cgi-bin/status".to_string()));
+    }
+
+    #[test]
+    fn safe_redirect_rejects_absolute_url() {
+        assert_eq!(safe_redirect(Some("http://evil.example.com")), None);
+    }
+
+    #[test]
+    fn safe_redirect_none_when_absent() {
+        assert_eq!(safe_redirect(None), None);
     }
 }

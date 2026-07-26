@@ -481,12 +481,13 @@ fi
 # ── device control inspect chain ─────────────────────────────────────────────
 # When DEVICE_CONTROL=yes, new outbound connections from approved devices are
 # inspected per-device. regen-inspect.sh generates the nftables chain; it is
-# also called from approve-join.cgi when a device is approved.
+# also called from kestreld's approve-join route when a device is approved.
+# The /cgi-bin/device symlink itself is (re)created unconditionally below,
+# regardless of DEVICE_CONTROL.
 
 if [ "${DEVICE_CONTROL:-no}" = yes ]; then
     cp "${SCRIPT_DIR}/tools/regen-inspect.sh" "${BASE_DIR}/_regen-inspect.sh"
-    cp "${SCRIPT_DIR}/tools/device.cgi"       /www/cgi-bin/device
-    chmod 0755 "${BASE_DIR}/_regen-inspect.sh" /www/cgi-bin/device
+    chmod 0755 "${BASE_DIR}/_regen-inspect.sh"
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
         uci set uhttpd.main.cgi_prefix=/cgi-bin
         uci commit uhttpd
@@ -670,18 +671,18 @@ NOTIFYEOF
     uci -q del dhcp.@dnsmasq[0].dhcpscript || true
     uci commit dhcp
 
-    # Install CGIs and enable uhttpd CGI support
+    # Point uhttpd's CGI paths at kestreld (installed separately via the
+    # extra-networks apk/ipk package — see README "Install on the router").
+    # uhttpd runs it fresh per request, same as any other CGI script; no
+    # daemon, no extra port, no reverse proxy needed.
     mkdir -p /www/cgi-bin
-    cp "${SCRIPT_DIR}/tools/approve-access.cgi"    /www/cgi-bin/approve-access
-    cp "${SCRIPT_DIR}/tools/approve-join.cgi"      /www/cgi-bin/approve-join
-    cp "${SCRIPT_DIR}/tools/device.cgi"            /www/cgi-bin/device
-    cp "${SCRIPT_DIR}/tools/network.cgi"           /www/cgi-bin/network
-    cp "${SCRIPT_DIR}/tools/status.cgi"            /www/cgi-bin/status
-    cp "${SCRIPT_DIR}/tools/rotate-password.cgi"   /www/cgi-bin/rotate-password
-    cp "${SCRIPT_DIR}/tools/qr.cgi"                /www/cgi-bin/qr
-    chmod 0755 /www/cgi-bin/approve-access /www/cgi-bin/approve-join \
-               /www/cgi-bin/device /www/cgi-bin/network /www/cgi-bin/status \
-               /www/cgi-bin/rotate-password /www/cgi-bin/qr
+    if [ -x /usr/bin/kestreld ]; then
+        for _ep in status device network qr approve-access approve-join rotate-password; do
+            ln -sf /usr/bin/kestreld "/www/cgi-bin/${_ep}"
+        done
+    else
+        echo "WARNING: /usr/bin/kestreld not found — install the extra-networks package first" >&2
+    fi
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
         uci set uhttpd.main.cgi_prefix=/cgi-bin
         uci commit uhttpd
@@ -750,7 +751,8 @@ fw4 reload
 
 # wifi reload triggers a MAC80211 race condition on phy0 that destroys all BSS
 # interfaces and leaves them uncreated. Instead, update the UCI config and then
-# restart hostapd per-phy via config_set — same approach as rotate-password.cgi.
+# restart hostapd per-phy via config_set — same approach as kestreld's
+# rotate-password route (kestreld-rs/src/routes/rotate_password.rs).
 wifi reload 2>/dev/null || true
 sleep 5
 for _hconf in /var/run/hostapd-*.conf; do

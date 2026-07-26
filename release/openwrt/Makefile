@@ -34,15 +34,17 @@ include $(INCLUDE_DIR)/package.mk
 define Package/$(PKG_NAME)
   SECTION    := net
   CATEGORY   := Network
-  TITLE      := Extra-networks router UI daemon
+  TITLE      := Extra-networks router UI (CGI)
   URL        := https://github.com/lanbat/openwrt-kestrel
   DEPENDS    :=
 endef
 
 define Package/$(PKG_NAME)/description
-  Rust HTTP daemon that replaces the extra-networks shell CGI scripts for
-  /cgi-bin/status and /cgi-bin/device.  Serves pre-fetched, 5-second TTL
-  cached state with no per-request subprocess overhead.
+  Rust CGI binary that replaces the extra-networks shell CGI scripts for
+  /cgi-bin/status, /cgi-bin/device, /cgi-bin/network, /cgi-bin/qr,
+  /cgi-bin/approve-access, /cgi-bin/approve-join, and /cgi-bin/rotate-password.
+  Run directly by uhttpd per request via symlinks — no daemon, no extra port,
+  no reverse proxy required.
 endef
 
 define Build/Prepare
@@ -58,24 +60,14 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/kestreld $(1)/usr/bin/kestreld
 
-	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ../files/kestreld.init $(1)/etc/init.d/kestreld
-endef
-
-define Package/$(PKG_NAME)/postinst
-#!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] && exit 0
-/etc/init.d/kestreld enable
-/etc/init.d/kestreld start
-exit 0
-endef
-
-define Package/$(PKG_NAME)/prerm
-#!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] && exit 0
-/etc/init.d/kestreld stop
-/etc/init.d/kestreld disable
-exit 0
+	$(INSTALL_DIR) $(1)/www/cgi-bin
+	ln -sf /usr/bin/kestreld $(1)/www/cgi-bin/status
+	ln -sf /usr/bin/kestreld $(1)/www/cgi-bin/device
+	ln -sf /usr/bin/kestreld $(1)/www/cgi-bin/network
+	ln -sf /usr/bin/kestreld $(1)/www/cgi-bin/qr
+	ln -sf /usr/bin/kestreld $(1)/www/cgi-bin/approve-access
+	ln -sf /usr/bin/kestreld $(1)/www/cgi-bin/approve-join
+	ln -sf /usr/bin/kestreld $(1)/www/cgi-bin/rotate-password
 endef
 
 $(eval $(call BuildPackage,$(PKG_NAME)))

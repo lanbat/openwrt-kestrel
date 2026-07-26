@@ -26,6 +26,7 @@ pub struct JoinForm {
     pub host: Option<String>,
     pub action: Option<String>,
     pub label: Option<String>,
+    pub redirect: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +59,14 @@ fn is_private_origin(origin: &str) -> bool {
         "http://172.30.", "http://172.31.", "http://[fd", "http://[fc",
         "http://[fe80", "http://[::1]"];
     prefixes.iter().any(|p| origin.starts_with(p))
+}
+
+/// Only honor same-origin, same-app redirect targets requested by the caller.
+fn safe_redirect(redirect: Option<&str>) -> Option<String> {
+    redirect
+        .map(str::trim)
+        .filter(|s| s.starts_with("/cgi-bin/"))
+        .map(str::to_string)
 }
 
 pub async fn get(
@@ -122,12 +131,14 @@ button{{font-size:1rem;padding:.65rem 1rem;border-radius:6px;border:none;cursor:
 <div class="note">This device joined <strong>{net}</strong> and is waiting for internet access approval. Give it a label, then approve or deny.</div>
 <form id="approve-form" method="POST" action="/cgi-bin/approve-join?{qs}">
   <input type="hidden" name="action" value="approve">
+  <input type="hidden" name="redirect" value="/cgi-bin/status">
   <div class="lbl" style="margin-top:1rem">Label <span style="color:#c62828">*</span></div>
   <input type="text" id="label-input" name="label" value="{label_esc}" placeholder="e.g. Alice's Phone" required maxlength="40">
   <button class="btn-ok" type="submit">Approve internet access</button>
 </form>
 <form id="deny-form" method="POST" action="/cgi-bin/approve-join?{qs}">
   <input type="hidden" name="action" value="deny">
+  <input type="hidden" name="redirect" value="/cgi-bin/status">
   <button class="btn-deny" type="submit">Deny internet access</button>
 </form>
 <script>
@@ -190,6 +201,7 @@ pub async fn post(
         .split(',').next().unwrap_or("unknown")
         .trim()
         .to_string();
+    let redirect = safe_redirect(form.redirect.as_deref());
 
     // set_label action
     if action == "set_label" {
@@ -205,7 +217,7 @@ pub async fn post(
             let body = format!("MAC: {mac}\nNow: {label}\n\nBy: {remote_ip}");
             crate::cmd::ntfy(&conf.notify_url, &format!("Label set — {net}"), "default", "pencil2", &body).await;
         }
-        return Json(ApiResult { ok: true, error: None, redirect: Some("/cgi-bin/status".into()) });
+        return Json(ApiResult { ok: true, error: None, redirect });
     }
 
     if !valid_ip(ip) {
@@ -275,7 +287,7 @@ pub async fn post(
             crate::cmd::append_join_history(base_dir, net, "approved", &mac, &ip4, if is_ipv6 { ip } else { "" },
                 host, &remote_ip, &remote_ip, "", "").await;
 
-            Json(ApiResult { ok: true, error: None, redirect: Some("/cgi-bin/status".into()) })
+            Json(ApiResult { ok: true, error: None, redirect })
         }
 
         "deny" => {
@@ -303,7 +315,7 @@ pub async fn post(
             crate::cmd::append_join_history(base_dir, net, "denied", &mac, &ip4, if is_ipv6 { ip } else { "" },
                 host, &remote_ip, &remote_ip, "", "").await;
 
-            Json(ApiResult { ok: true, error: None, redirect: Some("/cgi-bin/status".into()) })
+            Json(ApiResult { ok: true, error: None, redirect })
         }
 
         _ => Json(ApiResult { ok: false, error: Some("Invalid action".into()), redirect: None }),
@@ -315,4 +327,81 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_ip_accepts_ipv4_and_rejects_bad_octet() {
+        assert!(valid_ip("192.168.1.1"));
+        assert!(!valid_ip("192.168.1.999"));
+    }
+
+    #[test]
+    fn valid_ip_accepts_ipv6() {
+        assert!(valid_ip("fe80::1"));
+    }
+
+    #[test]
+    fn valid_ip_rejects_wrong_ipv4_segment_count() {
+        assert!(!valid_ip("1.2.3"));
+    }
+
+    #[test]
+    fn valid_mac_accepts_well_formed_and_rejects_bad_length() {
+        assert!(valid_mac("aa:bb:cc:dd:ee:ff"));
+        assert!(!valid_mac("aa:bb:cc:dd:ee"));
+    }
+
+    #[test]
+    fn valid_mac_rejects_wrong_separator() {
+        assert!(!valid_mac("aabbccddeeff"));
+    }
+
+    #[test]
+    fn is_private_origin_allows_empty_and_lan() {
+        assert!(is_private_origin(""));
+        assert!(is_private_origin("http://10.0.0.5"));
+        assert!(is_private_origin("http://[fd00::1]"));
+    }
+
+    #[test]
+    fn is_private_origin_rejects_non_lan() {
+        assert!(!is_private_origin("http://example.com"));
+    }
+
+    #[test]
+    fn html_escape_escapes_all_special_chars() {
+        assert_eq!(
+            html_escape(r#"<script>alert("x")&y</script>"#),
+            "&lt;script&gt;alert(&quot;x&quot;)&amp;y&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn html_escape_leaves_plain_text_untouched() {
+        assert_eq!(html_escape("Alice's Phone"), "Alice's Phone");
+    }
+
+    #[test]
+    fn safe_redirect_accepts_cgi_bin_path() {
+        assert_eq!(safe_redirect(Some("/cgi-bin/network?net=guest")), Some("/cgi-bin/network?net=guest".to_string()));
+    }
+
+    #[test]
+    fn safe_redirect_rejects_absolute_url() {
+        assert_eq!(safe_redirect(Some("http://evil.example.com")), None);
+    }
+
+    #[test]
+    fn safe_redirect_rejects_non_cgi_bin_path() {
+        assert_eq!(safe_redirect(Some("/etc/passwd")), None);
+    }
+
+    #[test]
+    fn safe_redirect_none_when_absent() {
+        assert_eq!(safe_redirect(None), None);
+    }
 }

@@ -163,6 +163,31 @@ fn lease_status(leases: &[crate::data::dhcp::Lease], mac: &str) -> String {
     }
 }
 
+fn badge_css(act: &str) -> &'static str {
+    match act {
+        "approved" => "approved",
+        "denied" => "denied",
+        "revoked" => "revoked",
+        "connected" => "connected",
+        "disconnected" => "disconnected",
+        "deleted" => "deleted",
+        "labelled" => "labelled",
+        _ => "approved",
+    }
+}
+fn badge_label(act: &str) -> &'static str {
+    match act {
+        "approved" => "Approved",
+        "denied" => "Denied",
+        "revoked" => "Revoked",
+        "connected" => "Connected",
+        "disconnected" => "Disconnected",
+        "deleted" => "Deleted",
+        "labelled" => "Labelled",
+        _ => "Action",
+    }
+}
+
 fn rel_time(ts: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -319,31 +344,6 @@ pub async fn get(
         let tb: u64 = b.first().and_then(|s| s.parse().ok()).unwrap_or(0);
         tb.cmp(&ta)
     });
-
-    fn badge_css(act: &str) -> &'static str {
-        match act {
-            "approved" => "approved",
-            "denied" => "denied",
-            "revoked" => "revoked",
-            "connected" => "connected",
-            "disconnected" => "disconnected",
-            "deleted" => "deleted",
-            "labelled" => "labelled",
-            _ => "approved",
-        }
-    }
-    fn badge_label(act: &str) -> &'static str {
-        match act {
-            "approved" => "Approved",
-            "denied" => "Denied",
-            "revoked" => "Revoked",
-            "connected" => "Connected",
-            "disconnected" => "Disconnected",
-            "deleted" => "Deleted",
-            "labelled" => "Labelled",
-            _ => "Action",
-        }
-    }
 
     let history: Vec<HistRow> = all_hist.into_iter()
         .filter(|row| row.get(3).map(|m| m.to_lowercase() == mac).unwrap_or(false))
@@ -655,5 +655,201 @@ pub async fn post(
         }
 
         _ => err("Unknown action"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::dhcp::Lease;
+
+    // ── valid_mac ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn valid_mac_accepts_well_formed() {
+        assert!(valid_mac("aa:bb:cc:dd:ee:ff"));
+        assert!(valid_mac("AA:BB:CC:DD:EE:FF"));
+    }
+
+    #[test]
+    fn valid_mac_rejects_wrong_length() {
+        assert!(!valid_mac("aa:bb:cc:dd:ee:f"));
+        assert!(!valid_mac("aa:bb:cc:dd:ee:ff:00"));
+    }
+
+    #[test]
+    fn valid_mac_rejects_wrong_separator() {
+        assert!(!valid_mac("aa-bb-cc-dd-ee-ff"));
+    }
+
+    #[test]
+    fn valid_mac_rejects_non_hex() {
+        assert!(!valid_mac("zz:bb:cc:dd:ee:ff"));
+    }
+
+    #[test]
+    fn valid_mac_rejects_empty() {
+        assert!(!valid_mac(""));
+    }
+
+    // ── valid_net ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn valid_net_accepts_alphanumeric_underscore() {
+        assert!(valid_net("guest_2"));
+    }
+
+    #[test]
+    fn valid_net_rejects_empty() {
+        assert!(!valid_net(""));
+    }
+
+    #[test]
+    fn valid_net_rejects_special_chars() {
+        assert!(!valid_net("guest;rm -rf"));
+        assert!(!valid_net("guest/../lan"));
+    }
+
+    // ── valid_ip ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn valid_ip_accepts_ipv4() {
+        assert!(valid_ip("192.168.1.1"));
+    }
+
+    #[test]
+    fn valid_ip_rejects_ipv4_octet_out_of_range() {
+        assert!(!valid_ip("192.168.1.999"));
+    }
+
+    #[test]
+    fn valid_ip_rejects_ipv4_with_wrong_segment_count() {
+        assert!(!valid_ip("192.168.1"));
+    }
+
+    #[test]
+    fn valid_ip_accepts_ipv6() {
+        assert!(valid_ip("fe80::1"));
+    }
+
+    #[test]
+    fn valid_ip_rejects_ipv6_too_long() {
+        let too_long = format!("{}:1", "f".repeat(40));
+        assert!(!valid_ip(&too_long));
+    }
+
+    // ── is_private_origin ────────────────────────────────────────────────────
+
+    #[test]
+    fn is_private_origin_allows_empty_origin() {
+        assert!(is_private_origin(""));
+    }
+
+    #[test]
+    fn is_private_origin_allows_lan_prefixes() {
+        assert!(is_private_origin("http://192.168.1.1:8080"));
+        assert!(is_private_origin("http://10.0.0.5"));
+        assert!(is_private_origin("http://[fe80::1]"));
+    }
+
+    #[test]
+    fn is_private_origin_rejects_public_origin() {
+        assert!(!is_private_origin("http://evil.example.com"));
+        assert!(!is_private_origin("https://192.168.1.1"));
+    }
+
+    // ── mac_no_colons ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn mac_no_colons_strips_separators() {
+        assert_eq!(mac_no_colons("aa:bb:cc:dd:ee:ff"), "aabbccddeeff");
+    }
+
+    // ── lease_status ──────────────────────────────────────────────────────────
+
+    fn lease(mac: &str, expiry: u64) -> Lease {
+        Lease { expiry, mac: mac.to_string(), ip: "10.0.0.5".into(), hostname: "host".into() }
+    }
+
+    #[test]
+    fn lease_status_no_lease_for_unknown_mac() {
+        assert_eq!(lease_status(&[], "aa:bb:cc:dd:ee:ff"), "No lease");
+    }
+
+    #[test]
+    fn lease_status_static_when_expiry_zero() {
+        let leases = vec![lease("aa:bb:cc:dd:ee:ff", 0)];
+        assert_eq!(lease_status(&leases, "aa:bb:cc:dd:ee:ff"), "Static (no expiry)");
+    }
+
+    #[test]
+    fn lease_status_expired_when_in_past() {
+        let leases = vec![lease("aa:bb:cc:dd:ee:ff", 1)];
+        assert_eq!(lease_status(&leases, "aa:bb:cc:dd:ee:ff"), "Expired");
+    }
+
+    #[test]
+    fn lease_status_matches_mac_case_insensitively() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let leases = vec![lease("AA:BB:CC:DD:EE:FF", now + 100000)];
+        assert_eq!(lease_status(&leases, "aa:bb:cc:dd:ee:ff"), "Expires in 1d");
+    }
+
+    // ── rel_time ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rel_time_just_now_for_recent_timestamp() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(rel_time(now), "just now");
+    }
+
+    #[test]
+    fn rel_time_minutes_ago() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(rel_time(now - 120), "2 min ago");
+    }
+
+    #[test]
+    fn rel_time_hours_ago() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(rel_time(now - 7200), "2h ago");
+    }
+
+    #[test]
+    fn rel_time_days_ago() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(rel_time(now - 172800), "2d ago");
+    }
+
+    // ── badge_css / badge_label ───────────────────────────────────────────────
+
+    #[test]
+    fn badge_css_known_actions() {
+        assert_eq!(badge_css("approved"), "approved");
+        assert_eq!(badge_css("denied"), "denied");
+        assert_eq!(badge_css("revoked"), "revoked");
+    }
+
+    #[test]
+    fn badge_css_unknown_action_falls_back_to_approved() {
+        assert_eq!(badge_css("something_else"), "approved");
+    }
+
+    #[test]
+    fn badge_label_known_actions() {
+        assert_eq!(badge_label("connected"), "Connected");
+        assert_eq!(badge_label("disconnected"), "Disconnected");
+        assert_eq!(badge_label("deleted"), "Deleted");
+        assert_eq!(badge_label("labelled"), "Labelled");
+    }
+
+    #[test]
+    fn badge_label_unknown_action_falls_back_to_action() {
+        assert_eq!(badge_label("something_else"), "Action");
     }
 }
