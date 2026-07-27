@@ -15,3 +15,9 @@ image = "ghcr.io/cross-rs/mipsel-unknown-linux-musl:0.2.5"
 
 [target.mips-unknown-linux-musl]
 image = "ghcr.io/cross-rs/mips-unknown-linux-musl:0.2.5"
+
+# No 0.2.5-tagged image exists for this target (added to cross-rs after that
+# release cut) — "main" is the only published tag, but works fine with the
+# 0.2.5 cross CLI.
+[target.riscv64gc-unknown-linux-musl]
+image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-musl:main"

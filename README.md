@@ -48,13 +48,20 @@ Download the `.apk` or `.ipk` for your architecture from the [latest release](ht
 
 ```sh
 # OpenWrt snapshot (apk):
-apk add --allow-untrusted /tmp/extra-networks-*.aarch64.apk
+apk add --allow-untrusted /tmp/kestrel-*.aarch64.apk
 
 # OpenWrt stable (opkg):
-opkg install --force-reinstall /tmp/extra-networks_*_aarch64_cortex-a53.ipk
+opkg install --force-reinstall /tmp/kestrel_*_aarch64_cortex-a53.ipk
 ```
 
 To find your architecture: `apk info --print-arch` or `opkg print-architecture`.
+
+> **Upgrading from a router that already has the old `extra-networks` package installed:** package managers key on the name, so `kestrel` installs alongside it rather than replacing it, leaving two copies of `/usr/bin/kestreld`/`nft-resolve` and `/www/cgi-bin/*` fighting over the same paths. Remove the old one first:
+> ```sh
+> apk del extra-networks        # OpenWrt snapshot
+> opkg remove extra-networks    # OpenWrt stable
+> ```
+> Then install `kestrel` as above. This is only needed once, on routers set up before the `extra-networks` → `kestrel` package rename.
 
 ### 2. Clone the repo and install the shell scripts
 
@@ -111,6 +118,44 @@ make package \
 ```
 
 Supported targets and their `cross` Docker images are in [`Cross.toml`](Cross.toml).
+Releases (`.github/workflows/release.yml`) build all of them automatically.
+
+### Supported devices
+
+| OpenWrt target(s) | Rust target | `make` overrides |
+|---|---|---|
+| `mediatek`, `qualcommax` (IPQ5018/6018/8074), `mvebu`, `rockchip`, `sunxi`, `bcm4908`, `armsr` | `aarch64-unknown-linux-musl` | `ARCH=aarch64 OPENWRT_ARCH=aarch64_cortex-a53` (default) |
+| `x86`/`x86_64` — PC Engines APU, Protectli, VMs | `x86_64-unknown-linux-musl` | `ARCH=x86_64 OPENWRT_ARCH=x86_64` |
+| `ipq40xx`, `ipq806x`, and other ARMv7 hard-float boards (cortex-a7/a9/a15) | `armv7-unknown-linux-musleabihf` | `ARCH=arm_cortex-a7 OPENWRT_ARCH=arm_cortex-a7_neon-vfpv4` |
+| Older ARMv6 soft-float boards (arm1176jzf-s) | `arm-unknown-linux-musleabi` | `ARCH=arm_arm1176jzf-s OPENWRT_ARCH=arm_arm1176jzf-s_vfp` |
+| `ath79`, `ramips`, `bcm47xx` — most MIPS little-endian budget routers (TP-Link, D-Link, ...) | `mipsel-unknown-linux-musl` | `ARCH=mipsel OPENWRT_ARCH=mipsel_24kc` |
+| MIPS big-endian devices (some Atheros-based routers) | `mips-unknown-linux-musl` | `ARCH=mips OPENWRT_ARCH=mips_24kc` |
+| `sifiveu`, `starfive` — RISC-V SBC-class hardware | `riscv64gc-unknown-linux-musl` | `ARCH=riscv64 OPENWRT_ARCH=riscv64_generic` |
+
+The `mips`/`mipsel_24kc` builds aren't tuned to a specific MIPS core
+(`target-cpu` is left at its default), so they're expected to run on
+`ath79`, `ramips`, `bcm47xx`, and `lantiq` devices generally — none of those
+targets need FPU/DSP-specific codegen that a baseline MIPS32r2 build would
+miss. Same reasoning covers the ARMv7 hard-float row across cortex-a7/a9/a15
+boards: one build, no per-SoC tuning needed.
+
+**Explicitly not supported: 32-bit PowerPC (`mpc85xx`/`qoriq` — older
+Netgear/Cisco/Linksys enterprise APs).** Rust does have a
+`powerpc-unknown-linux-musl` target, but neither `cross-rs` nor the common
+community alternative (`rust-musl-cross`) ship a prebuilt musl toolchain
+image for it (both were checked directly against their image registries) —
+only glibc images exist. Every other target here uses an official prebuilt
+musl image; building and maintaining a bespoke cross-toolchain container
+just for this one aging architecture family isn't worth it unless someone
+actually needs it. Open an issue if you do.
+
+## Testing without real hardware
+
+`test/qemu/` boots a real OpenWrt image under QEMU with virtual WiFi radios
+(`mac80211_hwsim`), so `hostapd`, `fw4`/nftables, `dnsmasq`, and `kestreld` all
+run for real — the same code paths as on actual hardware — before you push a
+change to a router. See [`test/qemu/README.md`](test/qemu/README.md) for
+setup and a quickstart.
 
 ## Releases
 
@@ -161,7 +206,7 @@ The installer adds paths to `/etc/sysupgrade.conf` and packages add their own pa
 apk update
 apk add dnsmasq-full crowdsec crowdsec-firewall-bouncer banip pbr \
         https-dns-proxy tmux qrencode
-apk add --allow-untrusted /tmp/extra-networks-*.aarch64.apk
+apk add --allow-untrusted /tmp/kestrel-*.aarch64.apk
 ```
 
 If `dnsmasq-full` fails with `kmod-nf-conntrack-netlink (no such package)`:

@@ -43,6 +43,11 @@ jobs:
             arch: mips
             openwrt_arch: mips_24kc
 
+          # RISC-V 64-bit — sifiveu, starfive (growing SBC-class hardware)
+          - rust_target: riscv64gc-unknown-linux-musl
+            arch: riscv64
+            openwrt_arch: riscv64_generic
+
     steps:
       - uses: actions/checkout@v4
 
@@ -51,10 +56,16 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      # cross-rs's last crates.io release (0.2.5, Feb 2023) doesn't
+      # recognize riscv64gc-unknown-linux-musl as a valid target even with
+      # a custom Cross.toml image override — it silently falls back to
+      # building with the host linker, which fails ("Relocations in
+      # generic ELF"). There's been no newer GitHub release since, so
+      # `taiki-e/install-action` (which installs release binaries) can't
+      # be used here; building from the git default branch is what
+      # actually recognizes the target, verified locally.
       - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
 
       - name: Build packages
         run: |
@@ -62,6 +73,26 @@ jobs:
             CROSS_TARGET=${{ matrix.rust_target }} \
             ARCH=${{ matrix.arch }} \
             OPENWRT_ARCH=${{ matrix.openwrt_arch }}
+
+      # A binary can cross-compile clean and still crash immediately on
+      # real hardware if the target's baseline ISA assumption is wrong
+      # (SIGILL, wrong dynamic linker path, etc). `cross`'s images already
+      # bundle qemu-user emulation — `cross run` uses it automatically, no
+      # extra setup needed. Exercises both binaries' actual startup path:
+      # `--rotate-apply` with a nonexistent pwfile takes kestreld through
+      # real tokio runtime/timer setup and a clean exit without touching
+      # any real router state; `nft-resolve --help` is inherently
+      # side-effect-free. Skipped for x86_64, which runs natively on the
+      # CI runner already.
+      - name: Smoke test under QEMU emulation
+        if: matrix.arch != 'x86_64'
+        run: |
+          cross run --target ${{ matrix.rust_target }} --release \
+            --manifest-path extra-networks/kestreld-rs/Cargo.toml \
+            -- --rotate-apply __smoketest__ /tmp/__smoketest_missing_pwfile__
+          cross run --target ${{ matrix.rust_target }} --release \
+            --manifest-path split-routing/nft-resolve-rs/Cargo.toml \
+            -- --help
 
       - name: Upload packages
         uses: actions/upload-artifact@v4
