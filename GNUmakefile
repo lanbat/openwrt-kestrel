@@ -25,7 +25,7 @@ ARCH         ?= aarch64
 OPENWRT_ARCH ?= aarch64_cortex-a53
 ROUTER       ?=
 
-PKG_NAME    := extra-networks
+PKG_NAME    := kestrel
 PKG_VERSION := $(shell cargo metadata --no-deps --format-version 1 \
                  --manifest-path extra-networks/kestreld-rs/Cargo.toml \
                  | python3 -c "import json,sys; d=json.load(sys.stdin); \
@@ -70,13 +70,13 @@ $(STAGING)/.staged: $(UI_BIN) $(NFT_BIN)
 	mkdir -p $(STAGING)/usr/bin $(STAGING)/www/cgi-bin $(CONTROL)
 	install -m 0755 $(UI_BIN)  $(STAGING)/usr/bin/kestreld
 	install -m 0755 $(NFT_BIN) $(STAGING)/usr/bin/nft-resolve
-	for ep in status device network qr approve-access approve-join rotate-password; do \
+	for ep in status device network identity qr approve-access approve-join rotate-password; do \
 	  ln -sf /usr/bin/kestreld $(STAGING)/www/cgi-bin/$$ep; \
 	done
 	touch $@
 
 # ── .apk (OpenWrt snapshot / apk) ────────────────────────────────────────────
-# Install with: apk add --allow-untrusted /tmp/extra-networks-*.apk
+# Install with: apk add --allow-untrusted /tmp/kestrel-*.apk
 
 package: $(APK_OUT) $(IPK_OUT)
 
@@ -85,7 +85,7 @@ $(APK_OUT): $(STAGING)/.staged
 	printf 'pkgname = %s\npkgver = %s\narch = %s\nsize = %s\npkgdesc = %s\nurl = %s\nbuilddate = %s\npackager = %s\n' \
 	  '$(PKG_NAME)' '$(PKG_VER_FULL)' '$(ARCH)' \
 	  "$$(find $(STAGING)/usr $(STAGING)/www -type f | xargs du -b | awk '{s+=$$1}END{print s}')" \
-	  'Extra-networks router UI + nft-resolve blocklist resolver' \
+	  'kestrel: isolated-network router UI (kestreld) + nft-resolve blocklist resolver' \
 	  'https://github.com/lanbat/openwrt-kestrel' \
 	  "$$(date +%s)" \
 	  'Kiril Momchilov <momchilov@gmail.com>' \
@@ -94,7 +94,7 @@ $(APK_OUT): $(STAGING)/.staged
 	tar -czf $(APK_OUT) -C $(STAGING) .PKGINFO usr www
 
 # ── .ipk (OpenWrt stable / opkg) ─────────────────────────────────────────────
-# Install with: opkg install --force-reinstall /tmp/extra-networks_*.ipk
+# Install with: opkg install --force-reinstall /tmp/kestrel_*.ipk
 
 $(IPK_OUT): $(STAGING)/.staged
 	@echo "==> $(notdir $(IPK_OUT))"
@@ -104,8 +104,8 @@ $(IPK_OUT): $(STAGING)/.staged
 	  'Architecture: $(OPENWRT_ARCH)' \
 	  'Maintainer: Kiril Momchilov <momchilov@gmail.com>' \
 	  'Source: https://github.com/lanbat/openwrt-kestrel' \
-	  'Description: Extra-networks router UI + nft-resolve blocklist resolver' \
-	  ' /usr/bin/kestreld   — CGI binary for /cgi-bin/{status,device,network,qr,approve-access,approve-join,rotate-password}' \
+	  'Description: kestrel: isolated-network router UI (kestreld) + nft-resolve blocklist resolver' \
+	  ' /usr/bin/kestreld   — CGI binary for /cgi-bin/{status,device,network,identity,qr,approve-access,approve-join,rotate-password}' \
 	  ' /usr/bin/nft-resolve — DNS blocklist to nftables set resolver' \
 	  > $(CONTROL)/control
 	mkdir -p $(OUTDIR)
@@ -134,7 +134,7 @@ release: package
 	  $(IPK_OUT) \
 	  $(SRC_TARBALL) \
 	  --title "v$(PKG_VERSION)" \
-	  --notes "extra-networks $(PKG_VERSION) — kestreld + nft-resolve, aarch64 musl"
+	  --notes "kestrel $(PKG_VERSION) — kestreld + nft-resolve, aarch64 musl"
 	@echo ""
 	@sha256sum $(SRC_TARBALL) | awk '{print "Next: set release/openwrt/Makefile PKG_HASH =", $$1}'
 

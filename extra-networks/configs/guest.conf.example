@@ -34,6 +34,6 @@ REJOIN_NOTIFY_AFTER=             # notify when a known device reconnects after t
 JOIN_APPROVAL=no                 # yes = block internet until owner approves each new device (requires NOTIFY_URL)
 JOIN_HISTORY_RETENTION=90d       # keep approval/denial/revoke history this long (e.g. 30d 90d 180d)
 ROTATE_PASSWORD=no               # yes = show a manual "Rotate password" button in the status dashboard
-DESCRIPTION=Guest WiFi           # optional label shown in the status dashboard
+DESCRIPTION='Guest WiFi'         # optional label shown in the status dashboard (quote values with spaces)
 MDNS=no                          # yes = reflect mDNS from LAN (enables casting, AirPrint, etc.)
 ACCESS_HOURS=                    # restrict internet to hours e.g. "8-23"; blank = always on (set via access-schedule.sh)

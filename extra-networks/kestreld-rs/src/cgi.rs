@@ -5,11 +5,14 @@ use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
 
-use crate::routes::{approve_access, approve_join, device, network, qr, rotate_password};
+use crate::routes::{approve_access, approve_join, device, identity, network, qr, rotate_password};
 use crate::state::AppState;
 
 const BASE_DIR: &str = "/etc/extra-networks";
-const CACHE_STATUS: &str = "/tmp/kestreld/status.html";
+// Deliberately not "/tmp/kestreld/..." — that name collides with where
+// test/qemu/deploy.sh (and any future deploy tooling) scp's the kestreld
+// binary itself to /tmp/, which fails outright if this cache dir exists.
+const CACHE_STATUS: &str = "/tmp/kestreld-cache/status.html";
 const CACHE_TTL: u64 = 5;
 
 pub fn is_cgi() -> bool {
@@ -28,62 +31,69 @@ pub async fn run() {
         }
 
         ("/cgi-bin/device", "GET") => {
-            let Ok(q) = parse_urlencoded(&query) else { return respond_400("Invalid query") };
-            let state = AppState::new(base_dir).await;
+            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let html = device::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
         ("/cgi-bin/device", "POST") => {
-            let Ok(q) = parse_urlencoded(&query) else { return respond_400("Invalid query") };
-            let Ok(form) = parse_urlencoded(&read_body()) else { return respond_400("Invalid form") };
-            let state = AppState::new(base_dir).await;
+            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let json = device::post(State(state), cgi_headers(), Query(q), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/network", "GET") => {
-            let Ok(q) = parse_urlencoded(&query) else { return respond_400("Invalid query") };
-            let state = AppState::new(base_dir).await;
+            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let html = network::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
 
+        ("/cgi-bin/identity", "GET") => {
+            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let state = AppState::new_once(base_dir).await;
+            let html = identity::get(State(state), Query(q)).await;
+            respond_html(html.0);
+        }
+
         ("/cgi-bin/qr", "GET") => {
-            let Ok(q) = parse_urlencoded(&query) else { return respond_400("Invalid query") };
-            let state = AppState::new(base_dir).await;
+            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let resp = qr::get(State(state), Query(q)).await;
             respond_raw(resp);
         }
 
         ("/cgi-bin/approve-access", "GET") => {
-            let Ok(q) = parse_urlencoded(&query) else { return respond_400("Invalid query") };
-            let state = AppState::new(base_dir).await;
+            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let html = approve_access::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
         ("/cgi-bin/approve-access", "POST") => {
-            let Ok(form) = parse_urlencoded(&read_body()) else { return respond_400("Invalid form") };
-            let state = AppState::new(base_dir).await;
+            let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let json = approve_access::post(State(state), cgi_headers(), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/approve-join", "GET") => {
-            let Ok(q) = parse_urlencoded(&query) else { return respond_400("Invalid query") };
-            let state = AppState::new(base_dir).await;
+            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let html = approve_join::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
         ("/cgi-bin/approve-join", "POST") => {
-            let Ok(form) = parse_urlencoded(&read_body()) else { return respond_400("Invalid form") };
-            let state = AppState::new(base_dir).await;
+            let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let json = approve_join::post(State(state), cgi_headers(), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/rotate-password", "POST") => {
-            let Ok(form) = parse_urlencoded(&read_body()) else { return respond_400("Invalid form") };
-            let state = AppState::new(base_dir).await;
+            let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
+            let state = AppState::new_once(base_dir).await;
             let json = rotate_password::post(State(state), Form(form)).await;
             respond_json(&json.0);
         }
@@ -113,7 +123,9 @@ fn read_cache(path: &str) -> Option<String> {
 }
 
 fn write_cache(path: &str, html: &str) {
-    let _ = std::fs::create_dir_all("/tmp/kestreld");
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let _ = std::fs::write(path, html);
 }
 

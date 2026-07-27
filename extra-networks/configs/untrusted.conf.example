@@ -36,5 +36,5 @@ JOIN_HISTORY_RETENTION=90d       # keep approval/denial/revoke history this long
 DEVICE_CONTROL=no                # yes = per-device outbound inspection: approve/deny connections per device
                                  #       requires JOIN_APPROVAL=yes; device page at /cgi-bin/device?net=untrusted&mac=...
 ROTATE_PASSWORD=no               # yes = show a manual "Rotate password" button in the status dashboard
-DESCRIPTION=IoT / untrusted devices  # optional label shown in the status dashboard
+DESCRIPTION='IoT / untrusted devices' # optional label shown in the status dashboard (quote values with spaces)
 MDNS=no                          # yes = reflect mDNS from LAN

@@ -1,10 +1,16 @@
+pub mod adblock;
+pub mod banip;
 pub mod dhcp;
+pub mod dhcp_fingerprint;
 pub mod dns;
 pub mod files;
+pub mod fingerprint;
 pub mod iw;
 pub mod logs;
+pub mod mdns;
 pub mod neigh;
 pub mod nft;
 pub mod system;
 pub mod vpn;
 pub mod wg;
+pub mod wifi_caps;

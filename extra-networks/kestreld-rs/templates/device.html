@@ -45,6 +45,9 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <div class="card">
 <div class="row"><span class="lbl">MAC</span><span class="val">{{ mac }}</span></div>
 <div class="row"><span class="lbl">Manufacturer</span><span class="val dim">{{ manufacturer }}</span></div>
+{% if let Some(ident) = identity %}
+<div class="row"><span class="lbl">Known identity</span><span class="val dim" title="Best-effort correlation across MAC rotations — never a certainty, see the README"><a href="/cgi-bin/identity?net={{ net }}&amp;id={{ ident.id }}">{{ ident.id }}</a> · seen on {{ ident.macs_count }} MAC{% if ident.macs_count != 1 %}s{% endif %} · refreshed {{ ident.last_seen }}</span></div>
+{% endif %}
 <div class="row"><span class="lbl">Online</span><span class="val {{ online_css }}">{{ online_text }}</span></div>
 <div class="row">
   <span class="lbl">Label</span>
@@ -112,10 +115,17 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <p class="dim">No pending connections.</p>
 {% else %}
 <table>
-  <tr><th>Destination</th><th>Port</th><th>Proto</th><th></th></tr>
+  <tr><th>Destination</th><th>Description</th><th>Port</th><th>Proto</th><th></th></tr>
   {% for p in pending %}
   <tr>
     <td>{{ p.dst }}</td>
+    <td>
+      {% if p.description.is_empty() %}
+        <span class="dim">—</span>
+      {% else %}
+        <span class="badge badge-denied" title="{{ p.description }}">⚠ {{ p.description }}</span>
+      {% endif %}
+    </td>
     <td>{{ p.port }}</td>
     <td>{{ p.proto }}</td>
     <td>
@@ -170,9 +180,13 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <p class="dim">No recent DNS queries.</p>
 {% else %}
 <table>
-  <tr><th>Domain</th><th>Type</th></tr>
+  <tr><th>Domain</th><th>Type</th><th></th></tr>
   {% for q in dns_queries %}
-  <tr><td>{{ q.domain }}</td><td class="dim">{{ q.qtype }}</td></tr>
+  <tr>
+    <td>{{ q.domain }}</td>
+    <td class="dim">{{ q.qtype }}</td>
+    <td>{% if q.blocked %}<span class="badge badge-denied" title="On the adblock blocklist">⚠ adblock</span>{% endif %}</td>
+  </tr>
   {% endfor %}
 </table>
 {% endif %}
@@ -182,7 +196,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <p class="dim">No history yet.</p>
 {% else %}
 <table>
-  <tr><th>When</th><th>Decision</th><th>Network</th><th>IPv4</th><th>IPv6</th><th>By</th></tr>
+  <tr><th>When</th><th>Decision</th><th>Network</th><th>IPv4</th><th>IPv6</th><th>By (MAC)</th></tr>
   {% for h in history %}
   <tr>
     <td class="dim">{{ h.when }}</td>
@@ -190,7 +204,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
     <td>{{ h.net }}</td>
     <td>{{ h.ip4 }}</td>
     <td>{{ h.ip6 }}</td>
-    <td>{{ h.by }}</td>
+    <td>{% if !h.by_mac.is_empty() %}<a href="/cgi-bin/device?net=lan&amp;mac={{ h.by_mac }}">{{ h.by }}</a>{% else %}{{ h.by }}{% endif %}</td>
   </tr>
   {% endfor %}
 </table>

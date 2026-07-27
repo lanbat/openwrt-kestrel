@@ -34,12 +34,27 @@ struct DeviceTmpl {
     rules: Vec<RuleRow>,
     dns_queries: Vec<DnsRow>,
     history: Vec<HistRow>,
+    identity: Option<IdentityInfo>,
+}
+
+/// The fingerprint-registry identity this (randomized) MAC belongs to, if
+/// any — see `data::fingerprint`. Shown as an auditable "known identity"
+/// panel, not as a claim of certainty: two similar devices can still score
+/// into the same identity, which is exactly why this is visible at all
+/// rather than silent.
+struct IdentityInfo {
+    id: String,
+    macs_count: usize,
+    last_seen: String,
 }
 
 struct PendingRow {
     dst: String,
     port: String,
     proto: String,
+    /// banIP feed description for `dst`, if it's flagged in any enabled
+    /// threat feed (spamhaus, feodo, dshield, ...); empty otherwise.
+    description: String,
 }
 
 struct RuleRow {
@@ -53,6 +68,9 @@ struct RuleRow {
 struct DnsRow {
     domain: String,
     qtype: String,
+    /// Whether this domain (or a parent of it) is on adblock's compiled
+    /// blocklist.
+    blocked: bool,
 }
 
 struct HistRow {
@@ -63,6 +81,7 @@ struct HistRow {
     ip4: String,
     ip6: String,
     by: String,
+    by_mac: String,
 }
 
 // ── Route types ───────────────────────────────────────────────────────────────
@@ -137,7 +156,7 @@ fn valid_ip(s: &str) -> bool {
 fn is_private_origin(origin: &str) -> bool {
     if origin.is_empty() { return true; }
     let prefixes = ["http://192.168.", "http://10.", "http://172.1", "http://172.2",
-        "http://172.30.", "http://172.31.", "http://[fd", "http://[fc",
+        "http://172.30.", "http://172.31.", "http://127.", "http://[fd", "http://[fc",
         "http://[fe80", "http://[::1]"];
     prefixes.iter().any(|p| origin.starts_with(p))
 }
@@ -188,7 +207,7 @@ fn badge_label(act: &str) -> &'static str {
     }
 }
 
-fn rel_time(ts: u64) -> String {
+pub(crate) fn rel_time(ts: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -256,6 +275,23 @@ pub async fn get(
 
     // Manufacturer
     let manufacturer = crate::data::files::oui_lookup(&state.oui, &mac).to_string();
+    let is_randomized_mac = crate::data::files::is_randomized_mac(&mac);
+
+    // Fingerprint identity, if this (randomized) MAC is already registered
+    // under one — see data::fingerprint. Purely informational/auditable;
+    // never shown for a fixed MAC, since those already identify a device
+    // permanently on their own and are never registered in the first place.
+    let identity = if is_randomized_mac {
+        let fp_path = base_dir.join(format!("{net}-device-fingerprints"));
+        let records = crate::data::fingerprint::read_registry(&fp_path).await;
+        crate::data::fingerprint::find_by_mac(&records, &mac).map(|r| IdentityInfo {
+            id: r.id.clone(),
+            macs_count: r.macs.len(),
+            last_seen: rel_time(r.last_seen),
+        })
+    } else {
+        None
+    };
 
     // DHCP hostname
     let hostname = snap.leases.iter()
@@ -313,7 +349,12 @@ pub async fn get(
 
     let pending: Vec<PendingRow> = raw_pending.into_iter()
         .filter(|p| !ruled_dsts.contains(p.dst.as_str()))
-        .map(|p| PendingRow { dst: p.dst, port: p.port, proto: p.proto })
+        .map(|p| {
+            let description = snap.banip.lookup(&p.dst)
+                .map(crate::data::banip::describe)
+                .unwrap_or_default();
+            PendingRow { dst: p.dst, port: p.port, proto: p.proto, description }
+        })
         .collect();
 
     let rules: Vec<RuleRow> = rules.into_iter()
@@ -326,15 +367,25 @@ pub async fn get(
 
     // DNS queries from logs
     let src_ip = if dev_ip.is_empty() { dev_ip6.clone() } else { dev_ip.clone() };
-    let dns_queries: Vec<DnsRow> = if !src_ip.is_empty() {
+    let queried: Vec<(String, String)> = if !src_ip.is_empty() {
         crate::data::logs::parse_dns_queries(&snap.logs.lines, &src_ip)
             .into_iter()
             .take(50)
-            .map(|(d, t)| DnsRow { domain: d.to_string(), qtype: t.to_string() })
+            .map(|(d, t)| (d.to_string(), t.to_string()))
             .collect()
     } else {
         Vec::new()
     };
+    let domains: Vec<String> = queried.iter().map(|(d, _)| d.clone()).collect();
+    let blocklist = crate::data::adblock::flag_domains(
+        std::path::Path::new(crate::data::adblock::LIST_PATH), &domains,
+    ).await;
+    let dns_queries: Vec<DnsRow> = queried.into_iter()
+        .map(|(domain, qtype)| {
+            let blocked = blocklist.get(&domain).copied().unwrap_or(false);
+            DnsRow { domain, qtype, blocked }
+        })
+        .collect();
 
     // History from join-history files
     let hist_path = base_dir.join(format!("{net}-join-history"));
@@ -351,6 +402,7 @@ pub async fn get(
         .map(|row| {
             let get = |i: usize| row.get(i).cloned().unwrap_or_default();
             let act = get(2);
+            let by_mac = get(10);
             HistRow {
                 when: get(1),
                 css: badge_css(&act).to_string(),
@@ -358,7 +410,8 @@ pub async fn get(
                 net: net.to_string(),
                 ip4: get(4),
                 ip6: get(5),
-                by: get(7),
+                by: if !by_mac.is_empty() { by_mac.clone() } else { "unknown".to_string() },
+                by_mac,
             }
         })
         .collect();
@@ -371,7 +424,13 @@ pub async fn get(
         mac,
         display,
         label,
-        manufacturer: if manufacturer.is_empty() { "\u{2014}".into() } else { manufacturer },
+        manufacturer: if !manufacturer.is_empty() {
+            manufacturer
+        } else if is_randomized_mac {
+            "Randomized MAC".into()
+        } else {
+            "\u{2014}".into()
+        },
         online_css,
         online_text,
         dev_ip: if dev_ip.is_empty() { "\u{2014}".into() } else { dev_ip },
@@ -386,6 +445,7 @@ pub async fn get(
         rules,
         dns_queries,
         history,
+        identity,
     };
 
     Html(tmpl.render().unwrap_or_else(|e| format!("Template error: {e}")))
@@ -428,6 +488,13 @@ pub async fn post(
 
     let base_dir = state.base_dir.clone();
     let mac_n = mac_no_colons(&mac);
+    let remote_ip = headers.get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .split(',').next().unwrap_or("unknown")
+        .trim()
+        .to_string();
+    let actor_mac = snap.neigh.mac_for_ip(&remote_ip).unwrap_or("").to_string();
 
     let dev_ip = snap.device_ips.get(net).and_then(|m| m.get(&mac)).cloned()
         .or_else(|| snap.join_approved_ips.get(net).and_then(|m| m.get(&mac)).cloned())
@@ -446,6 +513,10 @@ pub async fn post(
             let lbl_path = base_dir.join(format!("{net}-device-labels"));
             let _ = files::file_upsert_by_mac(&lbl_path, &mac, &format!("{mac}\t{new_label}")).await;
             crate::cmd::write_device_dns(&base_dir, net, &mac, &new_label, "").await;
+
+            let fp_path = base_dir.join(format!("{net}-device-fingerprints"));
+            crate::data::fingerprint::rename_if_known(&fp_path, &mac, &new_label).await;
+
             if new_label != dev_label && !notify_url.is_empty() {
                 let body = format!("MAC: {mac}{}\nNow: {new_label}",
                     if dev_label.is_empty() { String::new() } else { format!("\nWas: {dev_label}") });
@@ -605,7 +676,7 @@ pub async fn post(
             crate::cmd::append_join_history(
                 &base_dir, net, "deleted", &mac,
                 &dev_ip, &dev_ip6, &dev_label,
-                "system", "", "", "",
+                &remote_ip, &remote_ip, "", &actor_mac,
             ).await;
 
             // Remove from all state files
@@ -750,6 +821,11 @@ mod tests {
         assert!(is_private_origin("http://192.168.1.1:8080"));
         assert!(is_private_origin("http://10.0.0.5"));
         assert!(is_private_origin("http://[fe80::1]"));
+    }
+
+    #[test]
+    fn is_private_origin_allows_ipv4_loopback() {
+        assert!(is_private_origin("http://127.0.0.1:8080"));
     }
 
     #[test]

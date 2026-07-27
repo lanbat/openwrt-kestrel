@@ -23,6 +23,13 @@ pub struct NetworkConf {
     pub bandwidth_threshold_mb: u64,
     pub device_control: bool,
     pub default_duration: String,
+    /// Whether the join-approval prompt tries to correlate a randomized
+    /// MAC against already-labeled devices (see `data::fingerprint`) and
+    /// show a suggestion. Never affects anything but that suggestion —
+    /// approval itself always still works either way. Defaults on since
+    /// it's non-destructive and always human-confirmed, but some
+    /// households would rather it just not guess.
+    pub fingerprint_suggest: bool,
 }
 
 pub async fn read_all_network_confs(base_dir: &Path) -> Vec<NetworkConf> {
@@ -97,6 +104,7 @@ fn parse_notify_conf(filename: &str, content: &str) -> Option<NetworkConf> {
             .get("DEFAULT_DURATION")
             .cloned()
             .unwrap_or_else(|| "24h".to_string()),
+        fingerprint_suggest: vars.get("FINGERPRINT_SUGGEST").map(|v| v != "no").unwrap_or(true),
     })
 }
 
@@ -321,6 +329,20 @@ pub fn oui_lookup<'a>(oui: &'a HashMap<String, String>, mac: &str) -> &'a str {
         }
     }
     ""
+}
+
+/// Whether `mac` has the locally-administered bit set (bit 1 of the first
+/// octet) — the standard tell for a randomized "private" MAC address, which
+/// iOS/Android/Windows all set when generating one per network. These have
+/// no OUI entry by design: they were never allocated to any manufacturer,
+/// so `oui_lookup` returning empty for one isn't "unknown vendor", it's
+/// "this address was made up".
+pub fn is_randomized_mac(mac: &str) -> bool {
+    mac.split(':')
+        .next()
+        .and_then(|first| u8::from_str_radix(first, 16).ok())
+        .map(|first_octet| first_octet & 0x02 != 0)
+        .unwrap_or(false)
 }
 
 // ── File mutation helpers ─────────────────────────────────────────────────────
@@ -559,6 +581,18 @@ JOIN_HISTORY_RETENTION=30d
         assert_eq!(vars.get("BANDWIDTH_THRESHOLD_MB").map(|s| s.as_str()), Some("100"));
     }
 
+    #[test]
+    fn fingerprint_suggest_defaults_to_enabled_when_absent() {
+        let conf = parse_notify_conf("guest-notify.conf", "IFACE_NAME=guest\n").unwrap();
+        assert!(conf.fingerprint_suggest);
+    }
+
+    #[test]
+    fn fingerprint_suggest_can_be_disabled() {
+        let conf = parse_notify_conf("guest-notify.conf", "IFACE_NAME=guest\nFINGERPRINT_SUGGEST=no\n").unwrap();
+        assert!(!conf.fingerprint_suggest);
+    }
+
     // ── read_lines / read_labels / mac_in_file / read_pending ────────────────
 
     #[tokio::test]
@@ -713,6 +747,27 @@ JOIN_HISTORY_RETENTION=30d
     fn oui_lookup_unknown_mac_returns_empty() {
         let oui = HashMap::new();
         assert_eq!(oui_lookup(&oui, "AA:BB:CC:DD:EE:FF"), "");
+    }
+
+    // ── is_randomized_mac ───────────────────────────────────────────────────
+
+    #[test]
+    fn is_randomized_mac_detects_locally_administered_bit() {
+        assert!(is_randomized_mac("02:11:22:33:44:55"));
+        assert!(is_randomized_mac("06:aa:bb:cc:dd:ee"));
+        assert!(is_randomized_mac("0e:aa:bb:cc:dd:ee"));
+    }
+
+    #[test]
+    fn is_randomized_mac_false_for_globally_unique_addresses() {
+        assert!(!is_randomized_mac("00:11:22:33:44:55"));
+        assert!(!is_randomized_mac("04:aa:bb:cc:dd:ee"));
+    }
+
+    #[test]
+    fn is_randomized_mac_false_for_malformed_input() {
+        assert!(!is_randomized_mac(""));
+        assert!(!is_randomized_mac("not-a-mac"));
     }
 
     // ── File mutation helpers ─────────────────────────────────────────────────

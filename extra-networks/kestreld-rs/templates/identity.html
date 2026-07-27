@@ -1,0 +1,86 @@
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Identity — {{ label }}</title>
+<style>
+:root{color-scheme:light}
+*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:1rem;color:#111}
+h1{font-size:1.4rem;margin-bottom:.15rem}
+.sub{color:#888;font-size:.85rem;margin-bottom:2rem}
+h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:#888;
+   border-bottom:1px solid #e0e0e0;padding-bottom:.3rem;margin:1.75rem 0 .6rem}
+.card{background:#f5f5f5;border-radius:8px;padding:.7rem 1rem;margin:.4rem 0}
+.row{display:flex;justify-content:space-between;font-size:.9rem;padding:.18rem 0}
+.lbl{color:#666}.val{font-weight:600}
+.dim{color:#aaa}
+table{width:100%;border-collapse:collapse;font-size:.875rem;margin:.4rem 0}
+th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;
+   color:#888;padding:.35rem .5rem;border-bottom:1px solid #e0e0e0}
+td{padding:.35rem .5rem;border-bottom:1px solid #f0f0f0;vertical-align:top}
+a{color:#1976d2;text-decoration:none}
+.note{font-size:.8rem;color:#888;margin:.3rem 0 .6rem}
+</style></head><body>
+<h1>{{ label }}</h1>
+<div class="sub">{{ net }} &nbsp;&#183;&nbsp; identity {{ id }} &nbsp;&#183;&nbsp; <a href="/cgi-bin/status">Dashboard</a></div>
+
+<h2>Identity</h2>
+<div class="card">
+<div class="row"><span class="lbl">Label</span><span class="val">{{ label }}</span></div>
+<div class="row"><span class="lbl">Id</span><span class="val dim">{{ id }}</span></div>
+<div class="row"><span class="lbl">First seen</span><span class="val">{{ first_seen }}</span></div>
+<div class="row"><span class="lbl">Last seen</span><span class="val">{{ last_seen }}</span></div>
+</div>
+<p class="note">Best-effort correlation across MAC rotations, based on DHCP/mDNS/WiFi-capability signals — never a certainty. See the README for how this scoring works and its limits.</p>
+
+<h2>Fingerprint signals</h2>
+<div class="card">
+<div class="row"><span class="lbl">mDNS name</span><span class="val">{{ mdns_name }}</span></div>
+<div class="row"><span class="lbl">mDNS model</span><span class="val">{{ mdns_model }}</span></div>
+<div class="row"><span class="lbl">WiFi capabilities</span><span class="val">{{ wifi_caps }}</span></div>
+<div class="row"><span class="lbl">DHCP vendor class</span><span class="val">{{ dhcp_vendor }}</span></div>
+<div class="row"><span class="lbl">DHCP requested options</span><span class="val">{{ dhcp_options }}</span></div>
+</div>
+
+<h2>Known MACs</h2>
+{% if macs.is_empty() %}
+<p class="dim">No MACs recorded.</p>
+{% else %}
+<table>
+  <tr><th>MAC</th></tr>
+  {% for mac in macs %}
+  <tr><td><a href="/cgi-bin/device?net={{ net }}&amp;mac={{ mac }}">{{ mac }}</a></td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>Label history</h2>
+{% if label_history.is_empty() %}
+<p class="dim">No prior labels — this identity has always been called {{ label }}.</p>
+{% else %}
+<table>
+  <tr><th>Label</th><th>Until</th></tr>
+  {% for h in label_history %}
+  <tr><td>{{ h.label }}</td><td class="dim">{{ h.until }}</td></tr>
+  {% endfor %}
+  <tr><td>{{ label }}</td><td class="dim">current</td></tr>
+</table>
+{% endif %}
+
+<h2>Similar identities</h2>
+{% if similar.is_empty() %}
+<p class="dim">No other registered identity looks similar.</p>
+{% else %}
+<p class="note">A high score here means it's worth checking these aren't actually the same device registered twice — not a claim that they are.</p>
+<table>
+  <tr><th>Label</th><th>Score</th><th></th></tr>
+  {% for s in similar %}
+  <tr>
+    <td>{{ s.label }}</td>
+    <td class="dim">{{ s.score }}</td>
+    <td><a href="/cgi-bin/identity?net={{ net }}&amp;id={{ s.id }}">View</a></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+</body></html>

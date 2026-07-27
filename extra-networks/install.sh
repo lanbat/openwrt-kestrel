@@ -141,6 +141,12 @@ case " $_dm_ifaces " in
     *) uci add_list dhcp.@dnsmasq[0].interface="$IFACE" ;;
 esac
 
+# Log each device's DHCP option-request-list + vendor class (option 55/60)
+# to syslog. kestreld uses this as a per-device fingerprint to recognize a
+# device again after its MAC rotates (privacy MAC randomization) — see
+# data::dhcp_fingerprint. Global option, only needs setting once.
+uci set dhcp.@dnsmasq[0].logdhcp='1'
+
 uci commit dhcp
 
 # ── firewall ──────────────────────────────────────────────────────────────────
@@ -677,7 +683,7 @@ NOTIFYEOF
     # daemon, no extra port, no reverse proxy needed.
     mkdir -p /www/cgi-bin
     if [ -x /usr/bin/kestreld ]; then
-        for _ep in status device network qr approve-access approve-join rotate-password; do
+        for _ep in status device network identity qr approve-access approve-join rotate-password; do
             ln -sf /usr/bin/kestreld "/www/cgi-bin/${_ep}"
         done
     else

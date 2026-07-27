@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::data::{dhcp, dns, files, iw, logs, neigh, nft, system, vpn, wg};
+use crate::data::{banip, dhcp, dns, files, iw, logs, neigh, nft, system, vpn, wg};
 
 pub struct Snapshot {
     pub at: Instant,
@@ -13,6 +13,9 @@ pub struct Snapshot {
     pub vpn_tiers: Vec<vpn::VpnTier>,
     pub wg_servers: Vec<wg::WgServer>,
     pub nft: nft::NftState,
+    /// banIP threat-feed membership (spamhaus, feodo, dshield, ...), parsed
+    /// out of the same `nft.raw` dump above — no extra process spawned.
+    pub banip: banip::BanipFeeds,
     pub leases: Vec<dhcp::Lease>,
     pub neigh: neigh::NeighTable,
     pub logs: logs::LogData,
@@ -68,15 +71,20 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(base_dir: PathBuf) -> Arc<Self> {
+    async fn build(base_dir: PathBuf) -> Arc<Self> {
         let snap = build_snapshot(&base_dir).await;
         let oui = files::read_oui(&base_dir.join("oui.txt")).await;
-        let state = Arc::new(Self {
+        Arc::new(Self {
             snapshot: RwLock::new(Arc::new(snap)),
             base_dir,
             oui,
-        });
-        // Background refresh every 5 seconds
+        })
+    }
+
+    /// For the long-running standalone server: refreshes the snapshot every
+    /// 5 seconds in the background so concurrent requests share one build.
+    pub async fn new(base_dir: PathBuf) -> Arc<Self> {
+        let state = Self::build(base_dir).await;
         let state2 = Arc::clone(&state);
         tokio::spawn(async move {
             loop {
@@ -86,6 +94,13 @@ impl AppState {
             }
         });
         state
+    }
+
+    /// For CGI mode: a fresh process handles exactly one request and then
+    /// exits, so there's no point spawning a background refresh loop that
+    /// will never get to run.
+    pub async fn new_once(base_dir: PathBuf) -> Arc<Self> {
+        Self::build(base_dir).await
     }
 
     pub async fn snap(&self) -> Arc<Snapshot> {
@@ -229,6 +244,8 @@ pub async fn build_snapshot(base_dir: &Path) -> Snapshot {
         iface_up.insert(iface.clone(), up);
     }
 
+    let banip_feeds = banip::BanipFeeds::parse(&nft_state.raw);
+
     Snapshot {
         at: Instant::now(),
         system: sys,
@@ -236,6 +253,7 @@ pub async fn build_snapshot(base_dir: &Path) -> Snapshot {
         vpn_tiers,
         wg_servers,
         nft: nft_state,
+        banip: banip_feeds,
         leases,
         neigh: neigh_table,
         logs: log_data,

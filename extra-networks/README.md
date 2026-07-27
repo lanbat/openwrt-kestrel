@@ -589,6 +589,18 @@ sh /etc/extra-networks/oui-update.sh
 
 **Randomized MACs:** Modern phones and laptops randomize their MAC address per network for privacy. These MACs have the locally-administered bit set (second bit of the first byte) and have no OUI entry by design — the device page shows "Randomized MAC" for them instead of a blank.
 
+**Recognizing a randomized-MAC device again after it rotates:** when a randomized-MAC device joins a `JOIN_APPROVAL=yes` network, the join prompt tries to correlate it against devices you've already labeled, using whatever it can gather from already-running services — no new packet capture, no new daemons:
+
+- the DHCP option-request-list order and vendor class (from dnsmasq's `--log-dhcp` output)
+- WiFi capability flags (HT/VHT/HE, WMM, MFP) via `hostapd`'s own `ubus` interface
+- an mDNS device name/model, queried directly (bypassing `avahi-browse`, which needs D-Bus support this install doesn't have — see the "why not avahi-browse" note in `kestreld-rs/src/data/mdns.rs`)
+
+If it finds a plausible match it's shown as a suggestion with a one-tap "yes, same device" button — **it is never applied automatically**. Worth understanding the limits before trusting it:
+
+- **Accuracy depends on how many similar devices you own.** None of these signals uniquely identify a physical unit — they identify a device *class* (make/model/OS version). One iPhone in the house and a persistent mDNS name → a genuinely reliable suggestion. Two identical phones in the house → the system often can't tell them apart, and may even suggest the wrong one with a plausible-looking score. When two candidates score too close to call, the prompt shows both rather than confidently guessing one.
+- **mDNS does not cross a VLAN/subnet boundary** (it's link-local multicast, by design — RFC 6762). The query is bound to the joining device's own bridge for exactly this reason. If a device sits behind something that relays DHCP from a different L2 segment (e.g. a smart VLAN switch), the DHCP signal should still work — the vendor forwards the original packet fields untouched — but mDNS won't reach it unless that segment has its own reflector.
+- Apple has been progressively reducing what iOS broadcasts over mDNS on untrusted networks, for the same privacy reasons MAC randomization exists — expect this signal to keep getting weaker on newer iOS versions, not stronger.
+
 ## Global settings
 
 Some settings apply to the status page and tools as a whole rather than to a single network. Set them in `/etc/extra-networks/config` on the router — this file is created by `install.sh` and survives re-runs.

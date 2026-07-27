@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::data::files;
+use crate::routes::safe_redirect;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -27,6 +28,21 @@ pub struct JoinForm {
     pub action: Option<String>,
     pub label: Option<String>,
     pub redirect: Option<String>,
+    // Carried through from the fingerprint gathered when the join prompt
+    // (GET) was rendered — see `crate::data::fingerprint`. Present only
+    // when the MAC was randomized; empty/absent otherwise. Kept as plain
+    // hidden form fields rather than re-querying mDNS/DHCP logs on POST,
+    // so approving a device never itself triggers a network round-trip.
+    pub dhcp_options: Option<String>,
+    pub dhcp_vendor: Option<String>,
+    pub wifi_caps: Option<String>,
+    pub mdns_name: Option<String>,
+    pub mdns_model: Option<String>,
+    // Set only when this approval came from clicking a fingerprint-match
+    // suggestion button — tells the "approve" handler to fold this MAC
+    // into that *existing* identity (`fingerprint::merge_into`) instead of
+    // registering a brand-new one (`fingerprint::create`).
+    pub identity_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -56,17 +72,9 @@ fn valid_mac(mac: &str) -> bool {
 fn is_private_origin(origin: &str) -> bool {
     if origin.is_empty() { return true; }
     let prefixes = ["http://192.168.", "http://10.", "http://172.1", "http://172.2",
-        "http://172.30.", "http://172.31.", "http://[fd", "http://[fc",
+        "http://172.30.", "http://172.31.", "http://127.", "http://[fd", "http://[fc",
         "http://[fe80", "http://[::1]"];
     prefixes.iter().any(|p| origin.starts_with(p))
-}
-
-/// Only honor same-origin, same-app redirect targets requested by the caller.
-fn safe_redirect(redirect: Option<&str>) -> Option<String> {
-    redirect
-        .map(str::trim)
-        .filter(|s| s.starts_with("/cgi-bin/"))
-        .map(str::to_string)
 }
 
 pub async fn get(
@@ -89,10 +97,34 @@ pub async fn get(
     }
 
     let snap = state.snap().await;
+    let conf = snap.net_confs.iter().find(|c| c.iface == net);
     let existing_label = snap.labels.get(net)
         .and_then(|m| m.get(&mac))
         .cloned()
         .unwrap_or_default();
+
+    // Vendor hint from the MAC's OUI prefix — cheap context for the actual
+    // decision moment (this page, reached from the push notification, is
+    // where approve/deny actually happens; the OUI database was already
+    // loaded for the status/device pages but never used here). Unreliable
+    // against randomized MACs (iOS/Android default to it now), but still
+    // useful for most IoT/embedded gear.
+    let manufacturer = crate::data::files::oui_lookup(&state.oui, &mac).to_string();
+    let is_randomized = crate::data::files::is_randomized_mac(&mac);
+
+    // Most recent past decision for this exact MAC on this network, if
+    // any — most relevant when it was previously denied or deleted: did
+    // the same device just try again?
+    let hist_path = state.base_dir.join(format!("{net}-join-history"));
+    let history = crate::data::files::read_join_history(&hist_path).await;
+    let prior = history.iter()
+        .filter(|row| row.get(3).map(|m| m.eq_ignore_ascii_case(&mac)).unwrap_or(false))
+        .next_back() // file is append-only chronological order; last match = most recent
+        .map(|row| {
+            let when = row.get(1).cloned().unwrap_or_default();
+            let action = row.get(2).cloned().unwrap_or_default();
+            (action, when)
+        });
 
     let device_display = if host.is_empty() {
         ip.to_string()
@@ -103,6 +135,66 @@ pub async fn get(
 
     let label_esc = html_escape(&existing_label);
     let device_esc = html_escape(&device_display);
+    let manufacturer_esc = html_escape(&manufacturer);
+    let manufacturer_row = if !manufacturer.is_empty() {
+        format!(r#"<div class="card"><div class="lbl">Manufacturer</div><div class="value">{manufacturer_esc}</div></div>"#)
+    } else if is_randomized {
+        r#"<div class="card"><div class="lbl">Manufacturer</div><div class="value dim">Randomized MAC</div></div>"#.to_string()
+    } else {
+        String::new()
+    };
+    let prior_note = prior_note_html(prior.as_ref());
+
+    // Fingerprint-based "is this a device we already know, just on a new
+    // randomized MAC" suggestion — see `data::fingerprint`. Only worth
+    // the ~1.2s mDNS round-trip when the MAC is actually randomized, the
+    // network is known, and this network hasn't opted out
+    // (FINGERPRINT_SUGGEST=no) of the guesswork; fixed MACs already
+    // identify a device permanently on their own.
+    let fingerprint_enabled = is_randomized && conf.is_some_and(|c| c.fingerprint_suggest);
+    let observed = if let (true, Some(c)) = (fingerprint_enabled, conf) {
+        let bridge_ip = format!("{}.1", c.subnet);
+        crate::data::fingerprint::Observed::gather(&snap.logs.lines, net, &mac, ip, &bridge_ip).await
+    } else {
+        crate::data::fingerprint::Observed::default()
+    };
+    let fp_hidden_fields = format!(
+        r#"<input type="hidden" name="dhcp_options" value="{}"><input type="hidden" name="dhcp_vendor" value="{}"><input type="hidden" name="wifi_caps" value="{}"><input type="hidden" name="mdns_name" value="{}"><input type="hidden" name="mdns_model" value="{}">"#,
+        html_escape(&observed.dhcp.requested_options), html_escape(&observed.dhcp.vendor_class),
+        html_escape(&observed.wifi_caps), html_escape(&observed.mdns.name), html_escape(&observed.mdns.model),
+    );
+    let suggestion_html = if fingerprint_enabled {
+        let fp_path = state.base_dir.join(format!("{net}-device-fingerprints"));
+        let records = crate::data::fingerprint::read_registry(&fp_path).await;
+        use crate::data::fingerprint::MatchResult;
+        match crate::data::fingerprint::best_match(&observed, &records) {
+            MatchResult::None => String::new(),
+            MatchResult::Confident(matched, _score) => {
+                let seen_as = matched.macs.len();
+                let button = suggestion_button_html(&qs, &fp_hidden_fields, &matched.id, &matched.label, "Yes — approve as");
+                format!(
+                    r#"<div class="note match">
+  <div>💡 This might be a device you already know: <strong>{}</strong> (seen on {seen_as} other MAC address{} before).</div>
+  {button}
+</div>"#,
+                    html_escape(&matched.label), if seen_as == 1 { "" } else { "es" },
+                )
+            }
+            MatchResult::Ambiguous(candidates) => {
+                let buttons: String = candidates.iter()
+                    .map(|(r, _)| suggestion_button_html(&qs, &fp_hidden_fields, &r.id, &r.label, "Could be — approve as"))
+                    .collect();
+                format!(
+                    r#"<div class="note match">
+  <div>💡 This could be a device you already know — but it scores similarly close to more than one, so pick carefully rather than trusting a single guess:</div>
+  {buttons}
+</div>"#
+                )
+            }
+        }
+    } else {
+        String::new()
+    };
 
     Html(format!(r#"<!DOCTYPE html><html><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -113,11 +205,16 @@ h1{{font-size:1.3rem;margin-bottom:1.5rem}}
 .card{{background:#f5f5f5;border-radius:8px;padding:1rem;margin:.75rem 0}}
 .lbl{{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:#888;margin-bottom:.25rem}}
 .value{{font-weight:600}}
+.value.dim{{font-weight:400;color:#888}}
 input[type=text]{{width:100%;box-sizing:border-box;padding:.5rem .75rem;font-size:1rem;border:1px solid #ccc;border-radius:6px;margin-top:.25rem}}
 button{{font-size:1rem;padding:.65rem 1rem;border-radius:6px;border:none;cursor:pointer;width:100%;margin-top:.5rem}}
 .btn-ok{{background:#1976d2;color:#fff}}.btn-ok:active{{background:#1565c0}}
 .btn-deny{{background:#c62828;color:#fff}}.btn-deny:active{{background:#b71c1c}}
 .note{{background:#fff8e1;border-radius:8px;padding:.75rem;font-size:.85rem;margin:1rem 0}}
+.note.warn{{background:#ffebee;color:#b71c1c}}
+.note.match{{background:#e3f2fd;color:#0d47a1}}
+.note.match form{{margin-top:.5rem}}
+.note.match button{{margin-top:0}}
 </style></head><body>
 <h1>Join request — {net}</h1>
 <div class="card">
@@ -128,10 +225,14 @@ button{{font-size:1rem;padding:.65rem 1rem;border-radius:6px;border:none;cursor:
   <div class="lbl">MAC address</div>
   <div class="value">{mac}</div>
 </div>
+{manufacturer_row}
+{prior_note}
+{suggestion_html}
 <div class="note">This device joined <strong>{net}</strong> and is waiting for internet access approval. Give it a label, then approve or deny.</div>
 <form id="approve-form" method="POST" action="/cgi-bin/approve-join?{qs}">
   <input type="hidden" name="action" value="approve">
   <input type="hidden" name="redirect" value="/cgi-bin/status">
+  {fp_hidden_fields}
   <div class="lbl" style="margin-top:1rem">Label <span style="color:#c62828">*</span></div>
   <input type="text" id="label-input" name="label" value="{label_esc}" placeholder="e.g. Alice's Phone" required maxlength="40">
   <button class="btn-ok" type="submit">Approve internet access</button>
@@ -143,11 +244,10 @@ button{{font-size:1rem;padding:.65rem 1rem;border-radius:6px;border:none;cursor:
 </form>
 <script>
 (function(){{
-  function submitJson(form, extraData) {{
+  function submitJson(form) {{
     form.addEventListener('submit', function(e) {{
       e.preventDefault();
       var data = new URLSearchParams(new FormData(form));
-      if (extraData) Object.entries(extraData).forEach(([k,v]) => data.set(k, v));
       fetch(form.action, {{method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}}, body: data.toString()}})
         .then(r => r.json())
         .then(j => {{ if (j.ok) location.href = j.redirect || '/cgi-bin/status';
@@ -157,6 +257,7 @@ button{{font-size:1rem;padding:.65rem 1rem;border-radius:6px;border:none;cursor:
   }}
   submitJson(document.getElementById('approve-form'));
   submitJson(document.getElementById('deny-form'));
+  document.querySelectorAll('.suggestion-form').forEach(function(f) {{ submitJson(f); }});
 }})();
 </script>
 </body></html>"#))
@@ -184,7 +285,10 @@ pub async fn post(
     if !net.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || net.is_empty() {
         return Json(ApiResult { ok: false, error: Some("Invalid network".into()), redirect: None });
     }
-    if !valid_mac(&mac) {
+    // bulk_approve_labeled acts on every pending device with a saved label
+    // at once, so — unlike every other action here — it has no single MAC
+    // of its own to validate.
+    if action != "bulk_approve_labeled" && !valid_mac(&mac) {
         return Json(ApiResult { ok: false, error: Some("Invalid MAC".into()), redirect: None });
     }
 
@@ -201,7 +305,25 @@ pub async fn post(
         .split(',').next().unwrap_or("unknown")
         .trim()
         .to_string();
+    let actor_mac = snap.neigh.mac_for_ip(&remote_ip).unwrap_or("").to_string();
     let redirect = safe_redirect(form.redirect.as_deref());
+
+    // Approve every currently-pending device on this network that already
+    // has a saved label, in one click — for the common case of several
+    // known devices reconnecting at once (e.g. after a reboot), where
+    // clicking Approve individually on each is pure friction. Devices
+    // without a label are left pending, same as a single approve would
+    // refuse them.
+    if action == "bulk_approve_labeled" {
+        let pending = snap.join_pending.get(net).cloned().unwrap_or_default();
+        let labels = snap.labels.get(net).cloned().unwrap_or_default();
+        for (pending_mac, pending_ip) in &pending {
+            if let Some(label) = labels.get(pending_mac) {
+                approve_device(base_dir, conf, net, pending_mac, pending_ip, "", label, &remote_ip, &actor_mac).await;
+            }
+        }
+        return Json(ApiResult { ok: true, error: None, redirect });
+    }
 
     // set_label action
     if action == "set_label" {
@@ -212,6 +334,9 @@ pub async fn post(
         let lbl_path = base_dir.join(format!("{net}-device-labels"));
         let _ = files::file_upsert_by_mac(&lbl_path, &mac, &format!("{mac}\t{label}")).await;
         crate::cmd::write_device_dns(base_dir, net, &mac, &label, "").await;
+
+        let fp_path = base_dir.join(format!("{net}-device-fingerprints"));
+        crate::data::fingerprint::rename_if_known(&fp_path, &mac, &label).await;
 
         if !conf.notify_url.is_empty() {
             let body = format!("MAC: {mac}\nNow: {label}\n\nBy: {remote_ip}");
@@ -234,58 +359,46 @@ pub async fn post(
                 return Json(ApiResult { ok: false, error: Some("Label is required to approve a device".into()), redirect: None });
             }
 
-            let is_ipv6 = ip.contains(':');
-            let pending_set = if is_ipv6 { format!("{net}_join_pending6") } else { format!("{net}_join_pending") };
+            approve_device(base_dir, conf, net, &mac, ip, host, &label, &remote_ip, &actor_mac).await;
 
-            // Update approved file
-            let approved_path = base_dir.join(format!("{net}-join-approved"));
-            let _ = files::file_remove_line(&approved_path, &mac).await;
-            let _ = files::file_append(&approved_path, &mac).await;
-
-            // Remove from pending and denied
-            let _ = files::file_remove_space_prefix(&base_dir.join(format!("{net}-join-pending")), &mac).await;
-            let _ = files::file_remove_line(&base_dir.join(format!("{net}-join-denied")), &mac).await;
-
-            // NFT: remove from pending set, add to approved
-            crate::cmd::nft_del_element(&pending_set, ip).await;
-            let approved_set = if is_ipv6 {
-                format!("{net}_join_approved_ips6")
-            } else {
-                format!("{net}_join_approved_ips")
-            };
-            crate::cmd::nft_add_element(&approved_set, ip, "").await;
-
-            // Save approved IP (space-separated: mac ip)
-            let ips_file = base_dir.join(format!("{net}-join-approved-ips"));
-            let ip4 = if is_ipv6 { String::new() } else { ip.to_string() };
-            let stored_ip = if is_ipv6 { "" } else { ip };
-            let _ = files::file_remove_space_prefix(&ips_file, &mac).await;
-            let _ = files::file_append(&ips_file, &format!("{mac} {stored_ip}")).await;
-
-            // Device control state
-            if conf.device_control {
-                let ip_store = if is_ipv6 {
-                    base_dir.join(format!("{net}-device-ip6s"))
-                } else {
-                    base_dir.join(format!("{net}-device-ips"))
+            // Opportunistically learn/refresh this identity's fingerprint —
+            // using only whatever the join prompt already gathered and
+            // carried through as hidden fields, never a fresh lookup here,
+            // so approving a device never itself does network I/O. Only
+            // relevant for randomized MACs; a fixed MAC already identifies
+            // a device permanently on its own.
+            if files::is_randomized_mac(&mac) {
+                let observed = crate::data::fingerprint::Observed {
+                    dhcp: crate::data::dhcp_fingerprint::DhcpFingerprint {
+                        requested_options: form.dhcp_options.clone().unwrap_or_default(),
+                        vendor_class: form.dhcp_vendor.clone().unwrap_or_default(),
+                    },
+                    wifi_caps: form.wifi_caps.clone().unwrap_or_default(),
+                    mdns: crate::data::mdns::MdnsInfo {
+                        name: form.mdns_name.clone().unwrap_or_default(),
+                        model: form.mdns_model.clone().unwrap_or_default(),
+                    },
                 };
-                let _ = files::file_upsert_by_mac(&ip_store, &mac, &format!("{mac}\t{ip}")).await;
-                crate::cmd::regen_inspect(net).await;
+                let fp_path = base_dir.join(format!("{net}-device-fingerprints"));
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+
+                match form.identity_id.as_deref().filter(|id| !id.is_empty()) {
+                    // A suggestion was confirmed: fold this MAC into that
+                    // *existing* identity rather than starting a new one.
+                    Some(id) => {
+                        crate::data::fingerprint::merge_into(&fp_path, id, &mac, &observed, now_ts).await;
+                    }
+                    // No suggestion was confirmed — only worth registering
+                    // a brand-new identity if something was actually
+                    // observed; an empty one would just be noise.
+                    None if !observed.dhcp.is_empty() || !observed.wifi_caps.is_empty()
+                        || !observed.mdns.name.is_empty() || !observed.mdns.model.is_empty() => {
+                        crate::data::fingerprint::create(&fp_path, &label, &mac, &observed, now_ts).await;
+                    }
+                    None => {}
+                }
             }
-
-            // Save label
-            let lbl_path = base_dir.join(format!("{net}-device-labels"));
-            let _ = files::file_upsert_by_mac(&lbl_path, &mac, &format!("{mac}\t{label}")).await;
-            crate::cmd::write_device_dns(base_dir, net, &mac, &label, "").await;
-
-            // ntfy
-            if !conf.notify_url.is_empty() {
-                let body = format!("Type: Internet access approved\n\nDevice:\nIP: {ip}\nMAC: {mac}\nHostname: {}\n\nBy: {remote_ip}", if host.is_empty() { "unknown" } else { host });
-                crate::cmd::ntfy(&conf.notify_url, &format!("Access approved — {net}"), "default", "white_check_mark", &body).await;
-            }
-
-            crate::cmd::append_join_history(base_dir, net, "approved", &mac, &ip4, if is_ipv6 { ip } else { "" },
-                host, &remote_ip, &remote_ip, "", "").await;
 
             Json(ApiResult { ok: true, error: None, redirect })
         }
@@ -313,7 +426,7 @@ pub async fn post(
 
             let ip4 = if is_ipv6 { String::new() } else { ip.to_string() };
             crate::cmd::append_join_history(base_dir, net, "denied", &mac, &ip4, if is_ipv6 { ip } else { "" },
-                host, &remote_ip, &remote_ip, "", "").await;
+                host, &remote_ip, &remote_ip, "", &actor_mac).await;
 
             Json(ApiResult { ok: true, error: None, redirect })
         }
@@ -322,11 +435,118 @@ pub async fn post(
     }
 }
 
+/// The full state transition for approving one device: nft sets, the
+/// approved/pending/denied files, device-control IP tracking, the label,
+/// the ntfy push, and the join-history entry. Shared by the single-device
+/// `"approve"` action and `"bulk_approve_labeled"`.
+#[allow(clippy::too_many_arguments)]
+async fn approve_device(
+    base_dir: &std::path::Path,
+    conf: &crate::data::files::NetworkConf,
+    net: &str,
+    mac: &str,
+    ip: &str,
+    host: &str,
+    label: &str,
+    remote_ip: &str,
+    actor_mac: &str,
+) {
+    let is_ipv6 = ip.contains(':');
+    let pending_set = if is_ipv6 { format!("{net}_join_pending6") } else { format!("{net}_join_pending") };
+
+    // Update approved file
+    let approved_path = base_dir.join(format!("{net}-join-approved"));
+    let _ = files::file_remove_line(&approved_path, mac).await;
+    let _ = files::file_append(&approved_path, mac).await;
+
+    // Remove from pending and denied
+    let _ = files::file_remove_space_prefix(&base_dir.join(format!("{net}-join-pending")), mac).await;
+    let _ = files::file_remove_line(&base_dir.join(format!("{net}-join-denied")), mac).await;
+
+    // NFT: remove from pending set, add to approved
+    crate::cmd::nft_del_element(&pending_set, ip).await;
+    let approved_set = if is_ipv6 {
+        format!("{net}_join_approved_ips6")
+    } else {
+        format!("{net}_join_approved_ips")
+    };
+    crate::cmd::nft_add_element(&approved_set, ip, "").await;
+
+    // Save approved IP (space-separated: mac ip)
+    let ips_file = base_dir.join(format!("{net}-join-approved-ips"));
+    let ip4 = if is_ipv6 { String::new() } else { ip.to_string() };
+    let stored_ip = if is_ipv6 { "" } else { ip };
+    let _ = files::file_remove_space_prefix(&ips_file, mac).await;
+    let _ = files::file_append(&ips_file, &format!("{mac} {stored_ip}")).await;
+
+    // Device control state
+    if conf.device_control {
+        let ip_store = if is_ipv6 {
+            base_dir.join(format!("{net}-device-ip6s"))
+        } else {
+            base_dir.join(format!("{net}-device-ips"))
+        };
+        let _ = files::file_upsert_by_mac(&ip_store, mac, &format!("{mac}\t{ip}")).await;
+        crate::cmd::regen_inspect(net).await;
+    }
+
+    // Save label
+    let lbl_path = base_dir.join(format!("{net}-device-labels"));
+    let _ = files::file_upsert_by_mac(&lbl_path, mac, &format!("{mac}\t{label}")).await;
+    crate::cmd::write_device_dns(base_dir, net, mac, label, "").await;
+
+    // ntfy
+    if !conf.notify_url.is_empty() {
+        let body = format!("Type: Internet access approved\n\nDevice:\nIP: {ip}\nMAC: {mac}\nHostname: {}\n\nBy: {remote_ip}", if host.is_empty() { "unknown" } else { host });
+        crate::cmd::ntfy(&conf.notify_url, &format!("Access approved — {net}"), "default", "white_check_mark", &body).await;
+    }
+
+    crate::cmd::append_join_history(base_dir, net, "approved", mac, &ip4, if is_ipv6 { ip } else { "" },
+        host, remote_ip, remote_ip, "", actor_mac).await;
+}
+
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// One "approve as this suggested identity" button — used for both the
+/// single-candidate (`Confident`) and multi-candidate (`Ambiguous`) cases,
+/// so there can be more than one on the page; JS binds all of them by
+/// class (`.suggestion-form`), not by a single element id.
+fn suggestion_button_html(qs: &str, fp_hidden_fields: &str, id: &str, label: &str, verb: &str) -> String {
+    let label_esc = html_escape(label);
+    let id_esc = html_escape(id);
+    format!(
+        r#"<form class="suggestion-form" method="POST" action="/cgi-bin/approve-join?{qs}">
+    <input type="hidden" name="action" value="approve">
+    <input type="hidden" name="redirect" value="/cgi-bin/status">
+    <input type="hidden" name="label" value="{label_esc}">
+    <input type="hidden" name="identity_id" value="{id_esc}">
+    {fp_hidden_fields}
+    <button class="btn-ok" type="submit">{verb} "{label_esc}"</button>
+  </form>"#
+    )
+}
+
+/// Renders the "this MAC was seen before" hint on the join prompt from its
+/// most recent past decision, if any. Denied/deleted get a warning
+/// treatment — a repeat appearance of a MAC you already turned away is the
+/// single most decision-relevant signal this page can show.
+fn prior_note_html(prior: Option<&(String, String)>) -> String {
+    match prior {
+        Some((action, when)) if action == "denied" || action == "deleted" => format!(
+            r#"<div class="note warn">⚠ You previously <strong>{action}</strong> this exact device ({}).</div>"#,
+            html_escape(when)
+        ),
+        Some((action, when)) => format!(
+            r#"<div class="note">This device was previously <strong>{action}</strong> ({}).</div>"#,
+            html_escape(when)
+        ),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +588,11 @@ mod tests {
     }
 
     #[test]
+    fn is_private_origin_allows_ipv4_loopback() {
+        assert!(is_private_origin("http://127.0.0.1:8080"));
+    }
+
+    #[test]
     fn is_private_origin_rejects_non_lan() {
         assert!(!is_private_origin("http://example.com"));
     }
@@ -386,22 +611,30 @@ mod tests {
     }
 
     #[test]
-    fn safe_redirect_accepts_cgi_bin_path() {
-        assert_eq!(safe_redirect(Some("/cgi-bin/network?net=guest")), Some("/cgi-bin/network?net=guest".to_string()));
+    fn prior_note_html_empty_when_no_prior_decision() {
+        assert_eq!(prior_note_html(None), "");
     }
 
     #[test]
-    fn safe_redirect_rejects_absolute_url() {
-        assert_eq!(safe_redirect(Some("http://evil.example.com")), None);
+    fn prior_note_html_warns_on_prior_denial() {
+        let prior = ("denied".to_string(), "26 Jul 23:32".to_string());
+        let html = prior_note_html(Some(&prior));
+        assert!(html.contains("note warn"));
+        assert!(html.contains("denied"));
+        assert!(html.contains("26 Jul 23:32"));
     }
 
     #[test]
-    fn safe_redirect_rejects_non_cgi_bin_path() {
-        assert_eq!(safe_redirect(Some("/etc/passwd")), None);
+    fn prior_note_html_warns_on_prior_deletion() {
+        let prior = ("deleted".to_string(), "1 Jan 00:00".to_string());
+        assert!(prior_note_html(Some(&prior)).contains("note warn"));
     }
 
     #[test]
-    fn safe_redirect_none_when_absent() {
-        assert_eq!(safe_redirect(None), None);
+    fn prior_note_html_neutral_on_prior_approval() {
+        let prior = ("approved".to_string(), "1 Jan 00:00".to_string());
+        let html = prior_note_html(Some(&prior));
+        assert!(!html.contains("warn"));
+        assert!(html.contains("approved"));
     }
 }
