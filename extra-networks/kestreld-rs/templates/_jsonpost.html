@@ -1,0 +1,20 @@
+(function(){
+  function jsonPost(form) {
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      var data = new URLSearchParams(new FormData(form));
+      fetch(form.action, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:data.toString()})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if (j.ok) {
+            if (j.redirect) location.href = j.redirect;
+            else location.reload();
+          } else {
+            alert(j.error || 'Error');
+          }
+        })
+        .catch(function(){ form.submit(); });
+    });
+  }
+  document.querySelectorAll('.label-form,.approve-form,.deny-form,.grant-form,.rotate-form,.bulk-approve-form').forEach(function(f){ jsonPost(f); });
+})();

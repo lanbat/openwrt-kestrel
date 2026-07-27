@@ -151,6 +151,13 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 {% endif %}
 
 {% if !net.devices.is_empty() %}
+{% if net.has_labeled_pending %}
+<form class="bulk-approve-form" method="POST" action="/cgi-bin/approve-join" style="margin:.4rem 0 .6rem">
+  <input type="hidden" name="net" value="{{ net.iface }}">
+  <input type="hidden" name="action" value="bulk_approve_labeled">
+  <button class="btn-ok" type="submit" style="width:auto;padding:.3rem .8rem;border-radius:6px">Approve all labeled pending devices</button>
+</form>
+{% endif %}
 <table>
   <tr>
     <th style="width:2rem;text-align:center;padding:.45rem .15rem"></th>
@@ -170,6 +177,8 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
     <td>
       {% if dev.has_label %}
         {{ dev.label }}
+      {% else if show_join_col && net.join_approval && dev.show_approve %}
+        <span class="dim">—</span>
       {% else %}
         <form class="label-form" method="POST" action="/cgi-bin/approve-join" style="margin:0">
           <input type="hidden" name="net" value="{{ net.iface }}">
@@ -225,15 +234,14 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 {% if !net.history.is_empty() %}
 <h2 style="margin-top:1.25rem">Join history — {{ net.iface }}</h2>
 <table>
-  <tr><th>When</th><th>Decision</th><th>Label</th><th>IPv4</th><th>IPv6</th><th>MAC</th><th>By</th></tr>
+  <tr><th>When</th><th>Decision</th><th>Device</th><th>IPv4</th><th>IPv6</th><th>By (MAC)</th></tr>
   {% for h in net.history %}
   <tr>
     <td class="dim">{{ h.when }}</td>
     <td><span class="badge badge-{{ h.css }}">{{ h.action }}</span></td>
-    <td>{{ h.mac }}</td>
+    <td><a href="/cgi-bin/device?net={{ net.iface }}&amp;mac={{ h.raw_mac }}">{{ h.mac }}</a></td>
     <td>{{ h.ip4 }}</td>
     <td>{{ h.ip6 }}</td>
-    <td class="dim">{{ h.mac }}</td>
     <td class="dim">{% if !h.by_mac.is_empty() %}<a href="/cgi-bin/device?net=lan&amp;mac={{ h.by_mac }}">{{ h.by }}</a>{% else %}{{ h.by }}{% endif %}</td>
   </tr>
   {% endfor %}
@@ -334,25 +342,6 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
     el.parentNode.replaceChild(cv,el);
   }
 })();
-(function(){
-  function jsonPost(form) {
-    form.addEventListener('submit', function(e) {
-      e.preventDefault();
-      var data = new URLSearchParams(new FormData(form));
-      fetch(form.action, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:data.toString()})
-        .then(function(r){ return r.json(); })
-        .then(function(j){
-          if (j.ok) {
-            if (j.redirect) location.href = j.redirect;
-            else location.reload();
-          } else {
-            alert(j.error || 'Error');
-          }
-        })
-        .catch(function(){ form.submit(); });
-    });
-  }
-  document.querySelectorAll('.label-form,.approve-form,.deny-form,.grant-form,.rotate-form').forEach(function(f){ jsonPost(f); });
-})();
+{% include "_jsonpost.html" %}
 </script>
 </body></html>

@@ -7,6 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::routes::safe_redirect;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -63,18 +64,10 @@ fn is_private_origin(origin: &str) -> bool {
     if origin.is_empty() { return true; }
     let prefixes = [
         "http://192.168.", "http://10.", "http://172.1", "http://172.2",
-        "http://172.30.", "http://172.31.", "http://[fd", "http://[fc",
+        "http://172.30.", "http://172.31.", "http://127.", "http://[fd", "http://[fc",
         "http://[fe80", "http://[::1]",
     ];
     prefixes.iter().any(|p| origin.starts_with(p))
-}
-
-/// Only honor same-origin, same-app redirect targets requested by the caller.
-fn safe_redirect(redirect: Option<&str>) -> Option<String> {
-    redirect
-        .map(str::trim)
-        .filter(|s| s.starts_with("/cgi-bin/"))
-        .map(str::to_string)
 }
 
 pub async fn get(
@@ -299,22 +292,12 @@ mod tests {
     }
 
     #[test]
+    fn is_private_origin_allows_ipv4_loopback() {
+        assert!(is_private_origin("http://127.0.0.1:8080"));
+    }
+
+    #[test]
     fn is_private_origin_rejects_non_lan() {
         assert!(!is_private_origin("http://attacker.example.com"));
-    }
-
-    #[test]
-    fn safe_redirect_accepts_cgi_bin_path() {
-        assert_eq!(safe_redirect(Some("/cgi-bin/status")), Some("/cgi-bin/status".to_string()));
-    }
-
-    #[test]
-    fn safe_redirect_rejects_absolute_url() {
-        assert_eq!(safe_redirect(Some("http://evil.example.com")), None);
-    }
-
-    #[test]
-    fn safe_redirect_none_when_absent() {
-        assert_eq!(safe_redirect(None), None);
     }
 }

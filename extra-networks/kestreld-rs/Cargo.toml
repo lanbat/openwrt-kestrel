@@ -4,9 +4,23 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
+[lib]
+name = "kestreld"
+path = "src/lib.rs"
+
 [[bin]]
 name = "kestreld"
 path = "src/main.rs"
+
+[[test]]
+name = "join_approval"
+path = "tests/join_approval.rs"
+harness = false
+
+[[test]]
+name = "browser_workflow"
+path = "tests/browser_workflow.rs"
+harness = false
 
 [dependencies]
 axum = "0.8"
@@ -17,9 +31,13 @@ serde_urlencoded = "0.7"
 serde_json = "1"
 anyhow = "1"
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
+socket2 = "0.6.5"
 
 [dev-dependencies]
 tempfile = "3"
+cucumber = "0.23"
+fantoccini = { version = "0.22", default-features = false }
+hyper-util = { version = "0.1", features = ["client", "http1", "client-legacy", "tokio"] }
 
 [profile.release]
 strip = true

@@ -78,6 +78,9 @@ pub struct NetworkTmpl {
     pub wifi_key: String,
     pub rotate_password: bool,
     pub join_approval: bool,
+    /// At least one pending device already has a saved label, so the
+    /// "approve all labeled" bulk action has something to do.
+    pub has_labeled_pending: bool,
     pub devices: Vec<DeviceRow>,
     pub history: Vec<HistoryRow>,
     pub pending_access: Vec<PendingRow>,
@@ -112,6 +115,7 @@ pub struct HistoryRow {
     pub action: String,
     pub css: String,
     pub mac: String,
+    pub raw_mac: String,
     pub ip4: String,
     pub ip6: String,
     pub by: String,
@@ -321,6 +325,7 @@ pub async fn build_one_network(
     // Device rows
     let devices = build_device_rows(snap, conf, show_join_col);
     let device_count = devices.len();
+    let has_labeled_pending = devices.iter().any(|d| d.has_label && d.join_state == "Pending");
 
     // Join history
     let history = build_history_rows(snap, conf);
@@ -360,6 +365,7 @@ pub async fn build_one_network(
         wifi_key,
         rotate_password: conf.rotate_password,
         join_approval: conf.join_approval,
+        has_labeled_pending,
         devices,
         history,
         pending_access,
@@ -556,7 +562,6 @@ fn build_history_rows(snap: &Snapshot, conf: &crate::data::files::NetworkConf) -
         let ip4   = get(4);
         let ip6   = get(5);
         let host  = get(6);
-        let actor = get(7);
         let by_mac = get(10);
 
         let (css, action_lbl) = action_map.iter()
@@ -565,13 +570,16 @@ fn build_history_rows(snap: &Snapshot, conf: &crate::data::files::NetworkConf) -
             .unwrap_or(("untracked", act.as_str()));
 
         let display_label = if !host.is_empty() && host != "unknown" { host } else { mac.clone() };
-        let by = if !by_mac.is_empty() { by_mac.clone() } else if !actor.is_empty() { actor } else { "unknown".to_string() };
+        // "By" is a MAC-or-nothing column — an actor IP with no resolvable
+        // MAC isn't shown, to avoid mixing IPs and MACs in the same column.
+        let by = if !by_mac.is_empty() { by_mac.clone() } else { "unknown".to_string() };
 
         HistoryRow {
             when,
             action: action_lbl.to_string(),
             css: css.to_string(),
             mac: display_label,
+            raw_mac: mac,
             ip4: if ip4.is_empty() { "—".to_string() } else { ip4 },
             ip6: if ip6.is_empty() { "—".to_string() } else { ip6 },
             by,
