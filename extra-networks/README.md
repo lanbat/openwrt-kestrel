@@ -118,6 +118,7 @@ Config files live in `configs/` and are gitignored — they never leave the rout
 | `NOTIFY_JOIN` | `no` | Send a push notification each time a device gets a DHCP lease |
 | `REJOIN_NOTIFY_AFTER` | — | Send a notification when a known device reconnects after being absent for at least this long — e.g. `7d`, `12h`; blank to disable |
 | `JOIN_APPROVAL` | `no` | Block internet for new devices until you approve them via push notification (requires `NOTIFY_URL`) |
+| `FINGERPRINT_SUGGEST` | `yes` | When a device with a randomized (privacy) MAC joins, suggest a possible match against already-labeled devices on the join-approval prompt; see [Recognizing a randomized-MAC device again after it rotates](#oui-database-manufacturer-lookup). Never applied automatically, and never affects whether approval itself works — set `no` to stop the guessing entirely |
 | `JOIN_HISTORY_RETENTION` | `90d` | Keep join approval, denial, and revocation history this long; plain numbers mean days |
 | `DEVICE_CONTROL` | `no` | Per-device outbound control — each approved device must explicitly allow every destination domain or IP it tries to reach; requires `JOIN_APPROVAL=yes`; see [Per-device control](#per-device-control) |
 | `DEFAULT_DURATION` | `24h` | Pre-selected duration in the LAN access approval form (`1h` `6h` `12h` `24h` `2d` `7d` `30d`) |
@@ -278,17 +279,24 @@ Use **Approve domain** to allow a hostname: the router adds a dnsmasq `nftset=` 
 
 Approved rules are written to `/etc/extra-networks/<iface>-device-rules` and survive reboots. Domains are written to `/etc/dnsmasq.d/<iface>-device-<mac>.conf`.
 
+**Routing an approved domain through a VPN instead of WAN**
+
+If [`split-routing`](../split-routing/docs/mullvad-routing.md) is configured, the **Approve domain** form includes a **Route** dropdown listing "WAN" plus each configured VPN tier (`/etc/split-routing/vpn-<name>.conf`) — the same tiers shown in the dashboard's VPN status panel. Choosing a tier routes just that domain's traffic for that one device through the VPN rather than the default gateway; everything else the device does still goes over WAN. The Rules table shows each domain's chosen route, and it can be changed later by re-approving the same domain with a different route.
+
+This only applies to domain rules (`Approve domain`), not raw IP/port allow rules from the pending-connections table — those always go over WAN.
+
 **Device page**
 
 Every device with a label has a dedicated management page — not just DEVICE_CONTROL networks. Click any MAC address in the status dashboard to open it.
 
 | Section | Available when | What it shows |
 |---|---|---|
-| Device | Always | Label, manufacturer (from OUI database; shows "Randomized MAC" for privacy MACs), MAC, tracked IPv4/IPv6, network, DNS name, join approval state and actions |
+| Device | Always | Label, manufacturer (from OUI database; shows "Randomized MAC" for privacy MACs), MAC, tracked IPv4/IPv6, network, DNS name, join approval state and actions, and a link to the [known identity](#oui-database-manufacturer-lookup) page if this MAC has been fingerprint-matched |
 | Connection rate limit | Always | New-connection cap per minute (default 120); configurable per device |
-| Approve domain | `DEVICE_CONTROL=yes` | Add a hostname allow rule |
-| Pending connections | `DEVICE_CONTROL=yes` | Blocked outbound attempts — Allow / Deny each |
-| Rules | `DEVICE_CONTROL=yes` | Active domain and IP allow rules — revoke individually |
+| Approve domain | `DEVICE_CONTROL=yes` | Add a hostname allow rule, optionally routed through a configured VPN tier instead of WAN — see [Per-device control](#per-device-control) |
+| Pending connections | `DEVICE_CONTROL=yes` | Blocked outbound attempts — Allow / Deny each. Destinations matching a banIP threat-intel feed (spamhaus, feodo, dshield, turris, urlhaus, cinsscore, ...) are labeled with which feed flagged them |
+| Rules | `DEVICE_CONTROL=yes` | Active domain and IP allow rules — revoke individually; domain rules show their route (WAN or VPN tier name) |
+| DNS query history | Always | Last 50 DNS queries made by this device (parsed from dnsmasq's query log), each flagged with an "⚠ adblock" badge if the domain is on the adblock blocklist |
 | History | Always | Last 20 join decisions (approve/deny/revoke) for this device, with timestamp, IP, and approver |
 | Approval activity | Always | Join decisions where this device was the approver on another device |
 | Danger zone | Always | Remove device — deletes label, rules, approval, and DNS entry; takes effect immediately |
@@ -595,7 +603,11 @@ sh /etc/extra-networks/oui-update.sh
 - WiFi capability flags (HT/VHT/HE, WMM, MFP) via `hostapd`'s own `ubus` interface
 - an mDNS device name/model, queried directly (bypassing `avahi-browse`, which needs D-Bus support this install doesn't have — see the "why not avahi-browse" note in `kestreld-rs/src/data/mdns.rs`)
 
-If it finds a plausible match it's shown as a suggestion with a one-tap "yes, same device" button — **it is never applied automatically**. Worth understanding the limits before trusting it:
+If it finds a plausible match it's shown as a suggestion with a one-tap "yes, same device" button — **it is never applied automatically**. Set `FINGERPRINT_SUGGEST=no` on a network to turn the suggestion off entirely (approval itself is unaffected either way).
+
+Once a device has been matched at least once, its device page shows a **Known identity** link to `/cgi-bin/identity?net=<iface>&id=<id>` — a detail page for that identity (independent of any single MAC) showing every MAC it has ever answered to, first/last seen times, the raw DHCP/WiFi/mDNS signals last observed for it, its label history (so a rename never loses the trail), and any *other* registered identity that scores as a plausible look-alike, for spotting when the matcher might be confusing two similar devices.
+
+Worth understanding the limits before trusting it:
 
 - **Accuracy depends on how many similar devices you own.** None of these signals uniquely identify a physical unit — they identify a device *class* (make/model/OS version). One iPhone in the house and a persistent mDNS name → a genuinely reliable suggestion. Two identical phones in the house → the system often can't tell them apart, and may even suggest the wrong one with a plausible-looking score. When two candidates score too close to call, the prompt shows both rather than confidently guessing one.
 - **mDNS does not cross a VLAN/subnet boundary** (it's link-local multicast, by design — RFC 6762). The query is bound to the joining device's own bridge for exactly this reason. If a device sits behind something that relays DHCP from a different L2 segment (e.g. a smart VLAN switch), the DHCP signal should still work — the vendor forwards the original packet fields untouched — but mDNS won't reach it unless that segment has its own reflector.

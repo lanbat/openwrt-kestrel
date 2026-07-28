@@ -2,6 +2,27 @@
 
 Two cooperating toolkits for OpenWrt routers, delivered as a single native package. One segments your WiFi into isolated trust zones with push notifications, approval workflows, and live monitoring. The other selectively routes traffic through a WireGuard VPN by domain or category, without tunneling everything.
 
+## Features
+
+**Isolated WiFi networks** ([`extra-networks`](extra-networks/README.md))
+- One config file per network (guest, IoT/untrusted, ...) — `sh install.sh configs/guest.conf` deploys a complete isolated zone: own subnet, firewall zone, DNS policy, rate limit
+- **Join approval** — block new devices from the internet until you tap Approve on a push notification; approved MACs are silent forever after
+- **Device fingerprinting** — recognizes a device again after its privacy MAC rotates, using DHCP/WiFi/mDNS signals; always a human-confirmed suggestion, never applied automatically ([details](extra-networks/README.md#oui-database-manufacturer-lookup))
+- **Per-device outbound control** — each approved device must explicitly allow every domain/IP it tries to reach; an approved domain can be routed through a configured VPN tier instead of WAN, per rule ([details](extra-networks/README.md#per-device-control))
+- **LAN ↔ isolated access approval**, in both directions, with auto-expiring temporary rules
+- MAC allowlisting, access-hour scheduling, bandwidth alerts, temporary port forwarding, password rotation with live QR regeneration
+- Live status dashboard — connected devices and traffic, WireGuard server peers, VPN health, pending approvals, port forwards
+- Push notifications (ntfy.sh) for nearly every state change, plus a daily digest; DNS query history per device flagged against the adblock list; pending connections flagged against banIP threat-intel feeds
+- WPA3/WPA2, dual-band, IPv6, VLAN trunking, WiFi VAP-recovery workaround for a MediaTek Filogic driver bug
+
+**Domain-based VPN routing** ([`split-routing`](split-routing/docs/mullvad-routing.md))
+- Route specific domains or categories through a WireGuard VPN without moving the default gateway
+- Multiple independent VPN tiers, each with its own categories, local lists, and remote blocklist sources
+- Per-device, per-rule routing initiated from the `extra-networks` device page (see above) — no editing tier config required
+
+**Blocklist resolution** ([`nft-resolve`](split-routing/nft-resolve-rs/))
+- Resolves Adblock, dnsmasq, hosts, RPZ, Unbound, ipset, clash, and plain-domain blocklist formats into nftables sets, with parallel DNS resolution
+
 ## Components
 
 ### kestreld
@@ -11,6 +32,7 @@ A CGI binary (`/usr/bin/kestreld`) served directly by uhttpd via symlinks at `/w
 - `GET /cgi-bin/status` — live dashboard: WiFi clients, nftables traffic counters, WireGuard peers, DHCP leases, neighbor table
 - `GET /cgi-bin/network` — single-network detail page
 - `GET|POST /cgi-bin/device` — per-device management page and actions (label, rate limit, approve/revoke rules, delete)
+- `GET /cgi-bin/identity` — device-identity detail page: fingerprint history and label history for a device recognized across MAC rotations
 - `GET /cgi-bin/qr` — WiFi QR code (SVG)
 - `GET|POST /cgi-bin/approve-access` — LAN access approval form and grant action
 - `GET|POST /cgi-bin/approve-join` — join approval form and approve/deny/label actions
