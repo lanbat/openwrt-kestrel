@@ -23,44 +23,61 @@ jobs:
           - rust_target: aarch64-unknown-linux-musl
             arch: aarch64
             openwrt_arch: aarch64_cortex-a53
+            build_std: false
 
           # x86_64 — PC Engines APU, Protectli, VM builds
           - rust_target: x86_64-unknown-linux-musl
             arch: x86_64
             openwrt_arch: x86_64
+            build_std: false
 
           # ARMv7 hard-float — covers arm_cortex-a7, arm_cortex-a9, arm_cortex-a15
           - rust_target: armv7-unknown-linux-musleabihf
             arch: arm_cortex-a7
             openwrt_arch: arm_cortex-a7_neon-vfpv4
+            build_std: false
 
           # ARMv6 soft-float — older devices (arm_arm1176jzf-s_vfp)
           - rust_target: arm-unknown-linux-musleabi
             arch: arm_arm1176jzf-s
             openwrt_arch: arm_arm1176jzf-s_vfp
+            build_std: false
 
-          # MIPS little-endian — TP-Link, D-Link, many budget routers
+          # MIPS little-endian — TP-Link, D-Link, many budget routers.
+          # Stable Rust ships no prebuilt std for this target (demoted to
+          # tier 3: rust-lang/rust#115238) — rebuild std from source on
+          # nightly instead via `-Z build-std` (see GNUmakefile).
           - rust_target: mipsel-unknown-linux-musl
             arch: mipsel
             openwrt_arch: mipsel_24kc
+            build_std: true
 
-          # MIPS big-endian — some Atheros-based routers
+          # MIPS big-endian — some Atheros-based routers. Same tier-3 gap
+          # as mipsel above.
           - rust_target: mips-unknown-linux-musl
             arch: mips
             openwrt_arch: mips_24kc
+            build_std: true
 
           # RISC-V 64-bit — sifiveu, starfive (growing SBC-class hardware)
           - rust_target: riscv64gc-unknown-linux-musl
             arch: riscv64
             openwrt_arch: riscv64_generic
+            build_std: false
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      # mips/mipsel use nightly + rust-src to rebuild std from source
+      # (`-Z build-std`, wired through GNUmakefile's BUILD_STD=yes) since
+      # stable Rust no longer ships a prebuilt std for either target.
+      # Everything else keeps using the prebuilt std on stable.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
         with:
-          targets: ${{ matrix.rust_target }}
+          toolchain: ${{ matrix.build_std && 'nightly' || 'stable' }}
+          targets: ${{ matrix.build_std && '' || matrix.rust_target }}
+          components: ${{ matrix.build_std && 'rust-src' || '' }}
 
       # cross-rs's last crates.io release (0.2.5, Feb 2023) doesn't
       # recognize riscv64gc-unknown-linux-musl as a valid target even with
@@ -78,27 +95,21 @@ jobs:
           make package \
             CROSS_TARGET=${{ matrix.rust_target }} \
             ARCH=${{ matrix.arch }} \
-            OPENWRT_ARCH=${{ matrix.openwrt_arch }}
+            OPENWRT_ARCH=${{ matrix.openwrt_arch }} \
+            BUILD_STD=${{ matrix.build_std && 'yes' || 'no' }}
 
-      # A binary can cross-compile clean and still crash immediately on
-      # real hardware if the target's baseline ISA assumption is wrong
-      # (SIGILL, wrong dynamic linker path, etc). `cross`'s images already
-      # bundle qemu-user emulation — `cross run` uses it automatically, no
-      # extra setup needed. Exercises both binaries' actual startup path:
-      # `--rotate-apply` with a nonexistent pwfile takes kestreld through
-      # real tokio runtime/timer setup and a clean exit without touching
-      # any real router state; `nft-resolve --help` is inherently
-      # side-effect-free. Skipped for x86_64, which runs natively on the
-      # CI runner already.
+      # Exercises both binaries' actual startup path under qemu-user
+      # emulation (bundled in cross's images): `--rotate-apply` with a
+      # nonexistent pwfile takes kestreld through real tokio runtime/timer
+      # setup and a clean exit without touching any real router state;
+      # `nft-resolve --help` is inherently side-effect-free. Skipped for
+      # x86_64, which runs natively on the CI runner already.
       - name: Smoke test under QEMU emulation
         if: matrix.arch != 'x86_64'
         run: |
-          cross run --target ${{ matrix.rust_target }} --release \
-            --manifest-path extra-networks/kestreld-rs/Cargo.toml \
-            -- --rotate-apply __smoketest__ /tmp/__smoketest_missing_pwfile__
-          cross run --target ${{ matrix.rust_target }} --release \
-            --manifest-path split-routing/nft-resolve-rs/Cargo.toml \
-            -- --help
+          make smoke-test \
+            CROSS_TARGET=${{ matrix.rust_target }} \
+            BUILD_STD=${{ matrix.build_std && 'yes' || 'no' }}
 
       - name: Upload packages
         uses: actions/upload-artifact@v4

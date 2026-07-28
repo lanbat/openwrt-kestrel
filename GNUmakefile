@@ -19,11 +19,27 @@
 #   ROUTER=192.168.1.1          target router IP for `make deploy`
 #   ARCH=aarch64                apk architecture  (check: apk info --print-arch)
 #   OPENWRT_ARCH=aarch64_cortex-a53  ipk architecture  (check: opkg print-architecture)
+#   BUILD_STD=yes               rebuild std from source instead of using a
+#                               prebuilt one — required for mips/mipsel-
+#                               unknown-linux-musl, which stable Rust no
+#                               longer ships prebuilt std for (demoted to
+#                               tier 3: https://github.com/rust-lang/rust/pull/115238).
+#                               Needs a nightly toolchain with the rust-src
+#                               component installed.
 
 CROSS_TARGET ?= aarch64-unknown-linux-musl
 ARCH         ?= aarch64
 OPENWRT_ARCH ?= aarch64_cortex-a53
 ROUTER       ?=
+BUILD_STD    ?= no
+
+ifeq ($(BUILD_STD),yes)
+CROSS_BUILD := cross +nightly build -Z build-std=std,panic_abort --release --target $(CROSS_TARGET)
+CROSS_RUN   := cross +nightly run -Z build-std=std,panic_abort --release --target $(CROSS_TARGET)
+else
+CROSS_BUILD := cross build --release --target $(CROSS_TARGET)
+CROSS_RUN   := cross run --release --target $(CROSS_TARGET)
+endif
 
 PKG_NAME    := kestrel
 PKG_VERSION := $(shell cargo metadata --no-deps --format-version 1 \
@@ -47,7 +63,7 @@ APK_OUT     := $(OUTDIR)/$(PKG_NAME)-$(PKG_VER_FULL).$(ARCH).apk
 IPK_OUT     := $(OUTDIR)/$(PKG_NAME)_$(PKG_VERSION)-1_$(OPENWRT_ARCH).ipk
 SRC_TARBALL := $(OUTDIR)/$(PKG_NAME)-$(PKG_VERSION)-aarch64-musl.tar.gz
 
-.PHONY: all build package release deploy clean
+.PHONY: all build package release deploy clean smoke-test
 
 all: package
 
@@ -56,12 +72,10 @@ all: package
 build: $(UI_BIN) $(NFT_BIN)
 
 $(UI_BIN):
-	cross build --release --target $(CROSS_TARGET) \
-	  --manifest-path extra-networks/kestreld-rs/Cargo.toml
+	$(CROSS_BUILD) --manifest-path extra-networks/kestreld-rs/Cargo.toml
 
 $(NFT_BIN):
-	cross build --release --target $(CROSS_TARGET) \
-	  --manifest-path split-routing/nft-resolve-rs/Cargo.toml
+	$(CROSS_BUILD) --manifest-path split-routing/nft-resolve-rs/Cargo.toml
 
 # ── shared staging ────────────────────────────────────────────────────────────
 
@@ -152,6 +166,19 @@ deploy: package
 	  scp $(IPK_OUT) root@$(ROUTER):/tmp/; \
 	  ssh root@$(ROUTER) "opkg install --force-reinstall /tmp/$(notdir $(IPK_OUT))"; \
 	fi
+
+# ── smoke test ────────────────────────────────────────────────────────────────
+# A binary can cross-compile clean and still crash immediately on real
+# hardware if the target's baseline ISA assumption is wrong (SIGILL, wrong
+# dynamic linker path, etc). cross's images bundle qemu-user emulation, so
+# `cross run` exercises the real startup path under emulation. Used by CI;
+# skipped there for x86_64, which runs natively on the runner already.
+
+smoke-test: $(UI_BIN) $(NFT_BIN)
+	$(CROSS_RUN) --manifest-path extra-networks/kestreld-rs/Cargo.toml \
+	  -- --rotate-apply __smoketest__ /tmp/__smoketest_missing_pwfile__
+	$(CROSS_RUN) --manifest-path split-routing/nft-resolve-rs/Cargo.toml \
+	  -- --help
 
 # ── clean ─────────────────────────────────────────────────────────────────────
 
