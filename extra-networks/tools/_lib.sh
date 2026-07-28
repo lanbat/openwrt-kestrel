@@ -1,11 +1,11 @@
 #!/bin/sh
-# Shared helpers for extra-networks tools. Copied to /etc/extra-networks/_lib.sh by install.sh.
-# Source with: . /etc/extra-networks/_lib.sh
+# Shared helpers for extra-networks tools. Copied to /etc/kestrel/networks/_lib.sh by install.sh.
+# Source with: . /etc/kestrel/networks/_lib.sh
 
 # Load NOTIFY_URL (and other fields) from a network's notify.conf.
 _load_notify() {
     unset NOTIFY_URL DEVICE_CONTROL
-    _ln_c="/etc/extra-networks/${1}-notify.conf"
+    _ln_c="/etc/kestrel/networks/${1}-notify.conf"
     [ -f "$_ln_c" ] && . "$_ln_c"
     true
 }
@@ -93,7 +93,7 @@ _slugify() {
 
 # Resolve a device label for a MAC from {iface}-device-labels; falls back to MAC.
 _label_for_mac() {
-    _lf="/etc/extra-networks/${2}-device-labels"
+    _lf="/etc/kestrel/networks/${2}-device-labels"
     [ -f "$_lf" ] || { printf '%s' "$1"; return; }
     _l=$(awk -v m="$1" 'tolower($1)==tolower(m){sub(/^[^\t]+\t/,""); print; exit}' "$_lf")
     printf '%s' "${_l:-$1}"
@@ -101,7 +101,7 @@ _label_for_mac() {
 
 # Return the static IP for a MAC from {iface}-device-ips, or empty.
 _ip_for_mac() {
-    _if="/etc/extra-networks/${2}-device-ips"
+    _if="/etc/kestrel/networks/${2}-device-ips"
     [ -f "$_if" ] || return 0
     awk -v m="$1" 'tolower($1)==tolower(m){print $2; exit}' "$_if"
 }
@@ -120,7 +120,7 @@ _duration_secs() {
 
 # Keep join decision history bounded by the configured retention window.
 _join_history_prune() {
-    _hist="/etc/extra-networks/${1}-join-history"
+    _hist="/etc/kestrel/networks/${1}-join-history"
     [ -f "$_hist" ] || return 0
     _secs=$(_duration_secs "${2:-90d}")
     [ "$_secs" -gt 0 ] 2>/dev/null || { : > "$_hist"; return 0; }
@@ -133,7 +133,7 @@ _join_history_prune() {
 # Append a join approval decision:
 # iface action device_mac device_ip4 device_ip6 device_name approver approver_ip4 approver_ip6 approver_mac retention.
 _join_history_add() {
-    _hist="/etc/extra-networks/${1}-join-history"
+    _hist="/etc/kestrel/networks/${1}-join-history"
     _ret="${11:-90d}"
     _join_history_prune "$1" "$_ret"
     _when=$(date '+%d %b %H:%M')

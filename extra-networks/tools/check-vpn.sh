@@ -1,10 +1,10 @@
 #!/bin/sh
 # Push an alert when any VPN tier (split-routing) changes state (up ↔ down).
 # Runs every 5 minutes via cron. Installed by install.sh when NOTIFY_URL is set.
-# Each vpn-*.conf in /etc/split-routing/ is monitored independently.
+# Each vpn-*.conf in /etc/kestrel/split-routing/ is monitored independently.
 
-VPN_BASE=/etc/split-routing
-BASE_DIR=/etc/extra-networks
+VPN_BASE=/etc/kestrel/split-routing
+BASE_DIR=/etc/kestrel/networks
 
 [ -d "$VPN_BASE" ] || exit 0
 

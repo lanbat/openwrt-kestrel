@@ -18,7 +18,7 @@ CONFIG="$1"
 
 WIFI_UCI="${WIFI_UCI:-$IFACE}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-. /etc/extra-networks/_lib.sh
+. /etc/kestrel/networks/_lib.sh
 
 NEW_KEY=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 20)
 
@@ -37,8 +37,8 @@ uci commit wireless
 
 # Keep approved devices that have a user label; clear everything else.
 # Labeled devices are intentional household devices, not one-off guests.
-_approved="/etc/extra-networks/${IFACE}-join-approved"
-_labels="/etc/extra-networks/${IFACE}-device-labels"
+_approved="/etc/kestrel/networks/${IFACE}-join-approved"
+_labels="/etc/kestrel/networks/${IFACE}-device-labels"
 if [ -s "$_approved" ] && [ -s "$_labels" ]; then
     awk 'NR==FNR { labeled[tolower($1)]=1; next } labeled[tolower($1)]' \
         "$_labels" "$_approved" > "${_approved}.tmp" \
@@ -46,7 +46,7 @@ if [ -s "$_approved" ] && [ -s "$_labels" ]; then
 else
     rm -f "$_approved"
 fi
-rm -f "/etc/extra-networks/${IFACE}-join-pending" "/etc/extra-networks/${IFACE}-join-denied"
+rm -f "/etc/kestrel/networks/${IFACE}-join-pending" "/etc/kestrel/networks/${IFACE}-join-denied"
 
 for _hconf in /var/run/hostapd-*.conf; do
     grep -q "^bridge=br-${IFACE}$" "$_hconf" 2>/dev/null || continue

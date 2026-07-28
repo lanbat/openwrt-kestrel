@@ -7,7 +7,7 @@ Run this on the router to see everything at once:
 ```sh
 echo "=== mark chain ===" && nft list chain inet fw4 split_routing_mark
 echo "=== ip rules ===" && ip -4 rule show | grep fwmark && ip -6 rule show | grep fwmark
-echo "=== routing tables ===" && for f in /etc/split-routing/vpn-*.conf; do
+echo "=== routing tables ===" && for f in /etc/kestrel/split-routing/vpn-*.conf; do
   . "$f"; echo "table $ROUTE_TABLE ($VPN_IFACE):"; ip route show table "$ROUTE_TABLE" 2>/dev/null; done
 echo "=== set sizes ===" && for s in $(nft list sets inet fw4 | grep -o 'set [a-z_]*4' | awk '{print $2}'); do
   echo "$s: $(nft list set inet fw4 $s | grep -c expires || true) dynamic / $(nft list set inet fw4 $s | grep -c '\.' || true) interval"
@@ -72,7 +72,7 @@ curl -4 icanhazip.com # returns your home WAN IP (not in any set)
 
 ## dns category reports "No domains — skipping"
 
-The local file for that category (`/etc/split-routing/local-dns-<tier>_<cat>.txt`) is empty or contains only comments, and no `DNS_URLS_<cat>` is set in the `vpn-*.conf`. Add at least one domain to the local file and re-run `update-routing-sets`.
+The local file for that category (`/etc/kestrel/split-routing/local-dns-<tier>_<cat>.txt`) is empty or contains only comments, and no `DNS_URLS_<cat>` is set in the `vpn-*.conf`. Add at least one domain to the local file and re-run `update-routing-sets`.
 
 The `sites` category for each tier is local-only by default — it relies entirely on the corresponding `local-dns-<tier>_sites.txt`.
 

@@ -18,7 +18,7 @@ PURGE=no
 
 [ -z "${IFACE:-}" ] && { echo "ERROR: IFACE not set in config"; exit 1; }
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 
 echo "Removing network: $IFACE"
 

@@ -6,7 +6,7 @@ set -eu
 _iface="${1:-}"
 [ -n "$_iface" ] || { echo "Usage: regen-inspect.sh IFACE_NAME" >&2; exit 1; }
 
-_base=/etc/extra-networks
+_base=/etc/kestrel/networks
 _labels="${_base}/${_iface}-device-labels"
 _ips="${_base}/${_iface}-device-ips"
 _ip6s="${_base}/${_iface}-device-ip6s"
@@ -107,7 +107,7 @@ if [ -f "$_rules" ]; then
         _route=$(printf '%s' "$_line" | cut -f6)
         case "$_mac" in '#'*|'') continue ;; esac
         [ "${_act:-}" = allow ] && [ -z "${_port:-}" ] && [ -n "${_route:-}" ] || continue
-        _vpf="/etc/split-routing/vpn-${_route}.conf"
+        _vpf="/etc/kestrel/split-routing/vpn-${_route}.conf"
         [ -f "$_vpf" ] || continue
         _vpfm=$(awk -F= '/^FWMARK/{gsub(/[" \t]/, "", $2); print $2; exit}' "$_vpf" 2>/dev/null)
         [ -n "$_vpfm" ] || continue

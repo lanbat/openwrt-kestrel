@@ -143,7 +143,7 @@ aa:bb:cc:dd:ee:ff  192.168.2.100  Nest Protect Living Room
 11:22:33:44:55:66  192.168.2.101  Nest Protect Bedroom
 ```
 
-The file lives at `/etc/extra-networks/${IFACE}-allowed-macs`. After editing, apply without restarting:
+The file lives at `/etc/kestrel/networks/${IFACE}-allowed-macs`. After editing, apply without restarting:
 
 ```sh
 ACTION=ifup INTERFACE=untrusted sh /etc/hotplug.d/iface/51-untrusted-macfilter
@@ -220,7 +220,7 @@ Use **join approval** to control who's allowed on a network at all (e.g. vetting
 The two example networks are built for different situations, so the right approval settings differ:
 
 - **`guest`** is open — any device can connect with the WiFi password, there's no MAC allowlist. If you want to know (and approve) every device before it gets online, this is the network where `JOIN_APPROVAL=yes` earns its keep: a friend's phone joins, you get a push, you tap Approve, done. If you're fine with "anyone with the password is trusted enough," leave it off (the default) — `NOTIFY_JOIN=yes` still tells you when someone new shows up, just without blocking them first.
-- **`untrusted`** (IoT) already gates membership a different way: `ALLOWLIST=yes` means a device needs its MAC pre-registered in `/etc/extra-networks/untrusted-allowed-macs` just to get a DHCP lease at all — unlisted hardware is blocked before it ever reaches the join-approval step. Since you're already vetting devices by MAC, `JOIN_APPROVAL=yes` by itself adds little here — but it's worth turning on anyway as the prerequisite for **`DEVICE_CONTROL=yes`** ([below](#per-device-control)), which is where `untrusted` really earns its name: every allowlisted IoT device still has to explicitly allow each destination it talks to, so a device phoning home somewhere unexpected gets caught and blocked rather than waved through just because its MAC was on the list.
+- **`untrusted`** (IoT) already gates membership a different way: `ALLOWLIST=yes` means a device needs its MAC pre-registered in `/etc/kestrel/networks/untrusted-allowed-macs` just to get a DHCP lease at all — unlisted hardware is blocked before it ever reaches the join-approval step. Since you're already vetting devices by MAC, `JOIN_APPROVAL=yes` by itself adds little here — but it's worth turning on anyway as the prerequisite for **`DEVICE_CONTROL=yes`** ([below](#per-device-control)), which is where `untrusted` really earns its name: every allowlisted IoT device still has to explicitly allow each destination it talks to, so a device phoning home somewhere unexpected gets caught and blocked rather than waved through just because its MAC was on the list.
 
 In short: `guest` → gate who joins; `untrusted` → gate what already-known devices can reach.
 
@@ -253,7 +253,7 @@ What happens, step by step:
 
 If you tap **Deny** instead, the device stays blocked. It's not gone from the dashboard, though — the device row shows "Denied" and you can flip it to Approved later from the same row without waiting for it to reconnect.
 
-Everything is visible afterwards: the dashboard's device table shows each device's join state (Pending / Approved / Denied) at a glance, and every approval, denial, and revocation sends a push notification naming the device and who made the call. The full history (with timestamps) lives on each device's own page and in `/etc/extra-networks/${IFACE}-join-history`, kept for `JOIN_HISTORY_RETENTION` (default 90 days) and preserved across reboots and sysupgrades.
+Everything is visible afterwards: the dashboard's device table shows each device's join state (Pending / Approved / Denied) at a glance, and every approval, denial, and revocation sends a push notification naming the device and who made the call. The full history (with timestamps) lives on each device's own page and in `/etc/kestrel/networks/${IFACE}-join-history`, kept for `JOIN_HISTORY_RETENTION` (default 90 days) and preserved across reboots and sysupgrades.
 
 Two things worth knowing before you turn this on:
 
@@ -277,11 +277,11 @@ When a device's outbound connection is blocked, it appears in the **Pending conn
 
 Use **Approve domain** to allow a hostname: the router adds a dnsmasq `nftset=` rule so all IPs that domain resolves to are automatically allowed for this device going forward.
 
-Approved rules are written to `/etc/extra-networks/<iface>-device-rules` and survive reboots. Domains are written to `/etc/dnsmasq.d/<iface>-device-<mac>.conf`.
+Approved rules are written to `/etc/kestrel/networks/<iface>-device-rules` and survive reboots. Domains are written to `/etc/dnsmasq.d/<iface>-device-<mac>.conf`.
 
 **Routing an approved domain through a VPN instead of WAN**
 
-If [`split-routing`](../split-routing/docs/mullvad-routing.md) is configured, the **Approve domain** form includes a **Route** dropdown listing "WAN" plus each configured VPN tier (`/etc/split-routing/vpn-<name>.conf`) — the same tiers shown in the dashboard's VPN status panel. Choosing a tier routes just that domain's traffic for that one device through the VPN rather than the default gateway; everything else the device does still goes over WAN. The Rules table shows each domain's chosen route, and it can be changed later by re-approving the same domain with a different route.
+If [`split-routing`](../split-routing/docs/mullvad-routing.md) is configured, the **Approve domain** form includes a **Route** dropdown listing "WAN" plus each configured VPN tier (`/etc/kestrel/split-routing/vpn-<name>.conf`) — the same tiers shown in the dashboard's VPN status panel. Choosing a tier routes just that domain's traffic for that one device through the VPN rather than the default gateway; everything else the device does still goes over WAN. The Rules table shows each domain's chosen route, and it can be changed later by re-approving the same domain with a different route.
 
 This only applies to domain rules (`Approve domain`), not raw IP/port allow rules from the pending-connections table — those always go over WAN.
 
@@ -328,10 +328,10 @@ Sent every morning at 08:00. Includes:
 
 ### Including the main LAN in the digest
 
-The digest covers every network that has a `*-notify.conf` file in `/etc/extra-networks/`. Isolated networks get one automatically from `install.sh`. The main LAN does not, so create it manually:
+The digest covers every network that has a `*-notify.conf` file in `/etc/kestrel/networks/`. Isolated networks get one automatically from `install.sh`. The main LAN does not, so create it manually:
 
 ```sh
-cat >/etc/extra-networks/lan-notify.conf <<EOF
+cat >/etc/kestrel/networks/lan-notify.conf <<EOF
 NOTIFY_URL=https://ntfy.sh/your-topic
 SUBNET=192.168.1
 IFACE_NAME=lan
@@ -359,7 +359,7 @@ WAN connectivity is checked every 5 minutes by pinging `1.1.1.1` and `8.8.8.8`. 
 
 ### VPN monitoring
 
-If `/etc/split-routing/` is present, each VPN tier (`vpn-*.conf`) is monitored independently every 5 minutes. A high-priority alert fires when a tier goes down; a default-priority alert fires when it recovers. State is persisted in `/etc/extra-networks/vpn-state-<iface>` so only transitions trigger alerts. Uses the `NOTIFY_URL` from the first configured extra-networks network.
+If `/etc/kestrel/split-routing/` is present, each VPN tier (`vpn-*.conf`) is monitored independently every 5 minutes. A high-priority alert fires when a tier goes down; a default-priority alert fires when it recovers. State is persisted in `/etc/kestrel/networks/vpn-state-<iface>` so only transitions trigger alerts. Uses the `NOTIFY_URL` from the first configured extra-networks network.
 
 ### WireGuard VPN server peers
 
@@ -396,7 +396,7 @@ The page auto-refreshes every 60 seconds and shows:
 
 Only reachable from LAN — isolated zones have `INPUT=REJECT`.
 
-To disable the 60-second auto-refresh, add `STATUS_AUTOREFRESH=no` to `/etc/extra-networks/config` on the router. The "Refresh" link at the top of the page always works regardless of this setting.
+To disable the 60-second auto-refresh, add `STATUS_AUTOREFRESH=no` to `/etc/kestrel/networks/config` on the router. The "Refresh" link at the top of the page always works regardless of this setting.
 
 ## VLAN trunk
 
@@ -592,7 +592,7 @@ The device page shows the hardware manufacturer for each device based on its MAC
 The database is refreshed automatically every Sunday at 03:00. To refresh it manually:
 
 ```sh
-sh /etc/extra-networks/oui-update.sh
+sh /etc/kestrel/networks/oui-update.sh
 ```
 
 **Randomized MACs:** Modern phones and laptops randomize their MAC address per network for privacy. These MACs have the locally-administered bit set (second bit of the first byte) and have no OUI entry by design — the device page shows "Randomized MAC" for them instead of a blank.
@@ -615,7 +615,7 @@ Worth understanding the limits before trusting it:
 
 ## Global settings
 
-Some settings apply to the status page and tools as a whole rather than to a single network. Set them in `/etc/extra-networks/config` on the router — this file is created by `install.sh` and survives re-runs.
+Some settings apply to the status page and tools as a whole rather than to a single network. Set them in `/etc/kestrel/networks/config` on the router — this file is created by `install.sh` and survives re-runs.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -626,7 +626,7 @@ Some settings apply to the status page and tools as a whole rather than to a sin
 Example:
 
 ```sh
-# /etc/extra-networks/config
+# /etc/kestrel/networks/config
 REPO_DIR=/root/openwrt-kestrel/extra-networks
 STATUS_AUTOREFRESH=no
 GCAL_URL=https://calendar.google.com/calendar/ical/<your-calendar-id>/basic.ics
@@ -649,4 +649,4 @@ To get your calendar's `.ics` URL: open Google Calendar → Settings → the cal
 - **Wireless sections** are created automatically if they don't exist in UCI. `WIFI_UCI` can be set to reuse a pre-existing UCI wireless section with a different name than `IFACE` — useful when migrating an existing setup; omit it for new networks.
 - **DEVICE_CONTROL requires JOIN_APPROVAL** — without join approval, device IPs are never recorded and the per-device nft rules can't be generated. Set both in the config and re-run `install.sh`.
 - **DHCP pool** is fixed at `.100`–`.249` (150 addresses) with a 12-hour lease time. To change these, edit the UCI directly after install: `uci set dhcp.<iface>.start=100`, `uci set dhcp.<iface>.limit=150`, `uci set dhcp.<iface>.leasetime=12h`, then `uci commit dhcp && /etc/init.d/dnsmasq restart`.
-- **Join history** is stored in `/etc/extra-networks/<iface>-join-history` as a tab-delimited file and is included in `sysupgrade.conf` — it survives reboots and normal OpenWrt upgrades. `JOIN_HISTORY_RETENTION` controls how long entries are kept (default 90 days).
+- **Join history** is stored in `/etc/kestrel/networks/<iface>-join-history` as a tab-delimited file and is included in `sysupgrade.conf` — it survives reboots and normal OpenWrt upgrades. `JOIN_HISTORY_RETENTION` controls how long entries are kept (default 90 days).

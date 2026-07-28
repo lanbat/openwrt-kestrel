@@ -4,7 +4,7 @@
 #
 # Installed automatically by install.sh when NOTIFY_URL is set.
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 CHECKPOINT=${BASE_DIR}/log-checkpoint
 SEEN_FILE=${BASE_DIR}/notified-attempts
 TMPLOG=${BASE_DIR}/log-scan.tmp

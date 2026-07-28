@@ -28,8 +28,8 @@ fn main() {
     // Daemon mode: long-lived, serves concurrent connections — the one
     // path that actually benefits from a multi-threaded runtime.
     multi_thread_rt().block_on(async {
-        let base_dir = PathBuf::from("/etc/extra-networks");
-        let split_routing_dir = PathBuf::from("/etc/split-routing");
+        let base_dir = PathBuf::from("/etc/kestrel/networks");
+        let split_routing_dir = PathBuf::from("/etc/kestrel/split-routing");
         let app_state = state::AppState::new(base_dir, split_routing_dir).await;
 
         let port: u16 = std::env::args()

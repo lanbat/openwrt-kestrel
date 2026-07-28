@@ -12,7 +12,7 @@ CONFIG="$1"
 [ -z "${WIFI_KEY:-}" ] && { echo "ERROR: WIFI_KEY not set"; exit 1; }
 [ ${#WIFI_KEY} -lt 8 ] && { echo "ERROR: WIFI_KEY must be at least 8 characters"; exit 1; }
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 mkdir -p "$BASE_DIR"
 grep -qF "$BASE_DIR" /etc/sysupgrade.conf 2>/dev/null || printf '%s\n' "$BASE_DIR" >> /etc/sysupgrade.conf
 
@@ -439,7 +439,7 @@ EOF
 [ "\$ACTION" = ifup ] || exit 0
 [ "\$INTERFACE" = ${IFACE} ] || exit 0
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 PENDING_FILE="\${BASE_DIR}/${IFACE}-join-pending"
 APPROVED_FILE="\${BASE_DIR}/${IFACE}-join-approved"
 APPROVED_IPS_FILE="\${BASE_DIR}/${IFACE}-join-approved-ips"
@@ -580,7 +580,7 @@ if [ -n "$NOTIFY_URL" ]; then
 #!/bin/sh
 [ "$ACTION" = add ] || [ "$ACTION" = del ] || exit 0
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 
 if [ "$ACTION" = add ]; then
     _jfile=/tmp/extra-networks-joins
@@ -591,8 +591,8 @@ fi
 
 _router_ip=$(ip addr show br-lan 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
 
-. /etc/extra-networks/_lib.sh
-for _conf in /etc/extra-networks/*-notify.conf; do
+. /etc/kestrel/networks/_lib.sh
+for _conf in /etc/kestrel/networks/*-notify.conf; do
     [ -f "$_conf" ] || continue
     unset SUBNET NOTIFY_URL IFACE_NAME NOTIFY_JOIN JOIN_APPROVAL JOIN_HISTORY_RETENTION REJOIN_NOTIFY_AFTER
     . "$_conf"

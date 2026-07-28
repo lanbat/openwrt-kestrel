@@ -8,8 +8,8 @@ use serde::de::DeserializeOwned;
 use crate::routes::{approve_access, approve_join, device, identity, network, qr, rotate_password};
 use crate::state::AppState;
 
-const BASE_DIR: &str = "/etc/extra-networks";
-const SPLIT_ROUTING_DIR: &str = "/etc/split-routing";
+const BASE_DIR: &str = "/etc/kestrel/networks";
+const SPLIT_ROUTING_DIR: &str = "/etc/kestrel/split-routing";
 // Deliberately not "/tmp/kestreld/..." — that name collides with where
 // test/qemu/deploy.sh (and any future deploy tooling) scp's the kestreld
 // binary itself to /tmp/, which fails outright if this cache dir exists.

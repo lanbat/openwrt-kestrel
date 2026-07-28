@@ -4,7 +4,7 @@
 # Combines IPv4 and IPv6 bytes per device (matched by MAC address).
 # Runs hourly via cron. Installed by install.sh when NOTIFY_URL is set.
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 . "${BASE_DIR}/_lib.sh"
 
 _human() {

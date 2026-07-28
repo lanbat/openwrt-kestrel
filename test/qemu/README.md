@@ -55,7 +55,7 @@ ssh -p 2222 root@127.0.0.1 \
 ```
 
 To test `untrusted.conf`'s `ALLOWLIST=yes` behavior, the client's MAC needs to
-be added to `/etc/extra-networks/untrusted-allowed-macs` first (either
+be added to `/etc/kestrel/networks/untrusted-allowed-macs` first (either
 through the device page, once it's reachable, or by hand over SSH) — an
 unlisted MAC is expected to get **no** DHCP lease at all, by design.
 

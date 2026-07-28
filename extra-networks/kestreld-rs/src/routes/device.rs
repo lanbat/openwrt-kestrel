@@ -118,7 +118,7 @@ pub struct DeviceForm {
     // approve_domain
     pub domain: Option<String>,
     /// VPN tier name to route this domain's traffic through instead of
-    /// WAN (must match a configured `/etc/split-routing/vpn-<name>.conf`);
+    /// WAN (must match a configured `/etc/kestrel/split-routing/vpn-<name>.conf`);
     /// empty/absent means plain WAN, same as today.
     pub route: Option<String>,
     // approve_pending / deny_pending

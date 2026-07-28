@@ -2,7 +2,7 @@
 # Send a daily traffic digest for all isolated networks.
 # Installed as a daily cron entry by install.sh when NOTIFY_URL is set.
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 
 _nft_bytes() {
     if [ "$2" = in ]; then
@@ -115,7 +115,7 @@ fi
 # ── VPN status ────────────────────────────────────────────────────────────────
 
 _vpn_section=""
-for _vpnconf in /etc/split-routing/vpn-*.conf; do
+for _vpnconf in /etc/kestrel/split-routing/vpn-*.conf; do
     [ -f "$_vpnconf" ] || continue
     unset VPN_IFACE ROUTE_TABLE FWMARK
     . "$_vpnconf"
@@ -133,10 +133,10 @@ done
 # ── Routing set sizes ─────────────────────────────────────────────────────────
 
 _sets_line=""
-if [ -d /etc/split-routing ]; then
+if [ -d /etc/kestrel/split-routing ]; then
     _sets_bullets=""; _sets_any=0
     _log=$(cat /tmp/routing-sets.log 2>/dev/null)
-    for _conf in /etc/split-routing/vpn-*.conf; do
+    for _conf in /etc/kestrel/split-routing/vpn-*.conf; do
         [ -f "$_conf" ] || continue
         unset VPN_IFACE DNS_CATS RESOLVE_CATS
         . "$_conf"

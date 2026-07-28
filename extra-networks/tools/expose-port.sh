@@ -28,7 +28,7 @@ PROTO="${5:-tcp udp}"
 NAME="${6:-expose-${ZONE}-${PORT}}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-. /etc/extra-networks/_lib.sh
+. /etc/kestrel/networks/_lib.sh
 
 # ── duration parsing ───────────────────────────────────────────────────────────
 

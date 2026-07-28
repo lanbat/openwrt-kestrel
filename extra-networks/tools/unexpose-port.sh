@@ -8,7 +8,7 @@
 set -eu
 
 [ $# -eq 1 ] || { echo "Usage: sh unexpose-port.sh <name>"; exit 1; }
-. /etc/extra-networks/_lib.sh
+. /etc/kestrel/networks/_lib.sh
 
 NAME="$1"
 

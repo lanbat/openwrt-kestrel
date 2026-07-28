@@ -22,13 +22,13 @@ Multiple VPN tiers are supported — for example routing torrents via a Bulgaria
 
 Configuration is split into two levels:
 
-**Shared** — `/etc/split-routing/config`:
+**Shared** — `/etc/kestrel/split-routing/config`:
 ```sh
 DNS_TIMEOUT=24h   # how long dnsmasq-populated IPs stay in nft sets
 ROUTE_IPV6=yes    # route marked IPv6 traffic through VPNs (set no if endpoint lacks IPv6)
 ```
 
-**Per-VPN** — one file per interface in `/etc/split-routing/vpn-*.conf`:
+**Per-VPN** — one file per interface in `/etc/kestrel/split-routing/vpn-*.conf`:
 ```sh
 VPN_IFACE=mv_bg          # WireGuard interface name
 ROUTE_TABLE=100          # policy routing table (unique per tier)
@@ -52,14 +52,14 @@ Each `vpn-*.conf` is fully self-contained. Adding a new VPN tier means creating 
 sh /root/openwrt-kestrel/split-routing/install.sh
 ```
 
-This creates `/etc/split-routing/config` (shared settings) and copies any `vpn-*.conf` templates from the repo that don't already exist on the router.
+This creates `/etc/kestrel/split-routing/config` (shared settings) and copies any `vpn-*.conf` templates from the repo that don't already exist on the router.
 
 ## Step 2 — Configure your VPN tiers
 
-Review the vpn-*.conf files in `/etc/split-routing/` and adjust interface names to match your WireGuard interfaces:
+Review the vpn-*.conf files in `/etc/kestrel/split-routing/` and adjust interface names to match your WireGuard interfaces:
 
 ```sh
-ls /etc/split-routing/vpn-*.conf
+ls /etc/kestrel/split-routing/vpn-*.conf
 ```
 
 Re-run `install.sh` after any change:
@@ -161,7 +161,7 @@ curl -4 icanhazip.com  # returns your home WAN IP
 
 ### Adding domains to an existing tier
 
-Edit the relevant local file in `/etc/split-routing/`. Filenames are `local-dns-<tier>_<cat>.txt` and `local-resolve-<tier>_<cat>.txt`, derived automatically from the tier name and category:
+Edit the relevant local file in `/etc/kestrel/split-routing/`. Filenames are `local-dns-<tier>_<cat>.txt` and `local-resolve-<tier>_<cat>.txt`, derived automatically from the tier name and category:
 
 | File | Tier | Mechanism |
 |---|---|---|
@@ -191,7 +191,7 @@ RESOLVE_URLS_torrenttrackers="url=https://example.com/trackers.txt domain=https:
 ### Adding a new VPN tier
 
 1. Configure the WireGuard interface in `/etc/config/network` and add it to the firewall (Step 3)
-2. Create `/etc/split-routing/vpn-<name>.conf` with a unique `FWMARK`, `ROUTE_TABLE`, `DNS_CATS`, and any `DNS_URLS_*` vars
+2. Create `/etc/kestrel/split-routing/vpn-<name>.conf` with a unique `FWMARK`, `ROUTE_TABLE`, `DNS_CATS`, and any `DNS_URLS_*` vars
 3. Run `sh install.sh` — creates nft sets, updates the mark chain, hotplug, and regenerates `update-routing-sets`
 4. Run `/usr/sbin/update-routing-sets`
 
@@ -210,7 +210,7 @@ can instead route a single approved device's traffic through a configured
 VPN tier, one domain rule at a time — no editing `vpn-*.conf` or local
 files required:
 
-1. Any `vpn-*.conf` present in `/etc/split-routing/` is picked up
+1. Any `vpn-*.conf` present in `/etc/kestrel/split-routing/` is picked up
    automatically and offered as a "Route" option (alongside "WAN") on the
    device page's **Approve domain** form.
 2. Choosing a tier there adds a per-device nftables set

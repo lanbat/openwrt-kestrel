@@ -103,7 +103,7 @@ sh extra-networks/install.sh extra-networks/configs/guest.conf
 sh extra-networks/install.sh extra-networks/configs/untrusted.conf
 ```
 
-**split-routing** reads its config from `/etc/split-routing/` and needs no argument:
+**split-routing** reads its config from `/etc/kestrel/split-routing/` and needs no argument:
 
 ```sh
 sh split-routing/install.sh
@@ -211,7 +211,7 @@ The installer adds paths to `/etc/sysupgrade.conf` and packages add their own pa
 |---|---|
 | `/root/` | git repo (`/root/openwrt-kestrel/`) |
 | `/etc/config/` | all UCI config — network, WireGuard, firewall, DHCP |
-| `/etc/extra-networks/` | device data, labels, history, join lists |
+| `/etc/kestrel/networks/` | device data, labels, history, join lists |
 | `/etc/dnsmasq.d/` | split-routing and content-filter configs |
 | `/etc/nftables.d/` | all nft rules including split-routing |
 | `/etc/hotplug.d/iface/99-mullvad-routing` | VPN routing hotplug script |

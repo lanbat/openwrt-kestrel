@@ -3,7 +3,7 @@
 # Installed as a @reboot cron entry by install.sh when NOTIFY_URL is set.
 # Loops through all configured networks so one script serves all.
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 hostname=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo router)
 timestamp=$(date '+%H:%M on %d/%m/%Y')
 

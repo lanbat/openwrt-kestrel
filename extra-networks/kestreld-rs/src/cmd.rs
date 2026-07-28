@@ -60,7 +60,7 @@ pub async fn reload_dnsmasq() {
 }
 
 pub async fn regen_inspect(iface: &str) {
-    let _ = silent(Command::new("/etc/extra-networks/_regen-inspect.sh")
+    let _ = silent(Command::new("/etc/kestrel/networks/_regen-inspect.sh")
         .arg(iface))
         .status()
         .await;
@@ -79,7 +79,7 @@ pub fn spawn_macfilter(iface: &str) {
 pub async fn allow_service(iface: &str, dst: &str, proto: &str, port: &str, duration: &str, dest_zone: &str) -> bool {
     let mut args = vec![iface, dst, proto, port, duration];
     if !dest_zone.is_empty() { args.push(dest_zone); }
-    let (ok, _) = run("/etc/extra-networks/allow-service.sh", &args).await;
+    let (ok, _) = run("/etc/kestrel/networks/allow-service.sh", &args).await;
     ok
 }
 

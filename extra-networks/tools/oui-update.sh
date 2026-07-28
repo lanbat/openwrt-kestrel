@@ -1,6 +1,6 @@
 #!/bin/sh
 # Downloads OUI prefix databases from multiple sources and merges them into
-# /etc/extra-networks/oui.txt for manufacturer lookups on the device page.
+# /etc/kestrel/networks/oui.txt for manufacturer lookups on the device page.
 #
 # Sources (tried in priority order; all are attempted regardless of failures):
 #   1. Wireshark manuf  — community-maintained, most complete, all prefix lengths
@@ -12,7 +12,7 @@
 # (no colons) corresponding to 24-, 28-, and 36-bit blocks respectively.
 # Longer prefixes take precedence over shorter ones at lookup time.
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 _out="${BASE_DIR}/oui.txt"
 _tmp=$(mktemp /tmp/oui-update.XXXXXX 2>/dev/null || printf '/tmp/oui-update.tmp')
 _ok=0

@@ -4,7 +4,7 @@
 # and sends a recovery notification with the outage duration.
 # Runs every 5 minutes via cron.
 
-BASE_DIR=/etc/extra-networks
+BASE_DIR=/etc/kestrel/networks
 STATE_FILE="${BASE_DIR}/wan-state"
 DOWN_SINCE="${BASE_DIR}/wan-down-since"
 
