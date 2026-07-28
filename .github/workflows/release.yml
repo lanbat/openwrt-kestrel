@@ -9,6 +9,12 @@ jobs:
   build:
     name: ${{ matrix.rust_target }}
     runs-on: ubuntu-latest
+    # mips/mipsel-unknown-linux-musl currently have no prebuilt std for
+    # stable Rust (upstream gap, not an issue with this workflow) — let
+    # those two legs fail without blocking the release for architectures
+    # that do build. Remove this once upstream ships prebuilt artifacts
+    # for either target again.
+    continue-on-error: ${{ matrix.arch == 'mips' || matrix.arch == 'mipsel' }}
     strategy:
       fail-fast: false
       matrix:
@@ -98,12 +104,22 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.arch }}
-          path: target/pkg/*.{apk,ipk}
+          # actions/upload-artifact's glob has no brace-expansion support —
+          # `*.{apk,ipk}` matches that literal string, not either
+          # extension, and silently uploads nothing. List each pattern on
+          # its own line instead.
+          path: |
+            target/pkg/*.apk
+            target/pkg/*.ipk
           if-no-files-found: error
 
   release:
     name: Publish GitHub release
     needs: build
+    # Run even if mips/mipsel (or any other single leg) failed outright
+    # rather than via continue-on-error — only skip this on a cancelled
+    # run, so one bad architecture never blocks releasing the rest.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
