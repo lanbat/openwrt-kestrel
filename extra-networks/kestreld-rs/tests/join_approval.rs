@@ -73,6 +73,7 @@ struct JoinApprovalWorld {
     // Held for its Drop impl (cleans up the directory); never read directly.
     _dir: tempfile::TempDir,
     base_dir: PathBuf,
+    split_routing_dir: PathBuf,
     current_mac: String,
     current_ip: String,
     last_ok: bool,
@@ -83,9 +84,11 @@ impl Default for JoinApprovalWorld {
     fn default() -> Self {
         let dir = tempfile::tempdir().expect("create tempdir for base_dir");
         let base_dir = dir.path().to_path_buf();
+        let split_routing_dir = dir.path().join("split-routing");
         Self {
             _dir: dir,
             base_dir,
+            split_routing_dir,
             current_mac: String::new(),
             current_ip: String::new(),
             last_ok: false,
@@ -95,7 +98,7 @@ impl Default for JoinApprovalWorld {
 }
 
 async fn submit(world: &mut JoinApprovalWorld, net: &str, action: &str, label: &str, origin: &str) {
-    let state = AppState::new_once(world.base_dir.clone()).await;
+    let state = AppState::new_once(world.base_dir.clone(), world.split_routing_dir.clone()).await;
     let mut headers = HeaderMap::new();
     if !origin.is_empty() {
         headers.insert(ORIGIN, HeaderValue::from_str(origin).expect("valid origin header"));
@@ -121,7 +124,7 @@ async fn submit(world: &mut JoinApprovalWorld, net: &str, action: &str, label: &
 }
 
 async fn submit_with_mdns(world: &mut JoinApprovalWorld, net: &str, label: &str, mdns_name: &str, mdns_model: &str) {
-    let state = AppState::new_once(world.base_dir.clone()).await;
+    let state = AppState::new_once(world.base_dir.clone(), world.split_routing_dir.clone()).await;
     let form = JoinForm {
         net: Some(net.to_string()),
         ip: Some(world.current_ip.clone()),
@@ -143,7 +146,7 @@ async fn submit_with_mdns(world: &mut JoinApprovalWorld, net: &str, label: &str,
 }
 
 async fn submit_set_label(world: &mut JoinApprovalWorld, net: &str, new_label: &str) {
-    let state = AppState::new_once(world.base_dir.clone()).await;
+    let state = AppState::new_once(world.base_dir.clone(), world.split_routing_dir.clone()).await;
     let form = JoinForm {
         net: Some(net.to_string()),
         ip: None,
@@ -219,7 +222,7 @@ async fn approve_with_mdns(world: &mut JoinApprovalWorld, net: String, label: St
 
 #[when(regex = r"^the (\w+) network's labeled pending devices are bulk-approved$")]
 async fn bulk_approve(world: &mut JoinApprovalWorld, net: String) {
-    let state = AppState::new_once(world.base_dir.clone()).await;
+    let state = AppState::new_once(world.base_dir.clone(), world.split_routing_dir.clone()).await;
     let form = JoinForm {
         net: Some(net),
         ip: None,

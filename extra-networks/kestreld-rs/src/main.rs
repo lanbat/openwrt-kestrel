@@ -29,7 +29,8 @@ fn main() {
     // path that actually benefits from a multi-threaded runtime.
     multi_thread_rt().block_on(async {
         let base_dir = PathBuf::from("/etc/extra-networks");
-        let app_state = state::AppState::new(base_dir).await;
+        let split_routing_dir = PathBuf::from("/etc/split-routing");
+        let app_state = state::AppState::new(base_dir, split_routing_dir).await;
 
         let port: u16 = std::env::args()
             .nth(1)

@@ -35,6 +35,15 @@ struct DeviceTmpl {
     dns_queries: Vec<DnsRow>,
     history: Vec<HistRow>,
     identity: Option<IdentityInfo>,
+    /// Configured split-routing VPN tunnels, for the approve-domain form's
+    /// route selector — empty when none are configured (the option list
+    /// then just offers WAN, i.e. today's only behavior).
+    vpn_options: Vec<VpnOption>,
+}
+
+struct VpnOption {
+    name: String,
+    label: String,
 }
 
 /// The fingerprint-registry identity this (randomized) MAC belongs to, if
@@ -63,6 +72,11 @@ struct RuleRow {
     proto: String,
     action: String,
     css: String,
+    /// "WAN" or the VPN tier name this rule's traffic is routed through —
+    /// see `data::vpn`. Only ever set for domain rules (see
+    /// `tools/regen-inspect.sh`'s marking-rule generation, which is
+    /// gated the same way).
+    route: String,
 }
 
 struct DnsRow {
@@ -103,6 +117,10 @@ pub struct DeviceForm {
     pub limit: Option<String>,
     // approve_domain
     pub domain: Option<String>,
+    /// VPN tier name to route this domain's traffic through instead of
+    /// WAN (must match a configured `/etc/split-routing/vpn-<name>.conf`);
+    /// empty/absent means plain WAN, same as today.
+    pub route: Option<String>,
     // approve_pending / deny_pending
     pub dst_ip: Option<String>,
     pub dst_port: Option<String>,
@@ -361,8 +379,13 @@ pub async fn get(
         .map(|r| {
             let css = if r.action == "allow" { "tag-allow".into() } else { "tag-deny".into() };
             let action = if r.action == "allow" { "Allow".into() } else { "Deny".into() };
-            RuleRow { dst: r.dst, port: r.port, proto: r.proto, action, css }
+            let route = if r.route.is_empty() { "WAN".to_string() } else { r.route.to_uppercase() };
+            RuleRow { dst: r.dst, port: r.port, proto: r.proto, action, css, route }
         })
+        .collect();
+
+    let vpn_options: Vec<VpnOption> = snap.vpn_tiers.iter()
+        .map(|t| VpnOption { name: t.name.clone(), label: t.name.to_uppercase() })
         .collect();
 
     // DNS queries from logs
@@ -446,6 +469,7 @@ pub async fn get(
         dns_queries,
         history,
         identity,
+        vpn_options,
     };
 
     Html(tmpl.render().unwrap_or_else(|e| format!("Template error: {e}")))
@@ -502,6 +526,7 @@ pub async fn post(
     let dev_ip6 = snap.device_ip6s.get(net).and_then(|m| m.get(&mac)).cloned().unwrap_or_default();
     let dev_label = snap.labels.get(net).and_then(|m| m.get(&mac)).cloned().unwrap_or_default();
     let notify_url = conf.notify_url.clone();
+    let vpn_tiers = snap.vpn_tiers.clone();
     drop(snap);
 
     let back_url = format!("/cgi-bin/device?net={net}&mac={mac}");
@@ -573,25 +598,53 @@ pub async fn post(
                 && !domain.ends_with('.');
             if !valid_domain { return err("Invalid domain"); }
 
+            let route: String = form.route.as_deref().unwrap_or("").trim().to_lowercase();
+            let vpn_tier = if route.is_empty() {
+                None
+            } else {
+                match vpn_tiers.iter().find(|t| t.name == route) {
+                    Some(t) => Some(t.clone()),
+                    None => return err("Unknown VPN route"),
+                }
+            };
+
             let rules_path = base_dir.join(format!("{net}-device-rules"));
-            let entry = format!("{mac}\t{domain}\tallow\t\t");
-            let existing = tokio::fs::read_to_string(&rules_path).await.unwrap_or_default();
-            if !existing.contains(&entry) {
-                let _ = files::file_append(&rules_path, &entry).await;
-            }
+            // Remove any existing rule for this mac+domain first (not just
+            // dedup) — re-approving with a different route needs to replace
+            // the old entry, same as `revoke_rule`'s mac+dst matching.
+            let _ = files::file_remove_rule(&rules_path, &mac, &domain).await;
+            let entry = format!("{mac}\t{domain}\tallow\t\t\t{route}");
+            let _ = files::file_append(&rules_path, &entry).await;
 
             // Update dnsmasq per-device conf
             let dconf = format!("/etc/dnsmasq.d/{net}-device-{mac_n}.conf");
-            let nftset = format!("4#inet#fw4#{net}_allow_{mac_n}_4,6#inet#fw4/{net}_allow_{mac_n}_6");
+            let mut nftset = format!("4#inet#fw4#{net}_allow_{mac_n}_4,6#inet#fw4#{net}_allow_{mac_n}_6");
+            if !route.is_empty() {
+                nftset.push_str(&format!(
+                    ",4#inet#fw4#{net}_route_{mac_n}_{route}_4,6#inet#fw4#{net}_route_{mac_n}_{route}_6"
+                ));
+            }
             let dentry = format!("nftset=/{domain}/{nftset}");
             let dexisting = tokio::fs::read_to_string(&dconf).await.unwrap_or_default();
-            if !dexisting.contains(&dentry) {
-                let _ = files::file_append(std::path::Path::new(&dconf), &dentry).await;
+            let filtered: String = dexisting.lines()
+                .filter(|l| !l.starts_with(&format!("nftset=/{domain}/")))
+                .flat_map(|l| [l, "\n"])
+                .collect();
+            let _ = tokio::fs::write(&dconf, format!("{filtered}{dentry}\n")).await;
+
+            if let Some(tier) = &vpn_tier {
+                crate::cmd::nft_add_set(&format!("{net}_route_{mac_n}_{}_4", tier.name), "4").await;
+                crate::cmd::nft_add_set(&format!("{net}_route_{mac_n}_{}_6", tier.name), "6").await;
             }
             crate::cmd::reload_dnsmasq().await;
+            if vpn_tier.is_some() {
+                crate::cmd::regen_inspect(net).await;
+                crate::cmd::spawn_macfilter(net);
+            }
 
             if !notify_url.is_empty() {
-                let body = format!("{}: {domain} allowed on {net}.\n\nLabel: {dev_label}", if dev_label.is_empty() { mac.as_str() } else { &dev_label });
+                let route_suffix = vpn_tier.as_ref().map(|t| format!(" via {} VPN", t.name)).unwrap_or_default();
+                let body = format!("{}: {domain} allowed on {net}{route_suffix}.\n\nLabel: {dev_label}", if dev_label.is_empty() { mac.as_str() } else { &dev_label });
                 crate::cmd::ntfy(&notify_url, &format!("Rule added — {net}"), "default", "shield", &body).await;
             }
             ok()

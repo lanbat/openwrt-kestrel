@@ -9,6 +9,7 @@ use crate::routes::{approve_access, approve_join, device, identity, network, qr,
 use crate::state::AppState;
 
 const BASE_DIR: &str = "/etc/extra-networks";
+const SPLIT_ROUTING_DIR: &str = "/etc/split-routing";
 // Deliberately not "/tmp/kestreld/..." — that name collides with where
 // test/qemu/deploy.sh (and any future deploy tooling) scp's the kestreld
 // binary itself to /tmp/, which fails outright if this cache dir exists.
@@ -24,76 +25,77 @@ pub async fn run() {
     let method = std::env::var("REQUEST_METHOD").unwrap_or_default();
     let query = std::env::var("QUERY_STRING").unwrap_or_default();
     let base_dir = PathBuf::from(BASE_DIR);
+    let split_routing_dir = PathBuf::from(SPLIT_ROUTING_DIR);
 
     match (script.as_str(), method.as_str()) {
         ("/cgi-bin/status", "GET") => {
-            respond_html(status_html(&base_dir).await);
+            respond_html(status_html(&base_dir, &split_routing_dir).await);
         }
 
         ("/cgi-bin/device", "GET") => {
             let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = device::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
         ("/cgi-bin/device", "POST") => {
             let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
             let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let json = device::post(State(state), cgi_headers(), Query(q), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/network", "GET") => {
             let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = network::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
 
         ("/cgi-bin/identity", "GET") => {
             let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = identity::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
 
         ("/cgi-bin/qr", "GET") => {
             let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let resp = qr::get(State(state), Query(q)).await;
             respond_raw(resp);
         }
 
         ("/cgi-bin/approve-access", "GET") => {
             let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = approve_access::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
         ("/cgi-bin/approve-access", "POST") => {
             let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let json = approve_access::post(State(state), cgi_headers(), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/approve-join", "GET") => {
             let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = approve_join::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
         ("/cgi-bin/approve-join", "POST") => {
             let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let json = approve_join::post(State(state), cgi_headers(), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/rotate-password", "POST") => {
             let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
-            let state = AppState::new_once(base_dir).await;
+            let state = AppState::new_once(base_dir, split_routing_dir).await;
             let json = rotate_password::post(State(state), Form(form)).await;
             respond_json(&json.0);
         }
@@ -102,11 +104,11 @@ pub async fn run() {
     }
 }
 
-async fn status_html(base_dir: &PathBuf) -> String {
+async fn status_html(base_dir: &PathBuf, split_routing_dir: &PathBuf) -> String {
     if let Some(cached) = read_cache(CACHE_STATUS) {
         return cached;
     }
-    let snap = crate::state::build_snapshot(base_dir).await;
+    let snap = crate::state::build_snapshot(base_dir, split_routing_dir).await;
     let html = crate::routes::status::render(&snap).await;
     write_cache(CACHE_STATUS, &html);
     html

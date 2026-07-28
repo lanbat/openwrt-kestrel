@@ -67,29 +67,31 @@ pub struct Snapshot {
 pub struct AppState {
     pub snapshot: RwLock<Arc<Snapshot>>,
     pub base_dir: PathBuf,
+    pub split_routing_dir: PathBuf,
     pub oui: HashMap<String, String>,
 }
 
 impl AppState {
-    async fn build(base_dir: PathBuf) -> Arc<Self> {
-        let snap = build_snapshot(&base_dir).await;
+    async fn build(base_dir: PathBuf, split_routing_dir: PathBuf) -> Arc<Self> {
+        let snap = build_snapshot(&base_dir, &split_routing_dir).await;
         let oui = files::read_oui(&base_dir.join("oui.txt")).await;
         Arc::new(Self {
             snapshot: RwLock::new(Arc::new(snap)),
             base_dir,
+            split_routing_dir,
             oui,
         })
     }
 
     /// For the long-running standalone server: refreshes the snapshot every
     /// 5 seconds in the background so concurrent requests share one build.
-    pub async fn new(base_dir: PathBuf) -> Arc<Self> {
-        let state = Self::build(base_dir).await;
+    pub async fn new(base_dir: PathBuf, split_routing_dir: PathBuf) -> Arc<Self> {
+        let state = Self::build(base_dir, split_routing_dir).await;
         let state2 = Arc::clone(&state);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                let snap = build_snapshot(&state2.base_dir).await;
+                let snap = build_snapshot(&state2.base_dir, &state2.split_routing_dir).await;
                 *state2.snapshot.write().await = Arc::new(snap);
             }
         });
@@ -99,8 +101,8 @@ impl AppState {
     /// For CGI mode: a fresh process handles exactly one request and then
     /// exits, so there's no point spawning a background refresh loop that
     /// will never get to run.
-    pub async fn new_once(base_dir: PathBuf) -> Arc<Self> {
-        Self::build(base_dir).await
+    pub async fn new_once(base_dir: PathBuf, split_routing_dir: PathBuf) -> Arc<Self> {
+        Self::build(base_dir, split_routing_dir).await
     }
 
     pub async fn snap(&self) -> Arc<Snapshot> {
@@ -108,7 +110,7 @@ impl AppState {
     }
 }
 
-pub async fn build_snapshot(base_dir: &Path) -> Snapshot {
+pub async fn build_snapshot(base_dir: &Path, split_routing_dir: &Path) -> Snapshot {
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -125,7 +127,7 @@ pub async fn build_snapshot(base_dir: &Path) -> Snapshot {
     );
 
     let (vpn_tiers, wg_servers) = tokio::join!(
-        vpn::fetch_tiers(),
+        vpn::fetch_tiers(split_routing_dir),
         wg::fetch_servers(now_ts),
     );
 

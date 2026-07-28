@@ -39,7 +39,7 @@ JOIN_APPROVAL=yes
 JOIN_HISTORY_RETENTION=90d
 REJOIN_NOTIFY_AFTER=
 ROTATE_PASSWORD=yes
-DEVICE_CONTROL=no
+DEVICE_CONTROL=yes
 DESCRIPTION='Guest WiFi hwsim test'
 ";
 
@@ -49,6 +49,7 @@ struct BrowserWorld {
     // Held only for its Drop impl (cleans up the directory on disk).
     _dir: tempfile::TempDir,
     base_dir: PathBuf,
+    split_routing_dir: PathBuf,
     // Started lazily (see `ensure_server_started`) — not in `init()` —
     // because `AppState::new` takes one snapshot immediately and only
     // refreshes every 5s after that. Starting the server before the Given
@@ -69,6 +70,7 @@ impl BrowserWorld {
     async fn init() -> Self {
         let dir = tempfile::tempdir().expect("create tempdir for base_dir");
         let base_dir = dir.path().to_path_buf();
+        let split_routing_dir = dir.path().join("split-routing");
 
         // Plain HTTP connector — geckodriver and kestreld are both plain
         // localhost HTTP here, no TLS involved anywhere in this test.
@@ -81,6 +83,7 @@ impl BrowserWorld {
         Self {
             _dir: dir,
             base_dir,
+            split_routing_dir,
             base_url: None,
             client,
             current_mac: String::new(),
@@ -93,7 +96,7 @@ impl BrowserWorld {
     /// until the fixtures are actually in place.
     async fn ensure_server_started(&mut self) -> &str {
         if self.base_url.is_none() {
-            let state = AppState::new(self.base_dir.clone()).await;
+            let state = AppState::new(self.base_dir.clone(), self.split_routing_dir.clone()).await;
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
                 .await
                 .expect("bind ephemeral port");
@@ -134,10 +137,48 @@ async fn device_pending(world: &mut BrowserWorld, mac: String, ip: String, net: 
     world.current_mac = mac;
 }
 
+#[given(expr = "a VPN tier {string} is configured with fwmark {string}")]
+async fn vpn_tier_configured(world: &mut BrowserWorld, name: String, fwmark: String) {
+    tokio::fs::create_dir_all(&world.split_routing_dir).await.expect("create split-routing dir");
+    let conf = format!("VPN_IFACE=mv_{name}\nROUTE_TABLE=100\nFWMARK={fwmark}\n");
+    let path = world.split_routing_dir.join(format!("vpn-{name}.conf"));
+    tokio::fs::write(&path, conf).await.expect("write vpn conf");
+}
+
 #[when("I open the dashboard in a browser")]
 async fn open_dashboard(world: &mut BrowserWorld) {
     let url = format!("{}/cgi-bin/status", world.ensure_server_started().await);
     world.client.goto(&url).await.expect("navigate to dashboard");
+}
+
+#[when(expr = "I open the device page for {string} on {string} in a browser")]
+async fn open_device_page(world: &mut BrowserWorld, mac: String, net: String) {
+    let url = format!("{}/cgi-bin/device?net={net}&mac={mac}", world.ensure_server_started().await);
+    world.client.goto(&url).await.expect("navigate to device page");
+    world.current_mac = mac;
+}
+
+#[when(expr = "I approve domain {string} routed via {string}")]
+async fn approve_domain_via_browser(world: &mut BrowserWorld, domain: String, route: String) {
+    let domain_input = world.client
+        .wait().for_element(Locator::Css("form#domain-form input[name=domain]"))
+        .await
+        .expect("find the domain input");
+    domain_input.send_keys(&domain).await.expect("type domain");
+
+    let route_option = world.client
+        .find(Locator::XPath(&format!("//form[@id='domain-form']//select[@name='route']/option[@value='{route}']")))
+        .await
+        .expect("find the route option");
+    route_option.click().await.expect("select route option");
+
+    let allow_button = world.client
+        .find(Locator::Css("form#domain-form button"))
+        .await
+        .expect("find the Allow button");
+    allow_button.click().await.expect("click Allow");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
 }
 
 #[when(expr = "I approve that device with label {string}")]
@@ -191,6 +232,32 @@ async fn wait_for_badge(world: &mut BrowserWorld, want: &str, tries: u32) -> Str
 async fn shows_state(world: &mut BrowserWorld, state: String) {
     let text = wait_for_badge(world, &state, 8).await;
     assert_eq!(text, state, "device {} is not shown as {state:?}", world.current_mac);
+}
+
+#[then(expr = "the rules table shows domain {string} routed via {string}")]
+async fn rules_table_shows_route(world: &mut BrowserWorld, domain: String, route: String) {
+    // Same daemon-mode 5s background-refresh artifact `wait_for_badge`
+    // documents: the file write from the approval POST is already on
+    // disk, but the in-memory snapshot this page renders from may not
+    // have picked it up yet on the very next reload. Poll instead of a
+    // one-shot reload.
+    let xpath = format!("//table//tr[td[1][text()='{domain}']]");
+    let mut row_text = None;
+    for _ in 0..8 {
+        let base_url = world.ensure_server_started().await.to_string();
+        let url = format!("{base_url}/cgi-bin/device?net=guest&mac={}", world.current_mac);
+        world.client.goto(&url).await.expect("reload device page");
+        if let Ok(el) = world.client.find(Locator::XPath(&xpath)).await {
+            row_text = Some(el.text().await.expect("row text"));
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let row_text = row_text.unwrap_or_else(|| panic!("no rules row for domain {domain:?} appeared after polling"));
+    assert!(
+        row_text.contains(&route),
+        "expected the rules row for {domain:?} to show route {route:?}, got: {row_text:?}"
+    );
 }
 
 #[tokio::main]

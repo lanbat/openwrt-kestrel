@@ -106,6 +106,12 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
   <input type="hidden" name="action" value="approve_domain">
   <div class="irow">
     <input type="text" name="domain" placeholder="api.example.com" maxlength="253" style="width:220px">
+    <select name="route" style="font-size:.875rem;padding:.3rem .5rem;border:1px solid #ccc;border-radius:4px">
+      <option value="">WAN</option>
+      {% for t in vpn_options %}
+      <option value="{{ t.name }}">{{ t.label }}</option>
+      {% endfor %}
+    </select>
     <button type="submit">Allow</button>
   </div>
 </form>
@@ -154,13 +160,14 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <p class="dim">No rules yet.</p>
 {% else %}
 <table>
-  <tr><th>Destination</th><th>Port</th><th>Proto</th><th>Action</th><th></th></tr>
+  <tr><th>Destination</th><th>Port</th><th>Proto</th><th>Action</th><th>Route</th><th></th></tr>
   {% for r in rules %}
   <tr>
     <td>{{ r.dst }}</td>
     <td>{{ r.port }}</td>
     <td>{{ r.proto }}</td>
     <td class="{{ r.css }}">{{ r.action }}</td>
+    <td class="dim">{{ r.route }}</td>
     <td>
       <form class="rr-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
         <input type="hidden" name="action" value="revoke_rule">

@@ -32,8 +32,7 @@ impl VpnState {
     }
 }
 
-pub async fn fetch_tiers() -> Vec<VpnTier> {
-    let dir = Path::new("/etc/split-routing");
+pub async fn fetch_tiers(dir: &Path) -> Vec<VpnTier> {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(e) => e,
         Err(_) => return Vec::new(),

@@ -18,6 +18,11 @@ path = "tests/join_approval.rs"
 harness = false
 
 [[test]]
+name = "connection_approval"
+path = "tests/connection_approval.rs"
+harness = false
+
+[[test]]
 name = "browser_workflow"
 path = "tests/browser_workflow.rs"
 harness = false

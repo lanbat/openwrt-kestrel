@@ -12,3 +12,11 @@ Feature: Browser-driven approve workflow
     When I open the dashboard in a browser
     And I approve that device with label "Browser Test Phone"
     Then the dashboard shows that device as "Approved"
+
+  Scenario: Approving a domain routed via a VPN tier updates the rules table
+    Given the "guest" network is installed with join approval enabled
+    And a VPN tier "bg" is configured with fwmark "0x1"
+    And a device "aa:bb:cc:dd:ee:98" at "192.168.3.201" is pending join on "guest"
+    When I open the device page for "aa:bb:cc:dd:ee:98" on "guest" in a browser
+    And I approve domain "example.com" routed via "bg"
+    Then the rules table shows domain "example.com" routed via "BG"
