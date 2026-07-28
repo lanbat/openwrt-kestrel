@@ -70,14 +70,27 @@ jobs:
 
       # mips/mipsel use nightly + rust-src to rebuild std from source
       # (`-Z build-std`, wired through GNUmakefile's BUILD_STD=yes) since
-      # stable Rust no longer ships a prebuilt std for either target.
-      # Everything else keeps using the prebuilt std on stable.
-      - name: Install Rust
+      # stable Rust no longer ships a prebuilt std for either target — so
+      # there's no prebuilt target component to install for them at all.
+      # Everything else keeps using the prebuilt std on stable. Two
+      # separate steps rather than one with ternary expressions: GitHub
+      # Actions expressions treat `''` as falsy, so `matrix.build_std &&
+      # '' || matrix.rust_target` silently evaluates to `matrix.rust_target`
+      # even when build_std is true — confirmed the hard way when that
+      # exact expression made the nightly install still request the
+      # target's (nonexistent) prebuilt std component.
+      - name: Install Rust (stable, prebuilt std)
+        if: ${{ !matrix.build_std }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Rust (nightly, build-std)
+        if: ${{ matrix.build_std }}
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.build_std && 'nightly' || 'stable' }}
-          targets: ${{ matrix.build_std && '' || matrix.rust_target }}
-          components: ${{ matrix.build_std && 'rust-src' || '' }}
+          toolchain: nightly
+          components: rust-src
 
       # cross-rs's last crates.io release (0.2.5, Feb 2023) doesn't
       # recognize riscv64gc-unknown-linux-musl as a valid target even with
