@@ -486,9 +486,9 @@ pub async fn prune_and_read_pending(path: &Path, cutoff_ts: u64) -> Vec<PendingC
     kept
 }
 
-/// Read /tmp/extra-networks-joins: `mac<TAB>timestamp`
+/// Read /tmp/kestrel-joins: `mac<TAB>timestamp`
 pub async fn read_joins() -> HashMap<String, String> {
-    let path = Path::new("/tmp/extra-networks-joins");
+    let path = Path::new("/tmp/kestrel-joins");
     let lines = read_lines(path).await;
     lines
         .iter()

@@ -42,7 +42,7 @@ pub struct Snapshot {
     /// iface → (ip → bytes)
     pub dev_bytes4: HashMap<String, HashMap<String, u64>>,
     pub dev_bytes6: HashMap<String, HashMap<String, u64>>,
-    /// mac (lowercase) → joined-timestamp string from /tmp/extra-networks-joins
+    /// mac (lowercase) → joined-timestamp string from /tmp/kestrel-joins
     pub joins: HashMap<String, String>,
     /// iface → global IPv6 prefixes on br-{iface} (e.g. "fd00::/64")
     pub ipv6_prefixes: HashMap<String, Vec<String>>,

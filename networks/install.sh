@@ -580,14 +580,14 @@ cp "${SCRIPT_DIR}/tools/_lib.sh" "${BASE_DIR}/_lib.sh"
 
 if [ -n "$NOTIFY_URL" ]; then
     mkdir -p /etc/hotplug.d/dhcp
-    cat >/etc/hotplug.d/dhcp/50-extra-networks <<'NOTIFYEOF'
+    cat >/etc/hotplug.d/dhcp/50-kestrel <<'NOTIFYEOF'
 #!/bin/sh
 [ "$ACTION" = add ] || [ "$ACTION" = del ] || exit 0
 
 BASE_DIR=/etc/kestrel/networks
 
 if [ "$ACTION" = add ]; then
-    _jfile=/tmp/extra-networks-joins
+    _jfile=/tmp/kestrel-joins
     { grep -v "^${MACADDR}	" "$_jfile" 2>/dev/null
       printf '%s\t%s\n' "$MACADDR" "$(date '+%d %b %H:%M')"; } > "${_jfile}.tmp" \
         && mv "${_jfile}.tmp" "$_jfile" || true
@@ -676,13 +676,13 @@ for _conf in /etc/kestrel/networks/*-notify.conf; do
     fi
 done
 NOTIFYEOF
-    chmod 0755 /etc/hotplug.d/dhcp/50-extra-networks
+    chmod 0755 /etc/hotplug.d/dhcp/50-kestrel
     rm -f "${BASE_DIR}/dhcp-notify"
     uci -q del dhcp.@dnsmasq[0].dhcpscript || true
     uci commit dhcp
 
     # Point uhttpd's CGI paths at kestreld (installed separately via the
-    # extra-networks apk/ipk package — see README "Install on the router").
+    # kestrel apk/ipk package — see README "Install on the router").
     # uhttpd runs it fresh per request, same as any other CGI script; no
     # daemon, no extra port, no reverse proxy needed.
     mkdir -p /www/cgi-bin
@@ -699,23 +699,23 @@ NOTIFYEOF
         /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
     fi
 
-    _cron_set extra-networks-monitor  "* * * * * /usr/bin/kestreld --check-access-log"
-    _cron_set extra-networks-digest   "0 8 * * * /usr/bin/kestreld --digest"
-    _cron_set extra-networks-bwcheck  "0 * * * * /usr/bin/kestreld --check-bandwidth"
-    _cron_set extra-networks-vpncheck "*/5 * * * * /usr/bin/kestreld --check-vpn"
-    _cron_set extra-networks-wancheck "*/5 * * * * /usr/bin/kestreld --check-wan"
+    _cron_set kestrel-monitor  "* * * * * /usr/bin/kestreld --check-access-log"
+    _cron_set kestrel-digest   "0 8 * * * /usr/bin/kestreld --digest"
+    _cron_set kestrel-bwcheck  "0 * * * * /usr/bin/kestreld --check-bandwidth"
+    _cron_set kestrel-vpncheck "*/5 * * * * /usr/bin/kestreld --check-vpn"
+    _cron_set kestrel-wancheck "*/5 * * * * /usr/bin/kestreld --check-wan"
     # BusyBox crond does not support @reboot — use an init.d service instead
-    ( crontab -l 2>/dev/null | grep -vF '# extra-networks-reboot' ) | crontab -
+    ( crontab -l 2>/dev/null | grep -vF '# kestrel-reboot' ) | crontab -
     printf '#!/bin/sh /etc/rc.common\nSTART=98\nstart() { ( sleep 30; sh "%s/tools/notify-reboot.sh" ) & }\n' \
-        "${SCRIPT_DIR}" > /etc/init.d/extra-networks-reboot
-    chmod 0755 /etc/init.d/extra-networks-reboot
-    /etc/init.d/extra-networks-reboot enable 2>/dev/null || true
+        "${SCRIPT_DIR}" > /etc/init.d/kestrel-reboot
+    chmod 0755 /etc/init.d/kestrel-reboot
+    /etc/init.d/kestrel-reboot enable 2>/dev/null || true
 else
     # Remove crons and reboot notify service if no remaining network has NOTIFY_URL
     if ! grep -qE 'NOTIFY_URL=.+' "${BASE_DIR}/"*-notify.conf 2>/dev/null; then
-        ( crontab -l 2>/dev/null | grep -v '# extra-networks-' ) | crontab -
-        /etc/init.d/extra-networks-reboot disable 2>/dev/null || true
-        rm -f /etc/init.d/extra-networks-reboot
+        ( crontab -l 2>/dev/null | grep -v '# kestrel-' ) | crontab -
+        /etc/init.d/kestrel-reboot disable 2>/dev/null || true
+        rm -f /etc/init.d/kestrel-reboot
     fi
 fi
 
@@ -798,8 +798,8 @@ else
 fi
 
 # Weekly refresh every Sunday at 03:00
-( crontab -l 2>/dev/null | grep -vF '# extra-networks-oui'
-  printf '0 3 * * 0 /usr/bin/kestreld --update-oui 2>/dev/null # extra-networks-oui\n'
+( crontab -l 2>/dev/null | grep -vF '# kestrel-oui'
+  printf '0 3 * * 0 /usr/bin/kestreld --update-oui 2>/dev/null # kestrel-oui\n'
 ) | crontab -
 
 # ── summary ───────────────────────────────────────────────────────────────────
