@@ -3,14 +3,14 @@
 # the VM, and run install.sh for real against a given network config.
 #
 # Usage:
-#   test/qemu/deploy.sh extra-networks/configs/guest.conf [extra-networks/configs/untrusted.conf ...]
+#   test/qemu/deploy.sh networks/configs/guest.conf [networks/configs/untrusted.conf ...]
 #
 # Re-run any time you change Rust code or a config file — it's idempotent.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <config-file> [<config-file> ...]"
-    echo "  e.g.  $0 extra-networks/configs/guest.conf"
+    echo "  e.g.  $0 networks/configs/guest.conf"
     exit 1
 fi
 
@@ -23,22 +23,22 @@ SCP="scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P 2222"
 
 echo "==> Cross-building kestreld + nft-resolve for ${TARGET}..."
 ( cd "$REPO_ROOT" && cross build --release --target "$TARGET" \
-    --manifest-path extra-networks/kestreld-rs/Cargo.toml )
+    --manifest-path networks/kestreld-rs/Cargo.toml )
 ( cd "$REPO_ROOT" && cross build --release --target "$TARGET" \
     --manifest-path split-routing/nft-resolve-rs/Cargo.toml )
 
-echo "==> Packaging extra-networks/ + split-routing/ (excluding target/)..."
+echo "==> Packaging networks/ + split-routing/ (excluding target/)..."
 STAGE="${WORK_DIR}/deploy-stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/openwrt-kestrel"
-for dir in extra-networks split-routing; do
+for dir in networks split-routing; do
     rsync -a --exclude 'target' --exclude '.git' "${REPO_ROOT}/${dir}" "${STAGE}/openwrt-kestrel/"
 done
 tar -czf "${WORK_DIR}/deploy.tar.gz" -C "$STAGE" openwrt-kestrel
 
 echo "==> Copying into the VM..."
 $SCP "${WORK_DIR}/deploy.tar.gz" root@127.0.0.1:/tmp/
-$SCP "${REPO_ROOT}/extra-networks/kestreld-rs/target/${TARGET}/release/kestreld" \
+$SCP "${REPO_ROOT}/networks/kestreld-rs/target/${TARGET}/release/kestreld" \
      "${REPO_ROOT}/split-routing/nft-resolve-rs/target/${TARGET}/release/nft-resolve" \
      root@127.0.0.1:/tmp/
 
@@ -66,8 +66,8 @@ $SSH "
 for conf in "$@"; do
     name="$(basename "$conf")"
     echo "==> Copying ${name} and running install.sh..."
-    $SCP "${REPO_ROOT}/${conf}" root@127.0.0.1:/root/openwrt-kestrel/extra-networks/configs/
-    $SSH "cd /root/openwrt-kestrel && sh extra-networks/install.sh extra-networks/configs/${name}"
+    $SCP "${REPO_ROOT}/${conf}" root@127.0.0.1:/root/openwrt-kestrel/networks/configs/
+    $SSH "cd /root/openwrt-kestrel && sh networks/install.sh networks/configs/${name}"
 done
 
 echo "==> Verifying hostapd is actually beaconing (not just 'up')..."

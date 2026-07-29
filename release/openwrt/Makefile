@@ -10,7 +10,7 @@
 # rather than building Rust inside the OpenWrt build system.
 #
 # To update to a new version:
-#   1. Run `make release` in extra-networks/kestreld-rs/ to build and upload
+#   1. Run `make release` in networks/kestreld-rs/ to build and upload
 #      the binary tarball to GitHub.
 #   2. Update PKG_VERSION and PKG_HASH below.
 
@@ -40,7 +40,7 @@ define Package/$(PKG_NAME)
 endef
 
 define Package/$(PKG_NAME)/description
-  Rust CGI binary that replaces the extra-networks shell CGI scripts for
+  Rust CGI binary that replaces the networks shell CGI scripts for
   /cgi-bin/status, /cgi-bin/device, /cgi-bin/network, /cgi-bin/qr,
   /cgi-bin/approve-access, /cgi-bin/approve-join, and /cgi-bin/rotate-password.
   Run directly by uhttpd per request via symlinks — no daemon, no extra port,

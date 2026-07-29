@@ -7,7 +7,7 @@ router — before you push a config change to hardware. This is not a mock: the
 firewall rules, the WiFi association, and the DHCP lease are all genuinely
 exercised by the real binaries.
 
-What this validates: `extra-networks`/`split-routing`'s `install.sh` behavior,
+What this validates: `networks`/`split-routing`'s `install.sh` behavior,
 the resulting firewall/bridge state, and kestreld's CGI dashboard/approval
 flows, against a real (virtual) WiFi client.
 
@@ -78,7 +78,7 @@ running one doesn't tear down another already-connected client.
 |---|---|
 | `setup.sh` | Downloads (and caches) the OpenWrt release image, boots it under QEMU with two NICs (LAN on a custom hostfwd'd subnet, WAN on default SLIRP with real internet access), waits for SSH, configures the missing WAN interface. `--fresh` discards the current disk and starts clean. |
 | `provision.sh` | Installs `kmod-mac80211-hwsim`, `hostapd-mbedtls`, `wpa-supplicant`, `iw`, `qrencode`; bumps `mac80211_hwsim` to 4 radios (`radio0` as the sole AP radio — guest and untrusted run as two BSSes on it, same as a real router with one radio card and multiple SSIDs — plus 3 independent client radios, rebooting if that requires a module reload); fixes the wireless country-code issue (see below); does the full network restart needed for it to take effect. |
-| `deploy.sh <config...>` | Cross-builds `kestreld`/`nft-resolve`, copies `extra-networks/`+`split-routing/` into the VM, symlinks `kestreld` into `/www/cgi-bin/*` (matching the real packaged deployment), and runs `install.sh` for each config you pass it. Re-run any time you change Rust code or a config — idempotent. |
+| `deploy.sh <config...>` | Cross-builds `kestreld`/`nft-resolve`, copies `networks/`+`split-routing/` into the VM, symlinks `kestreld` into `/www/cgi-bin/*` (matching the real packaged deployment), and runs `install.sh` for each config you pass it. Re-run any time you change Rust code or a config — idempotent. |
 | `client.sh <ssid> <psk> [mac] [phy]` | Brings up a station interface on the given hwsim client radio (`phy1` by default; `phy2`/`phy3` for additional concurrent devices), associates with real `wpa_supplicant`, gets a real DHCP lease. Run it multiple times with different MACs/phys to simulate multiple devices at once. |
 
 Everything lives under `test/qemu/work/` (gitignored) — downloaded images,

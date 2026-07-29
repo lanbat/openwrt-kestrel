@@ -2,7 +2,7 @@
 #
 # Produces both .apk (OpenWrt snapshot) and .ipk (OpenWrt stable) containing:
 #   /usr/bin/kestreld    — router UI, run by uhttpd as a CGI binary via
-#                          symlinks under /www/cgi-bin/ (extra-networks/kestreld-rs)
+#                          symlinks under /www/cgi-bin/ (networks/kestreld-rs)
 #   /usr/bin/nft-resolve — DNS blocklist resolver (split-routing/nft-resolve-rs)
 #
 # No daemon, no extra port, no reverse proxy: uhttpd invokes kestreld fresh
@@ -33,6 +33,14 @@ OPENWRT_ARCH ?= aarch64_cortex-a53
 ROUTER       ?=
 BUILD_STD    ?= no
 
+# `cross`, when invoked with `--manifest-path <subdir>/Cargo.toml` (as every
+# recipe below does), doesn't reliably auto-discover Cross.toml at the repo
+# root — confirmed directly: mips/mipsel silently fell back to the host
+# linker and failed ("relocations in generic ELF") until CROSS_CONFIG was
+# set explicitly. Pass it for every target so this never depends on cross's
+# own discovery behavior.
+export CROSS_CONFIG := $(CURDIR)/Cross.toml
+
 ifeq ($(BUILD_STD),yes)
 CROSS_BUILD := cross +nightly build -Z build-std=std,panic_abort --release --target $(CROSS_TARGET)
 CROSS_RUN   := cross +nightly run -Z build-std=std,panic_abort --release --target $(CROSS_TARGET)
@@ -43,14 +51,14 @@ endif
 
 PKG_NAME    := kestrel
 PKG_VERSION := $(shell cargo metadata --no-deps --format-version 1 \
-                 --manifest-path extra-networks/kestreld-rs/Cargo.toml \
+                 --manifest-path networks/kestreld-rs/Cargo.toml \
                  | python3 -c "import json,sys; d=json.load(sys.stdin); \
                    print(next(p['version'] for p in d['packages'] \
                          if p['name']=='kestreld'))")
 PKG_REL     := r0
 PKG_VER_FULL := $(PKG_VERSION)-$(PKG_REL)
 
-UI_BIN      := extra-networks/kestreld-rs/target/$(CROSS_TARGET)/release/kestreld
+UI_BIN      := networks/kestreld-rs/target/$(CROSS_TARGET)/release/kestreld
 NFT_BIN     := split-routing/nft-resolve-rs/target/$(CROSS_TARGET)/release/nft-resolve
 
 OUTDIR      := target/pkg
@@ -72,7 +80,7 @@ all: package
 build: $(UI_BIN) $(NFT_BIN)
 
 $(UI_BIN):
-	$(CROSS_BUILD) --manifest-path extra-networks/kestreld-rs/Cargo.toml
+	$(CROSS_BUILD) --manifest-path networks/kestreld-rs/Cargo.toml
 
 $(NFT_BIN):
 	$(CROSS_BUILD) --manifest-path split-routing/nft-resolve-rs/Cargo.toml
@@ -175,7 +183,7 @@ deploy: package
 # skipped there for x86_64, which runs natively on the runner already.
 
 smoke-test: $(UI_BIN) $(NFT_BIN)
-	$(CROSS_RUN) --manifest-path extra-networks/kestreld-rs/Cargo.toml \
+	$(CROSS_RUN) --manifest-path networks/kestreld-rs/Cargo.toml \
 	  -- --rotate-apply __smoketest__ /tmp/__smoketest_missing_pwfile__
 	$(CROSS_RUN) --manifest-path split-routing/nft-resolve-rs/Cargo.toml \
 	  -- --help
@@ -184,5 +192,5 @@ smoke-test: $(UI_BIN) $(NFT_BIN)
 
 clean:
 	rm -rf target/pkg
-	cargo clean --manifest-path extra-networks/kestreld-rs/Cargo.toml
+	cargo clean --manifest-path networks/kestreld-rs/Cargo.toml
 	cargo clean --manifest-path split-routing/nft-resolve-rs/Cargo.toml

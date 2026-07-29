@@ -4,11 +4,11 @@ Two cooperating toolkits for OpenWrt routers, delivered as a single native packa
 
 ## Features
 
-**Isolated WiFi networks** ([`extra-networks`](extra-networks/README.md))
+**Isolated WiFi networks** ([`networks`](networks/README.md))
 - One config file per network (guest, IoT/untrusted, ...) — `sh install.sh configs/guest.conf` deploys a complete isolated zone: own subnet, firewall zone, DNS policy, rate limit
 - **Join approval** — block new devices from the internet until you tap Approve on a push notification; approved MACs are silent forever after
-- **Device fingerprinting** — recognizes a device again after its privacy MAC rotates, using DHCP/WiFi/mDNS signals; always a human-confirmed suggestion, never applied automatically ([details](extra-networks/README.md#oui-database-manufacturer-lookup))
-- **Per-device outbound control** — each approved device must explicitly allow every domain/IP it tries to reach; an approved domain can be routed through a configured VPN tier instead of WAN, per rule ([details](extra-networks/README.md#per-device-control))
+- **Device fingerprinting** — recognizes a device again after its privacy MAC rotates, using DHCP/WiFi/mDNS signals; always a human-confirmed suggestion, never applied automatically ([details](networks/README.md#oui-database-manufacturer-lookup))
+- **Per-device outbound control** — each approved device must explicitly allow every domain/IP it tries to reach; an approved domain can be routed through a configured VPN tier instead of WAN, per rule ([details](networks/README.md#per-device-control))
 - **LAN ↔ isolated access approval**, in both directions, with auto-expiring temporary rules
 - MAC allowlisting, access-hour scheduling, bandwidth alerts, temporary port forwarding, password rotation with live QR regeneration
 - Live status dashboard — connected devices and traffic, WireGuard server peers, VPN health, pending approvals, port forwards
@@ -18,7 +18,7 @@ Two cooperating toolkits for OpenWrt routers, delivered as a single native packa
 **Domain-based VPN routing** ([`split-routing`](split-routing/docs/mullvad-routing.md))
 - Route specific domains or categories through a WireGuard VPN without moving the default gateway
 - Multiple independent VPN tiers, each with its own categories, local lists, and remote blocklist sources
-- Per-device, per-rule routing initiated from the `extra-networks` device page (see above) — no editing tier config required
+- Per-device, per-rule routing initiated from the `networks` device page (see above) — no editing tier config required
 
 **Blocklist resolution** ([`nft-resolve`](split-routing/nft-resolve-rs/))
 - Resolves Adblock, dnsmasq, hosts, RPZ, Unbound, ipset, clash, and plain-domain blocklist formats into nftables sets, with parallel DNS resolution
@@ -42,7 +42,7 @@ The status page's rendered HTML is cached in `/tmp/kestreld/` for 5 seconds, so 
 
 Also runnable as a standalone HTTP server (`kestreld 8080`) for local development — not needed on the router itself.
 
-Source: [`extra-networks/kestreld-rs/`](extra-networks/kestreld-rs/)
+Source: [`networks/kestreld-rs/`](networks/kestreld-rs/)
 
 ### nft-resolve
 
@@ -50,11 +50,11 @@ A CLI tool (`/usr/bin/nft-resolve`) that resolves a domain blocklist into nftabl
 
 Source: [`split-routing/nft-resolve-rs/`](split-routing/nft-resolve-rs/)
 
-### extra-networks
+### networks
 
 Shell scripts and CGI handlers for isolated WiFi networks (guest, untrusted IoT). Manages per-network dnsmasq config, per-device firewall rules in nftables/fw4, join approval, push notifications, password rotation, and device labelling.
 
-Source: [`extra-networks/`](extra-networks/README.md)
+Source: [`networks/`](networks/README.md)
 
 ### split-routing
 
@@ -92,15 +92,15 @@ git clone https://github.com/lanbat/openwrt-kestrel /root/openwrt-kestrel
 cd /root/openwrt-kestrel
 ```
 
-**extra-networks** requires a config file per network. Copy the examples and fill in at minimum `WIFI_KEY`, `SSID`, and `SUBNET`:
+**networks** requires a config file per network. Copy the examples and fill in at minimum `WIFI_KEY`, `SSID`, and `SUBNET`:
 
 ```sh
-cp extra-networks/configs/guest.conf.example     extra-networks/configs/guest.conf
-cp extra-networks/configs/untrusted.conf.example extra-networks/configs/untrusted.conf
-vi extra-networks/configs/guest.conf
-vi extra-networks/configs/untrusted.conf
-sh extra-networks/install.sh extra-networks/configs/guest.conf
-sh extra-networks/install.sh extra-networks/configs/untrusted.conf
+cp networks/configs/guest.conf.example     networks/configs/guest.conf
+cp networks/configs/untrusted.conf.example networks/configs/untrusted.conf
+vi networks/configs/guest.conf
+vi networks/configs/untrusted.conf
+sh networks/install.sh networks/configs/guest.conf
+sh networks/install.sh networks/configs/untrusted.conf
 ```
 
 **split-routing** reads its config from `/etc/kestrel/split-routing/` and needs no argument:
@@ -179,6 +179,13 @@ run for real — the same code paths as on actual hardware — before you push a
 change to a router. See [`test/qemu/README.md`](test/qemu/README.md) for
 setup and a quickstart.
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for architecture notes, the testing
+hierarchy (and why `cargo test` passing isn't sufficient on its own for
+changes touching real system state), shell-to-Rust porting conventions, and
+known toolchain gotchas.
+
 ## Releases
 
 Tagging a `v*` commit triggers GitHub Actions, which builds packages for all six supported architectures in parallel and publishes them to a single GitHub release:
@@ -195,7 +202,7 @@ Tagging a `v*` commit triggers GitHub Actions, which builds packages for all six
 To cut a release locally (aarch64 only):
 
 ```sh
-# bump version in extra-networks/kestreld-rs/Cargo.toml, then:
+# bump version in networks/kestreld-rs/Cargo.toml, then:
 make release
 ```
 
@@ -243,8 +250,8 @@ apk add dnsmasq-full
 
 ```sh
 cd /root/openwrt-kestrel
-sh extra-networks/install.sh extra-networks/configs/guest.conf
-sh extra-networks/install.sh extra-networks/configs/untrusted.conf
+sh networks/install.sh networks/configs/guest.conf
+sh networks/install.sh networks/configs/untrusted.conf
 sh split-routing/install.sh
 ```
 

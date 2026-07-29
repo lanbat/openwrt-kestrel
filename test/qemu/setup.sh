@@ -1,7 +1,7 @@
 #!/bin/bash
 # test/qemu/setup.sh — download (if needed) and boot a real OpenWrt VM under
 # QEMU/KVM with mac80211_hwsim virtual radios, so hostapd/fw4/dnsmasq/kestreld
-# all run for real. This lets you test extra-networks/split-routing changes
+# all run for real. This lets you test networks/split-routing changes
 # before pushing them to your actual router.
 #
 # Usage:

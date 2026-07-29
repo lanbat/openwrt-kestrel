@@ -204,8 +204,8 @@ RESOLVE_URLS_torrenttrackers="url=https://example.com/trackers.txt domain=https:
 
 ### Routing one device's traffic through a tier, per rule
 
-The above sections route by domain/category for everyone. `extra-networks`'
-device-control feature (see [its README](../../extra-networks/README.md#per-device-control))
+The above sections route by domain/category for everyone. `networks`'
+device-control feature (see [its README](../../networks/README.md#per-device-control))
 can instead route a single approved device's traffic through a configured
 VPN tier, one domain rule at a time — no editing `vpn-*.conf` or local
 files required:
@@ -215,7 +215,7 @@ files required:
    device page's **Approve domain** form.
 2. Choosing a tier there adds a per-device nftables set
    (`{iface}_route_{mac}_{tier}_4/6`) to the domain's dnsmasq `nftset=`
-   line, and `tools/regen-inspect.sh` emits a `meta mark set <fwmark>`
+   line, and `kestreld --regen-inspect` emits a `meta mark set <fwmark>`
    rule that marks matching traffic before split-routing's own mark chain
    runs — the existing `ip rule add fwmark ... lookup ...` for that tier
    then policy-routes it exactly as if it had matched the tier's own
