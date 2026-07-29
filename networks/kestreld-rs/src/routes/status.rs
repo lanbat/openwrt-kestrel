@@ -20,6 +20,8 @@ struct StatusTmpl {
     wifi: Vec<WifiRow>,
     vpn: Vec<VpnRow>,
     wg_sections: Vec<WgSection>,
+    openvpn_sections: Vec<OpenVpnSection>,
+    ipsec_peers: Vec<IpsecPeerRow>,
     networks: Vec<NetworkTmpl>,
     port_forwards: Vec<PfwdRow>,
     show_ip6_col: bool,
@@ -49,6 +51,26 @@ pub struct WgPeerRow {
     pub endpoint: String,
     pub allowed_ips: String,
     pub last_seen: String,
+    pub traffic: String,
+}
+
+pub struct OpenVpnSection {
+    pub name: String,
+    pub peers: Vec<OpenVpnPeerRow>,
+}
+
+pub struct OpenVpnPeerRow {
+    pub common_name: String,
+    pub real_address: String,
+    pub virtual_address: String,
+    pub connected_since: String,
+    pub traffic: String,
+}
+
+pub struct IpsecPeerRow {
+    pub name: String,
+    pub remote: String,
+    pub established: String,
     pub traffic: String,
 }
 
@@ -181,6 +203,8 @@ async fn build(snap: &Snapshot) -> StatusTmpl {
     let wifi = build_wifi(snap);
     let vpn = build_vpn(snap);
     let wg_sections = build_wg(snap);
+    let openvpn_sections = build_openvpn(snap);
+    let ipsec_peers = build_ipsec(snap);
     let (show_ip6_col, show_join_col) = global_col_flags(snap);
     let networks = build_networks(snap, show_ip6_col, show_join_col).await;
     let port_forwards = build_port_forwards(snap);
@@ -196,6 +220,8 @@ async fn build(snap: &Snapshot) -> StatusTmpl {
         wifi,
         vpn,
         wg_sections,
+        openvpn_sections,
+        ipsec_peers,
         networks,
         port_forwards,
         show_ip6_col,
@@ -245,6 +271,28 @@ fn build_wg(snap: &Snapshot) -> Vec<WgSection> {
             traffic: p.traffic.clone(),
         }).collect();
         WgSection { name: srv.name.clone(), peers }
+    }).collect()
+}
+
+fn build_openvpn(snap: &Snapshot) -> Vec<OpenVpnSection> {
+    snap.openvpn_servers.iter().map(|srv| {
+        let peers = srv.peers.iter().map(|p| OpenVpnPeerRow {
+            common_name: p.common_name.clone(),
+            real_address: p.real_address.clone(),
+            virtual_address: p.virtual_address.clone(),
+            connected_since: p.connected_since.clone(),
+            traffic: p.traffic.clone(),
+        }).collect();
+        OpenVpnSection { name: srv.name.clone(), peers }
+    }).collect()
+}
+
+fn build_ipsec(snap: &Snapshot) -> Vec<IpsecPeerRow> {
+    snap.ipsec_peers.iter().map(|p| IpsecPeerRow {
+        name: p.name.clone(),
+        remote: p.remote.clone(),
+        established: p.established.clone(),
+        traffic: p.traffic.clone(),
     }).collect()
 }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::data::{banip, dhcp, dns, files, iw, logs, neigh, nft, system, vpn, wg};
+use crate::data::{banip, dhcp, dns, files, ipsec_peers, iw, logs, neigh, nft, openvpn, system, vpn, wg};
 
 pub struct Snapshot {
     pub at: Instant,
@@ -12,6 +12,12 @@ pub struct Snapshot {
     pub iw: iw::IwState,
     pub vpn_tiers: Vec<vpn::VpnTier>,
     pub wg_servers: Vec<wg::WgServer>,
+    /// Inbound OpenVPN server peer visibility — empty when no named
+    /// `config openvpn` UCI section is configured. See `data::openvpn`.
+    pub openvpn_servers: Vec<openvpn::OpenVpnServer>,
+    /// Inbound IPsec (strongSwan) peer visibility — empty when `ipsec` is
+    /// absent or no SA is established. See `data::ipsec_peers`.
+    pub ipsec_peers: Vec<ipsec_peers::IpsecPeer>,
     pub nft: nft::NftState,
     /// banIP threat-feed membership (spamhaus, feodo, dshield, ...), parsed
     /// out of the same `nft.raw` dump above — no extra process spawned.
@@ -126,9 +132,11 @@ pub async fn build_snapshot(base_dir: &Path, split_routing_dir: &Path) -> Snapsh
         files::read_all_network_confs(base_dir),
     );
 
-    let (vpn_tiers, wg_servers) = tokio::join!(
+    let (vpn_tiers, wg_servers, openvpn_servers, ipsec_peers_list) = tokio::join!(
         vpn::fetch_tiers(split_routing_dir),
         wg::fetch_servers(now_ts),
+        openvpn::fetch_servers(),
+        ipsec_peers::fetch_peers(),
     );
 
     // Parallel: reverse-DNS all leased IPs
@@ -254,6 +262,8 @@ pub async fn build_snapshot(base_dir: &Path, split_routing_dir: &Path) -> Snapsh
         iw: iw_state,
         vpn_tiers,
         wg_servers,
+        openvpn_servers,
+        ipsec_peers: ipsec_peers_list,
         nft: nft_state,
         banip: banip_feeds,
         leases,

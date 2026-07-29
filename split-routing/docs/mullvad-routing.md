@@ -4,6 +4,8 @@ Selectively routes LAN traffic through Mullvad WireGuard interfaces, leaving eve
 
 Multiple VPN tiers are supported — for example routing torrents via a Bulgarian exit and BBC iPlayer via a UK exit simultaneously.
 
+This guide walks through the Mullvad/WireGuard case, but the mechanism itself isn't WireGuard-specific: `VPN_IFACE` just needs to name any interface that's up and policy-routable (`ip link`/`ip rule`/`ip route`) with a working default route — an OpenVPN `tun`/`tap` interface or an IPsec/strongSwan `xfrm` interface works exactly the same way. Nothing in `data::vpn`/`check_vpn.rs` or the nft mark-chain generation checks the interface's protocol.
+
 ## What install.sh sets up automatically
 
 | Automatic | What it does |
@@ -16,7 +18,7 @@ Multiple VPN tiers are supported — for example routing torrents via a Bulgaria
 ## Prerequisites
 
 - OpenWrt with `fw4` / nftables (OpenWrt 22.03 or later)
-- One or more Mullvad WireGuard interfaces configured in `/etc/config/network`
+- One or more Mullvad WireGuard interfaces configured in `/etc/config/network` (or any other VPN interface — see the note above)
 
 ## Configuration structure
 
@@ -30,7 +32,7 @@ ROUTE_IPV6=yes    # route marked IPv6 traffic through VPNs (set no if endpoint l
 
 **Per-VPN** — one file per interface in `/etc/kestrel/split-routing/vpn-*.conf`:
 ```sh
-VPN_IFACE=mv_bg          # WireGuard interface name
+VPN_IFACE=mv_bg          # VPN interface name (WireGuard, OpenVPN, IPsec, ...)
 ROUTE_TABLE=100          # policy routing table (unique per tier)
 FWMARK=0x1               # firewall mark (unique per tier)
 DNS_CATS="torrentsites pornsites sites"   # dns-mechanism categories

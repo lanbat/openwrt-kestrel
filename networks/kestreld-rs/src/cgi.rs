@@ -5,7 +5,7 @@ use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
 
-use crate::routes::{approve_access, approve_join, device, identity, network, qr, rotate_password};
+use crate::routes::{approve_access, approve_join, device, identity, network, plugin_info, qr, rotate_password};
 use crate::state::AppState;
 
 const BASE_DIR: &str = "/etc/kestrel/networks";
@@ -57,6 +57,12 @@ pub async fn run() {
             let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = identity::get(State(state), Query(q)).await;
+            respond_html(html.0);
+        }
+
+        ("/cgi-bin/plugin_info", "GET") => {
+            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let html = plugin_info::get(Query(q)).await;
             respond_html(html.0);
         }
 

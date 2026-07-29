@@ -124,11 +124,65 @@ worth reusing has been ported to a built-in kestreld CLI subcommand:
 |---|---|---|
 | `--update-oui` | `tools/oui-update.sh` | weekly cron |
 | `--regen-inspect IFACE` | `tools/regen-inspect.sh` | on setup + every device-rule change (in-process, not a subcommand call — see below) |
-| `--check-wan` | `tools/check-wan.sh` | every 5 min cron |
-| `--check-vpn` | `tools/check-vpn.sh` | every 5 min cron |
-| `--check-bandwidth` | `tools/bandwidth-check.sh` | hourly cron |
-| `--check-access-log` | `tools/check-access-log.sh` | every 1 min cron |
+| `--check-wan` | `tools/check-wan.sh` | manual/debug only — see `--daemon` below |
+| `--check-vpn` | `tools/check-vpn.sh` | manual/debug only — see `--daemon` below |
+| `--check-bandwidth` | `tools/bandwidth-check.sh` | manual/debug only — see `--daemon` below |
+| `--check-access-log` | `tools/check-access-log.sh` | manual/debug only — see `--daemon` below |
 | `--digest` | `tools/digest.sh` | daily cron |
+| `--daemon` | (new — no shell equivalent) | persistent, `procd`-supervised service |
+| `--update-threat-intel` | (new — no shell equivalent) | weekly cron, staggered from `--update-oui` |
+
+`--daemon` (`daemon.rs`) is the one genuinely long-running process in this
+codebase, everything else here is one-shot. It subsumes the ongoing job of
+`--check-wan`/`--check-vpn`/`--check-bandwidth`/`--check-access-log` (their
+CLI subcommands stay callable by hand for debugging, but their cron
+entries are gone) plus a capability that never existed at all in the Rust
+port until now: capturing device-control "pending connection" events for
+per-device approval. The original shell CGI only ever did that inline, by
+scraping `logread` on each device-page view — the port never carried it
+over. `--daemon` streams `logread -f` continuously instead of polling a
+bounded log buffer once a minute, which closes a real gap the polling
+design had: `logd`'s buffer can evict events between scans, silently
+dropping them, not just delaying them. See `daemon.rs`'s module doc for
+the full design (it also runs WAN/VPN checks on a much shorter internal
+timer than their old 5-minute cron cadence, and keeps a persistent
+per-network `{iface}-connection-history` audit log of every LAN-access/
+allowlist-rejection/pending-connection sighting, independent of whether
+any single ntfy delivery succeeds). It also runs a device-observation
+materializer (`observation.rs`) and a plugin framework (`plugins.rs`) —
+see their own module docs. Two plugin kinds share one `Event` enum and one
+enable/disable mechanism (`{plugins_dir}/disabled`, matched by name,
+re-read every 5-minute re-scan so toggling or hot-adding a plugin needs no
+daemon restart):
+
+- **External processes** — any executable dropped in
+  `/etc/kestrel/plugins/` gets spawned and sent one JSON line per event
+  (all 7 `Event` variants — connections, DNS, device-approval,
+  WAN/VPN/bandwidth transitions) on its stdin, optionally narrowed via a
+  `{"subscribe":[...]}` line it writes back, and can write a small
+  whitelisted set of actions (`notify`, `log`, `add_rule`, `annotate`)
+  back on its stdout — deliberately a separate process rather than a
+  `dlopen`ed `.so`, since this runs as root on a router targeting 7+
+  architectures and a bad plugin shouldn't be able to take the whole
+  daemon down or need Rust ABI stability across separately compiled
+  artifacts. A plugin also self-describes itself via an `{"info":...}`
+  line (description + optional version/maintainer/website), persisted to
+  `{plugins_dir}/{name}.info` for `routes::plugin_info` (a CGI-mode,
+  one-shot process with no access to the daemon's live `PluginManager`)
+  to read back for its detail page.
+- **`RustPlugin` implementations** — compiled directly into the binary
+  (see `DeviceApprovedNotifier` for the one kestreld ships), called
+  in-process via a `PluginContext` with real typed methods instead of the
+  external actions above — for first-party functionality, not something
+  a user writes. `handle()` returns a boxed future (not a plain `async
+  fn`, which isn't object-safe on stable Rust yet) so `PluginManager` can
+  hold a `Vec<Arc<dyn RustPlugin>>`. Each call is run inside its own
+  `tokio::spawn` and awaited via the `JoinHandle` rather than called
+  directly — a panic in a `RustPlugin` would otherwise unwind straight
+  into whichever `daemon.rs` task called `broadcast()`, and that task
+  ending for any reason is what `daemon.rs` treats as fatal to the whole
+  process (see above). Isolating it there gives compiled-in plugins the
+  same crash isolation external processes get for free from the OS.
 
 All were ported because kestreld already parses the exact same on-disk
 state for the dashboard — the shell version was often re-implementing (in
@@ -214,6 +268,20 @@ property this project deliberately keeps for that category of script.
   `*.{apk,ipk}` matches that literal string, not either extension, and
   silently uploads nothing (`if-no-files-found: error` catches it, but
   only if you check). List each extension on its own line instead.
+- **HTTP-form validation doesn't protect a daemon-automated call path to
+  the same function.** `routes::device`'s `approve_domain`/`approve_pending`
+  handlers validate `domain`/`dst_ip` before ever touching a dnsmasq conf
+  line or `nft` command — but when `observation.rs`'s automatic window
+  materialization was added to call the same rule-writing logic from the
+  daemon (sourcing its domain/IP from a device's own DNS query log and
+  connection history, not an HTTP form), that validation didn't come along
+  for free. Fixed by validating inside the shared `write_domain_rule`/
+  `write_ip_rule` functions themselves (`data::files::is_valid_domain`,
+  an `IpAddr` parse) rather than trusting every caller — any function that
+  ends up embedding external input in a shell command or config-file line
+  needs to validate at its own entry point if it's reachable from more
+  than one caller, especially once one of those callers is fed from
+  network-observable data instead of a validated form.
 
 ## Release process
 

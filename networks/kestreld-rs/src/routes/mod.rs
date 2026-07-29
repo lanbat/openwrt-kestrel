@@ -3,6 +3,7 @@ pub mod approve_join;
 pub mod device;
 pub mod identity;
 pub mod network;
+pub mod plugin_info;
 pub mod qr;
 pub mod rotate_password;
 pub mod status;

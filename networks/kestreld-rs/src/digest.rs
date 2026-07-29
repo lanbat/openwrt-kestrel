@@ -395,6 +395,27 @@ async fn wg_section() -> Vec<String> {
         .collect()
 }
 
+// ── monitor daemon health ────────────────────────────────────────────────
+
+/// Warns if the persistent monitor daemon (`kestreld --daemon`, see
+/// `daemon.rs`) should be installed but isn't actually running —
+/// `procd`'s `respawn` handles ordinary crashes, but this catches the
+/// rarer case of it never coming back (e.g. after a failed sysupgrade),
+/// which would otherwise silently stop LAN-access/allowlist-rejection/
+/// pending-connection capture and WAN/VPN/bandwidth checks with no other
+/// symptom until someone happens to notice a stale dashboard.
+async fn daemon_health_line() -> Option<String> {
+    if tokio::fs::metadata("/etc/init.d/kestreld").await.is_err() {
+        return None; // not installed on this router — nothing to check
+    }
+    let (running, _) = cmd::run("pgrep", &["-f", "kestreld --daemon"]).await;
+    if running {
+        None
+    } else {
+        Some("⚠ Monitor daemon (kestreld --daemon) is not running — LAN-access/pending-connection capture and WAN/VPN/bandwidth checks are not happening.".to_string())
+    }
+}
+
 // ── expiring access rules (crontab `allow-service.sh remove` entries) ───
 
 async fn expiring_rules_section() -> Option<String> {
@@ -489,6 +510,7 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path) -> i32 {
     let gcal_tz: i64 = global_vars.get("GCAL_TZ_OFFSET").and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let sys_line = system_health_line().await;
+    let daemon_warning = daemon_health_line().await;
     let cal_bullets = calendar_bullets(&gcal_url, gcal_tz).await;
     let vpn_lines = vpn_section(split_routing_dir).await;
     let sets_section = routing_sets_section(split_routing_dir).await;
@@ -520,6 +542,9 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path) -> i32 {
         body_parts.push(format!("This week:\n{}", cal_bullets.join("\n")));
     }
     body_parts.push(sys_line);
+    if let Some(w) = &daemon_warning {
+        body_parts.push(w.clone());
+    }
     if !vpn_lines.is_empty() {
         body_parts.push(vpn_lines.join("\n"));
     }

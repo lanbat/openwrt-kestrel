@@ -93,6 +93,16 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path, iface: &str) -> i32 
         out.push_str(&format!("set {iface}_allow_{mn}_6 {{ type ipv6_addr; flags dynamic,timeout; timeout 24h; }}\n"));
     }
 
+    // One shared per-network "observe" set (not per-mac — membership
+    // already keys on IP), for the time-boxed observation windows
+    // `observation.rs` manages: a device's IP lands here with a per-window
+    // nft `timeout` when a window starts, bypassing the default-drop
+    // policy below until nftables expires the membership itself.
+    if !labels.is_empty() {
+        out.push_str(&format!("set {iface}_observe_4 {{ type ipv4_addr; flags dynamic,timeout; timeout 1h; }}\n"));
+        out.push_str(&format!("set {iface}_observe_6 {{ type ipv6_addr; flags dynamic,timeout; timeout 1h; }}\n"));
+    }
+
     let mut seen_route_sets: HashSet<(String, String)> = HashSet::new();
     for r in rules.iter().filter(|r| is_routed_domain_rule(r)) {
         let mn = mac_no_colons(&r.mac);
@@ -130,6 +140,8 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path, iface: &str) -> i32 
                 out.push_str(&format!("    iifname \"br-{iface}\" ip6 saddr {ip6} ct state new ip6 daddr @{iface}_allow_{mn}_6 accept\n"));
             }
         }
+        out.push_str(&format!("    iifname \"br-{iface}\" ip saddr @{iface}_observe_4 accept\n"));
+        out.push_str(&format!("    iifname \"br-{iface}\" ip6 saddr @{iface}_observe_6 accept\n"));
         out.push_str(&format!("    iifname \"br-{iface}\" ct state new limit rate 60/minute log prefix \"EXTNET-{iface}-NEW: \" level info drop\n"));
     }
     out.push_str("}\n");

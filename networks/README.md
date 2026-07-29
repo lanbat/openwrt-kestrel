@@ -27,7 +27,10 @@ Each network is a config file. Add a new one by copying an example.
 - **Port restriction** — limit outbound ports (e.g. web-only guests)
 - **MAC allowlist** — for IoT networks: unlisted devices get no lease and are blocked from forwarding
 - **Join approval** — optionally block all new devices from internet access until you approve them; a push notification fires with an **Approve** button the moment they connect; approvals persist across reboots and are reset when the password is rotated
-- **Per-device control** — when enabled, each approved device must explicitly allow every outbound domain or IP it tries to reach; blocked attempts accumulate on a per-device management page; approved rules persist across reboots
+- **Per-device control** — when enabled, each approved device must explicitly allow every outbound domain or IP it tries to reach; blocked attempts accumulate on a per-device management page; approved rules persist across reboots. Instead of approving one destination at a time, a device can be put into an **observation window** — allow everything for a chosen duration, then auto-approve whatever it actually used once the window closes, preferring a domain rule over a raw IP when DNS ties the two together
+- **DNS/connection correlation and threat-intel** — pending connections and DNS query history are cross-referenced, so a blocked IP can be shown (and approved) as the domain that resolved to it; both are checked against threat-intel feeds (banIP for IPs, a dedicated multi-feed domain list for hostnames) with per-feed attribution
+- **Multi-VPN support** — split-routing egress tiers work with any VPN protocol that brings up a routable interface (WireGuard, OpenVPN, IPsec), not just WireGuard; the dashboard separately shows inbound peer visibility for WireGuard, OpenVPN, and IPsec (strongSwan) VPN servers
+- **Plugin framework** — the persistent daemon can hand events (new connection, DNS query/answer, device approved, WAN/VPN state change, bandwidth alert) to external scripts or compiled-in Rust plugins, each independently enabled/disabled without a restart
 - **LAN ↔ isolated access** — optionally let LAN devices reach isolated network devices (`LAN_ACCESS=yes`); separately, isolated devices that try to reach LAN services trigger a push notification with an **Approve** button so you can grant temporary per-service access
 - **mDNS reflection** — let guests discover shared services (Chromecast, AirPrint) via avahi
 - **Push notifications** — event-driven alerts via ntfy.sh: new device joined, join approved/denied/revoked, LAN access request/approval/expiry, allowlist rejection, bandwidth alert, port forwarded/removed, password rotated, daily digest, VPN state change, router reboot
@@ -42,6 +45,23 @@ Each network is a config file. Add a new one by copying an example.
 - **IPv6** — optional DHCPv6 + RA with auto-derived IPv6 DNS; IPv6 addresses supported throughout (device table, approval flow, firewall rules)
 - **No secrets in the repo** — WiFi keys live only in gitignored config files on the router
 - **Idempotent installs** — re-running `install.sh` updates an existing network cleanly
+
+## Contents
+
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [Allowlist](#allowlist)
+- [Encrypted DNS (DoT)](#encrypted-dns-dot)
+- [mDNS reflection](#mdns-reflection)
+- [Device notifications](#device-notifications) — [approval workflows](#approval-workflows-at-a-glance), [LAN access approval](#lan-access-approval), [join approval](#join-approval), [per-device control](#per-device-control), [bandwidth alerts](#bandwidth-alerts), [daily digest](#daily-digest), [WAN](#wan-monitoring)/[VPN monitoring](#vpn-monitoring), VPN server peers ([WireGuard](#wireguard-vpn-server-peers), [OpenVPN/IPsec](#openvpn-and-ipsec-server-peers))
+- [Status dashboard](#status-dashboard)
+- [VLAN trunk](#vlan-trunk)
+- [WiFi VAP recovery](#wifi-vap-recovery)
+- [Plugins](#plugins)
+- [Tools](#tools) — [status](#status), [uninstall](#uninstall), [QR code](#qr-code), [access schedule](#access-schedule), [temporary LAN access](#temporary-lan-access), [expose a port](#expose-a-port), [rotate password](#rotate-password), [guest info page](#guest-info-page), [OUI database](#oui-database-manufacturer-lookup), [domain threat-intel feeds](#domain-threat-intel-feeds)
+- [Global settings](#global-settings)
+- [Adding a new network](#adding-a-new-network)
+- [Notes](#notes)
 
 ## Setup
 
@@ -290,9 +310,10 @@ Every device with a label has a dedicated management page — not just DEVICE_CO
 | Device | Always | Label, manufacturer (from OUI database; shows "Randomized MAC" for privacy MACs), MAC, tracked IPv4/IPv6, network, DNS name, join approval state and actions, and a link to the [known identity](#oui-database-manufacturer-lookup) page if this MAC has been fingerprint-matched |
 | Connection rate limit | Always | New-connection cap per minute (default 120); configurable per device |
 | Approve domain | `DEVICE_CONTROL=yes` | Add a hostname allow rule, optionally routed through a configured VPN tier instead of WAN — see [Per-device control](#per-device-control) |
-| Pending connections | `DEVICE_CONTROL=yes` | Blocked outbound attempts — Allow / Deny each. Destinations matching a banIP threat-intel feed (spamhaus, feodo, dshield, turris, urlhaus, cinsscore, ...) are labeled with which feed flagged them |
+| Observe connections | `DEVICE_CONTROL=yes` | Allow everything for a chosen duration (15m/1h/8h/24h) instead of approving one destination at a time; every distinct destination seen during the window becomes a permanent rule automatically once it ends — a domain rule when DNS resolution linked it to a hostname, an IP rule otherwise. Enforced with a self-expiring nftables set entry, so nothing needs to remember to revoke it |
+| Pending connections | `DEVICE_CONTROL=yes` | Blocked outbound attempts — Allow / Deny each. Destinations matching a banIP threat-intel feed (spamhaus, feodo, dshield, turris, urlhaus, cinsscore, ...) are labeled with which feed flagged them. When the device resolved the destination via DNS shortly beforehand, the domain is shown ("via example.com") and can be approved instead of the raw IP — recommended, since it keeps working if the destination's IP changes |
 | Rules | `DEVICE_CONTROL=yes` | Active domain and IP allow rules — revoke individually; domain rules show their route (WAN or VPN tier name) |
-| DNS query history | Always | Last 50 DNS queries made by this device (parsed from dnsmasq's query log), each flagged with an "⚠ adblock" badge if the domain is on the adblock blocklist |
+| DNS query history | Always | Last 50 DNS queries made by this device (parsed from dnsmasq's query log), each showing the most recent IP it resolved to (if the daemon has recorded one) and flagged with an "⚠ adblock" badge if the domain is on the adblock blocklist, plus one "⚠ &lt;feed&gt;" badge per domain threat-intel feed that flags it (`kestreld --update-threat-intel` — refreshed weekly, same pattern as the OUI database; a domain flagged by more than one feed shows a badge for each) |
 | History | Always | Last 20 join decisions (approve/deny/revoke) for this device, with timestamp, IP, and approver |
 | Approval activity | Always | Join decisions where this device was the approver on another device |
 | Danger zone | Always | Remove device — deletes label, rules, approval, and DNS entry; takes effect immediately |
@@ -369,6 +390,15 @@ The status dashboard automatically detects WireGuard interfaces configured in se
 
 All configured peers are shown regardless of connection state. No configuration is required: the dashboard reads this directly from `wg show` output and UCI.
 
+### OpenVPN and IPsec server peers
+
+The same idea, for two more inbound VPN-server protocols, independent of and in addition to the WireGuard peer table above:
+
+- **OpenVPN** — for each named `config openvpn '<name>'` UCI section with a `status` file configured (`--status-version 2`), a table shows every currently connected client: common name, real address, virtual address, connected-since, and traffic.
+- **IPsec (strongSwan)** — a single table (not split by connection, since `ipsec` has no equivalent per-instance grouping) shows every established SA: connection name, remote identity, uptime, and traffic — parsed from `ipsec statusall`.
+
+Both are empty/absent from the dashboard when not configured, same as the WireGuard table.
+
 ## Status dashboard
 
 When `NOTIFY_URL` is set, a live web dashboard is installed at:
@@ -383,6 +413,7 @@ The page auto-refreshes every 60 seconds and shows:
 - **WiFi** — one row per radio showing band (2.4 / 5 / 6 GHz), channel, and VAP count; highlighted in amber if any VAPs are missing
 - **VPN** — interface and state (up / down / routing fault)
 - **WireGuard server peers** — auto-detected for any WireGuard interface in server mode (no outbound peers); shows all configured peers with an online indicator (● / ○), endpoint IP, last handshake, and bytes transferred
+- **OpenVPN / IPsec server peers** — the same, for any configured OpenVPN or strongSwan VPN server (see [OpenVPN and IPsec server peers](#openvpn-and-ipsec-server-peers))
 - **Networks** — for each network: state, subnet, IPv6 prefix, traffic (↓/↑), device count, DNS, rate limits, isolation settings, join alert state, and which WiFi VAP carries it (interface name, channel, band). Followed by a device table with hostname, IP, MAC, join approval state, recent join decisions, and per-device traffic. An IPv6 column appears automatically when the network has IPv6 configured or clients with IPv6 addresses are present.
 - **Pending LAN access** — blocked isolated→LAN connection attempts logged since the last check, with **Approve** buttons linking directly to the approval form
 - **Active LAN access** — temporary allowances in both directions (LAN→isolated and isolated→LAN) with destination, port, protocol, and time remaining
@@ -415,6 +446,62 @@ On some MediaTek Filogic boards (MT7986 / Alder Lake), a race condition in the m
 - **`wifi-recover-hotplug`** — listens for `phy0-ap*` interface-removal events mid-session (triggered by package upgrades or re-running `install.sh`); applies the same recovery after a 3-second settling delay. Uses an atomic lock so only one recovery runs at a time.
 
 Both are installed by `install.sh` and are harmless on hardware not affected by the race — they exit immediately when VAPs are already present.
+
+## Plugins
+
+The persistent daemon (`kestreld --daemon`) can hand off events as they happen to your own code, without patching kestreld itself. There are two ways to plug in:
+
+- **External scripts** — drop any executable file into `/etc/kestrel/plugins/` (created automatically when the daemon is installed) — shell, Python, a compiled binary, anything. It's spawned when the daemon starts (or picked up within 5 minutes if added later — see "Hot-reload and toggling" below) and kept running for the daemon's lifetime.
+- **Compiled-in Rust plugins** — for functionality that ships *with* kestreld rather than something you drop in yourself (see "Shipped plugins" below). Not something you write unless you're building kestreld itself; documented here for completeness.
+
+Both kinds react to the same events and share the same enable/disable mechanism — the difference is just "external script" vs. "compiled into the binary".
+
+**Events** — one JSON line per event, written to an external plugin's stdin:
+
+| Event | Fields | Fires when |
+|---|---|---|
+| `NewConnection` | `mac`, `dst`, `port`, `proto` | A device makes a new outbound connection attempt (`DEVICE_CONTROL` networks) |
+| `DnsQuery` | `mac`, `domain`, `qtype` | A device makes a DNS query |
+| `DnsAnswer` | `mac`, `domain`, `ip` | A DNS query resolves to an address |
+| `DeviceApproved` | `iface`, `mac`, `dst`, `route` | An observation window (see [Per-device control](#per-device-control)) automatically approves a destination |
+| `WanStateChanged` | `iface`, `up` | WAN connectivity comes up or goes down (see [WAN monitoring](#wan-monitoring)) |
+| `VpnStateChanged` | `tier`, `up` | A split-routing VPN tier comes up or goes down (see [VPN monitoring](#vpn-monitoring)) |
+| `BandwidthThresholdCrossed` | `mac`, `bytes` | A device crosses its network's bandwidth threshold (see [Bandwidth alerts](#bandwidth-alerts)) |
+
+Each line looks like `{"event":"NewConnection","mac":"aa:bb:cc:dd:ee:ff","dst":"1.2.3.4","port":"443","proto":"tcp"}`. The WAN/VPN/bandwidth events inherit those checks' own gate: they only run at all when some network has `NOTIFY_URL` set.
+
+**Selective subscriptions** — by default a plugin receives every event. Write `{"subscribe":["NewConnection","DnsAnswer"]}` on your plugin's stdout at any point to narrow that down to just the named events (a later `subscribe` line replaces the filter, doesn't add to it).
+
+**Actions** — a plugin writes JSON lines back on its stdout, read independently of the events it receives (no need to reply to each one):
+
+| Action | Fields | Does |
+|---|---|---|
+| `notify` | `iface`, `title`, `body`, and optionally `icon`, `priority`, `action_label`, `action_url` | Sends an ntfy push through that network's own `NOTIFY_URL` — a plugin picks which already-configured network to notify through, not an arbitrary endpoint. `icon`/`priority` default to ntfy's own defaults when omitted; a clickable action button is added only when both `action_label` and `action_url` are set |
+| `log` | `message` | Writes a line to the daemon's own log |
+| `add_rule` | `iface`, `mac`, and either `domain` or (`ip`, `port`, `proto`) | Approves a destination for a device — the same effect as the device page's approval, minus the ability to choose a VPN route (always plain WAN) |
+| `annotate` | `iface`, `mac`, `dst`, `note` | Attaches a short note (max 200 characters) to a specific device+destination, shown right on the device page's pending-connections table — e.g. a plugin doing its own reputation lookup can explain *why* it flagged something, at the point the approve/deny decision is actually made. Replaces any previous note for the same destination; the note is always attributed to your plugin's name by the daemon itself, not something you can spoof |
+
+An external plugin gets no shell or root access by default — only the four actions above. This is deliberately a separate process, not a dynamically loaded library: a crashing or misbehaving plugin can't take the daemon down, and it doesn't need to be rebuilt against kestreld's exact version.
+
+**Self-description** — write `{"info":"What this plugin does.","version":"1.0","maintainer":"you","website":"https://..."}` on your plugin's stdout at any point (only `info` is required) to power its `/cgi-bin/plugin_info?name=<name>` detail page, linked from the plugin's name wherever it shows up (e.g. next to an `annotate`d note). None of these fields are validated as a real semver/URL — they're just shown as-is.
+
+**Hot-reload and toggling** — the daemon re-scans `/etc/kestrel/plugins/` every 5 minutes, so a newly dropped-in plugin doesn't need a daemon restart to start running. To turn a specific plugin off without deleting it (works for both external scripts and shipped Rust plugins), list its name in `/etc/kestrel/plugins/disabled`, one per line — a script's filename (e.g. `log-everything.sh`), or a Rust plugin's name (see the table below). A disabled external plugin is actually stopped (its process killed), not just muted; removing it from the list re-enables it on the next re-scan.
+
+**Shipped plugins** (compiled-in, same enable/disable mechanism, versioned in lockstep with kestreld itself):
+
+| Name | Does |
+|---|---|
+| `device-approved-notifier` | Sends an ntfy push whenever an observation window auto-approves a destination — otherwise that happens silently |
+
+Example external plugin (`/etc/kestrel/plugins/log-everything.sh`, `chmod +x`):
+
+```sh
+#!/bin/sh
+echo '{"info":"Logs every event the daemon sends, verbatim.","version":"1.0","maintainer":"you"}'
+while IFS= read -r line; do
+    echo "{\"action\":\"log\",\"message\":\"saw: $line\"}"
+done
+```
 
 ## Tools
 
@@ -589,6 +676,21 @@ The database is refreshed automatically every Sunday at 03:00. To refresh it man
 
 ```sh
 kestreld --update-oui
+```
+
+### Domain threat-intel feeds
+
+Separately from banIP's IP-address feeds, the device page's DNS query history and any pending connection resolved back to a domain (see [Per-device control](#per-device-control)) are checked against domain-level feeds:
+
+| Feed | Coverage |
+|---|---|
+| abuse.ch URLhaus | Malware distribution hosts |
+| OpenPhish | Phishing hosts |
+
+A domain flagged by more than one feed shows a badge for each — this is checked per feed, not just "is this domain flagged at all", since which feed(s) caught it is itself useful signal. Refreshed weekly (Sunday 03:15, staggered from the OUI fetch above). To refresh manually:
+
+```sh
+kestreld --update-threat-intel
 ```
 
 **Randomized MACs:** Modern phones and laptops randomize their MAC address per network for privacy. These MACs have the locally-administered bit set (second bit of the first byte) and have no OUI entry by design — the device page shows "Randomized MAC" for them instead of a blank.

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 #[derive(Default, Clone)]
 pub struct SystemInfo {
     pub hostname: String,

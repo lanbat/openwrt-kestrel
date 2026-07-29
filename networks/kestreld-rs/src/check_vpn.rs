@@ -31,17 +31,26 @@ fn decide(current_up: bool, last_state: &str) -> Transition {
 }
 
 pub async fn run(base_dir: &Path, split_routing_dir: &Path) -> i32 {
+    run_and_report(base_dir, split_routing_dir).await.0
+}
+
+/// Same as `run`, but also reports every tier that actually changed state
+/// this call (`(iface, now_up)`) so `daemon.rs` can broadcast a
+/// `plugins::Event::VpnStateChanged` per tier — `run` stays the CLI-facing
+/// entry point (`kestreld --check-vpn`, exit code only).
+pub async fn run_and_report(base_dir: &Path, split_routing_dir: &Path) -> (i32, Vec<(String, bool)>) {
     if tokio::fs::metadata(split_routing_dir).await.is_err() {
-        return 0;
+        return (0, Vec::new());
     }
 
     let confs = files::read_all_network_confs(base_dir).await;
     let Some(notify_url) = confs.into_iter().map(|c| c.notify_url).find(|u| !u.is_empty()) else {
-        return 0;
+        return (0, Vec::new());
     };
 
     let tiers = vpn::fetch_tiers(split_routing_dir).await;
     let dash = cmd::dashboard_url().await;
+    let mut changed = Vec::new();
 
     for tier in tiers {
         let current_up = tier.state == vpn::VpnState::Up;
@@ -53,6 +62,7 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path) -> i32 {
         let Transition::Changed { now_up } = decide(current_up, &last) else { continue };
 
         let _ = tokio::fs::write(&state_file, format!("{}\n", if now_up { "up" } else { "down" })).await;
+        changed.push((tier.iface.clone(), now_up));
 
         if now_up {
             cmd::ntfy_with_action(
@@ -77,7 +87,7 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path) -> i32 {
         }
     }
 
-    0
+    (0, changed)
 }
 
 #[cfg(test)]

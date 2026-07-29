@@ -699,11 +699,10 @@ NOTIFYEOF
         /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
     fi
 
-    _cron_set kestrel-monitor  "* * * * * /usr/bin/kestreld --check-access-log"
+    # check-wan/check-vpn/check-bandwidth/check-access-log no longer have
+    # cron entries of their own — the kestreld --daemon service below runs
+    # all four continuously instead (see its own section for why).
     _cron_set kestrel-digest   "0 8 * * * /usr/bin/kestreld --digest"
-    _cron_set kestrel-bwcheck  "0 * * * * /usr/bin/kestreld --check-bandwidth"
-    _cron_set kestrel-vpncheck "*/5 * * * * /usr/bin/kestreld --check-vpn"
-    _cron_set kestrel-wancheck "*/5 * * * * /usr/bin/kestreld --check-wan"
     # BusyBox crond does not support @reboot — use an init.d service instead
     ( crontab -l 2>/dev/null | grep -vF '# kestrel-reboot' ) | crontab -
     printf '#!/bin/sh /etc/rc.common\nSTART=98\nstart() { ( sleep 30; sh "%s/tools/notify-reboot.sh" ) & }\n' \
@@ -717,6 +716,38 @@ else
         /etc/init.d/kestrel-reboot disable 2>/dev/null || true
         rm -f /etc/init.d/kestrel-reboot
     fi
+fi
+
+# ── persistent monitor daemon ─────────────────────────────────────────────────
+# Follows the log in real time for LAN-access/allowlist-rejection/pending-
+# connection events (see kestreld's daemon.rs for why that beats the old
+# once-a-minute cron rescan: logd's bounded log buffer can evict events
+# between scans, silently dropping them, not just delaying them) and runs
+# WAN/VPN/bandwidth checks on internal timers.
+#
+# Needed if ANY network wants push notifications (NOTIFY_URL) or per-device
+# connection approval (DEVICE_CONTROL) — independent conditions, so this
+# checks across every installed network's notify.conf, not just this one,
+# the same way the reboot-notify teardown above already does.
+
+_monitor_needed=no
+grep -qE 'NOTIFY_URL=.+' "${BASE_DIR}/"*-notify.conf 2>/dev/null && _monitor_needed=yes
+grep -qE '^DEVICE_CONTROL=yes' "${BASE_DIR}/"*-notify.conf 2>/dev/null && _monitor_needed=yes
+
+if [ "$_monitor_needed" = yes ]; then
+    # Any executable dropped here gets spawned by the daemon and sent
+    # NewConnection/DnsQuery/DnsAnswer/DeviceApproved events — see
+    # kestreld-rs/src/plugins.rs. Created but left empty; nothing runs
+    # here unless the user adds something.
+    mkdir -p /etc/kestrel/plugins
+    cp "${SCRIPT_DIR}/tools/kestreld" /etc/init.d/kestreld
+    chmod 0755 /etc/init.d/kestreld
+    /etc/init.d/kestreld enable 2>/dev/null || true
+    /etc/init.d/kestreld start 2>/dev/null || true
+else
+    /etc/init.d/kestreld stop 2>/dev/null || true
+    /etc/init.d/kestreld disable 2>/dev/null || true
+    rm -f /etc/init.d/kestreld
 fi
 
 # ── mDNS reflection ───────────────────────────────────────────────────────────
@@ -800,6 +831,23 @@ fi
 # Weekly refresh every Sunday at 03:00
 ( crontab -l 2>/dev/null | grep -vF '# kestrel-oui'
   printf '0 3 * * 0 /usr/bin/kestreld --update-oui 2>/dev/null # kestrel-oui\n'
+) | crontab -
+
+# ── Domain threat-intel feed ──────────────────────────────────────────────────
+# `kestreld --update-threat-intel` (see
+# networks/kestreld-rs/src/threat_intel_update.rs) fetches abuse.ch URLhaus'
+# hostfile export for the device page's DNS-query/resolved-domain threat
+# badges (see data::threat_domains) — the domain-level counterpart to the
+# IP-level banIP feeds already surfaced on the pending-connections table.
+if [ -x /usr/bin/kestreld ]; then
+    /usr/bin/kestreld --update-threat-intel
+else
+    echo "WARNING: /usr/bin/kestreld not found — skipping initial threat-intel fetch (will run on the next scheduled cron)" >&2
+fi
+
+# Weekly refresh every Sunday at 03:15 (staggered from the OUI fetch above)
+( crontab -l 2>/dev/null | grep -vF '# kestrel-threat-intel'
+  printf '15 3 * * 0 /usr/bin/kestreld --update-threat-intel 2>/dev/null # kestrel-threat-intel\n'
 ) | crontab -
 
 # ── summary ───────────────────────────────────────────────────────────────────

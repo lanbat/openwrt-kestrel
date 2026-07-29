@@ -116,6 +116,21 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
   </div>
 </form>
 
+<h2>Observe connections</h2>
+<p class="dim" style="font-size:.85rem;margin-top:-.25rem">Instead of approving each connection one at a time, allow everything for a while and review what it actually used afterward — connections seen during the window become permanent rules automatically once it ends (a domain rule when the destination was resolved via DNS, an IP rule otherwise).</p>
+<form id="observe-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+  <input type="hidden" name="action" value="start_observe">
+  <div class="irow">
+    <select name="duration" style="font-size:.875rem;padding:.3rem .5rem;border:1px solid #ccc;border-radius:4px">
+      <option value="15m">15 minutes</option>
+      <option value="1h" selected>1 hour</option>
+      <option value="8h">8 hours</option>
+      <option value="24h">24 hours</option>
+    </select>
+    <button type="submit">Start observing</button>
+  </div>
+</form>
+
 <h2>Pending connections</h2>
 {% if pending.is_empty() %}
 <p class="dim">No pending connections.</p>
@@ -124,7 +139,22 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
   <tr><th>Destination</th><th>Description</th><th>Port</th><th>Proto</th><th></th></tr>
   {% for p in pending %}
   <tr>
-    <td>{{ p.dst }}</td>
+    <td>
+      {{ p.dst }}
+      {% if !p.resolved_domain.is_empty() %}
+        <br><span class="dim" style="font-size:.8rem">via {{ p.resolved_domain }}</span>
+        {% for d in p.domain_threats %}
+          <span class="badge badge-denied" title="{{ d }}">⚠ {{ d }}</span>
+        {% endfor %}
+      {% endif %}
+      {% if !p.plugin_note.is_empty() %}
+        <br><span class="badge" style="background:#eef;color:#334">🔌 {{ p.plugin_note }}
+          {% if !p.plugin_name.is_empty() %}
+            (<a href="/cgi-bin/plugin_info?name={{ p.plugin_name }}" style="color:#334;text-decoration:underline">{{ p.plugin_name }}</a>)
+          {% endif %}
+        </span>
+      {% endif %}
+    </td>
     <td>
       {% if p.description.is_empty() %}
         <span class="dim">—</span>
@@ -135,6 +165,20 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
     <td>{{ p.port }}</td>
     <td>{{ p.proto }}</td>
     <td>
+      {% if !p.resolved_domain.is_empty() %}
+      <form class="ap-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+        <input type="hidden" name="action" value="approve_domain">
+        <input type="hidden" name="domain" value="{{ p.resolved_domain }}">
+        <button type="submit" title="Allow the domain {{ p.resolved_domain }} rather than just this one IP — keeps working if the destination's IP changes">Approve as domain</button>
+      </form>
+      <form class="ap-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
+        <input type="hidden" name="action" value="approve_pending">
+        <input type="hidden" name="dst_ip" value="{{ p.dst }}">
+        <input type="hidden" name="dst_port" value="{{ p.port }}">
+        <input type="hidden" name="dst_proto" value="{{ p.proto }}">
+        <button type="submit">Approve as IP only</button>
+      </form>
+      {% else %}
       <form class="ap-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
         <input type="hidden" name="action" value="approve_pending">
         <input type="hidden" name="dst_ip" value="{{ p.dst }}">
@@ -142,6 +186,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
         <input type="hidden" name="dst_proto" value="{{ p.proto }}">
         <button type="submit">Allow</button>
       </form>
+      {% endif %}
       <form class="dp-form" method="POST" action="/cgi-bin/device?net={{ net }}&mac={{ mac }}">
         <input type="hidden" name="action" value="deny_pending">
         <input type="hidden" name="dst_ip" value="{{ p.dst }}">
@@ -187,12 +232,16 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
 <p class="dim">No recent DNS queries.</p>
 {% else %}
 <table>
-  <tr><th>Domain</th><th>Type</th><th></th></tr>
+  <tr><th>Domain</th><th>Type</th><th>Resolved to</th><th></th></tr>
   {% for q in dns_queries %}
   <tr>
     <td>{{ q.domain }}</td>
     <td class="dim">{{ q.qtype }}</td>
-    <td>{% if q.blocked %}<span class="badge badge-denied" title="On the adblock blocklist">⚠ adblock</span>{% endif %}</td>
+    <td class="dim">{% if q.resolved_ip.is_empty() %}—{% else %}{{ q.resolved_ip }}{% endif %}</td>
+    <td>
+      {% if q.blocked %}<span class="badge badge-denied" title="On the adblock blocklist">⚠ adblock</span>{% endif %}
+      {% for t in q.threats %}<span class="badge badge-denied" title="{{ t }}">⚠ {{ t }}</span>{% endfor %}
+    </td>
   </tr>
   {% endfor %}
 </table>
@@ -249,6 +298,7 @@ input[type=text],input[type=number]{font-size:.875rem;padding:.3rem .5rem;
   jsonPost(document.getElementById('label-form'));
   jsonPost(document.getElementById('limit-form'));
   jsonPost(document.getElementById('domain-form'));
+  jsonPost(document.getElementById('observe-form'));
   jsonPost(document.getElementById('delete-form'), {confirm: 'Remove {{ display }} from {{ net }}? This cannot be undone.'});
 })();
 </script>

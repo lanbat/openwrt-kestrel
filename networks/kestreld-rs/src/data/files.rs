@@ -58,6 +58,29 @@ pub async fn read_all_network_confs(base_dir: &Path) -> Vec<NetworkConf> {
     confs
 }
 
+/// Given a set of network confs (each with an IPv4 `subnet` like
+/// "10.10.0.0/24"), find which network's subnet contains `ip`. Used to
+/// resolve which network a DNS query log line belongs to — unlike the
+/// kernel netfilter `EXTNET-*` log lines, dnsmasq's own log lines carry no
+/// interface/network tag, only the client's source IP.
+pub fn iface_for_ip(confs: &[NetworkConf], ip: &str) -> Option<String> {
+    let target: std::net::Ipv4Addr = ip.parse().ok()?;
+    let target_bits = u32::from(target);
+    for conf in confs {
+        let mut parts = conf.subnet.splitn(2, '/');
+        let Some(net_ip) = parts.next().and_then(|s| s.parse::<std::net::Ipv4Addr>().ok()) else { continue };
+        let Some(prefix) = parts.next().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        if prefix > 32 {
+            continue;
+        }
+        let mask: u32 = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+        if (target_bits & mask) == (u32::from(net_ip) & mask) {
+            return Some(conf.iface.clone());
+        }
+    }
+    None
+}
+
 fn parse_notify_conf(filename: &str, content: &str) -> Option<NetworkConf> {
     let vars = parse_sh_vars(content);
     let iface = vars
@@ -303,6 +326,67 @@ pub async fn read_pending_conns(path: &Path) -> Vec<PendingConn> {
         .collect()
 }
 
+/// One plugin-contributed annotation from `<iface>-plugin-notes`, shown
+/// next to a pending connection on the device page — see
+/// `plugins::Action::Annotate`. Format: `mac\tdst\tnote`.
+#[derive(Clone, Debug)]
+pub struct PluginNote {
+    pub mac: String,
+    pub dst: String,
+    /// Which plugin wrote this note — attributed by the framework itself
+    /// (the name of the process/`RustPlugin` that sent the `annotate`
+    /// action), never self-reported inside the note's own payload, so a
+    /// plugin can't attribute its note to a different plugin's name.
+    pub plugin_name: String,
+    pub note: String,
+}
+
+pub async fn read_plugin_notes(path: &Path) -> Vec<PluginNote> {
+    read_lines(path)
+        .await
+        .into_iter()
+        .filter_map(|l| {
+            let mut f = l.splitn(4, '\t');
+            let mac = f.next()?.trim().to_lowercase();
+            let dst = f.next()?.trim().to_string();
+            let plugin_name = f.next().unwrap_or("").trim().to_string();
+            let note = f.next().unwrap_or("").trim().to_string();
+            if mac.is_empty() || dst.is_empty() { None } else { Some(PluginNote { mac, dst, plugin_name, note }) }
+        })
+        .collect()
+}
+
+/// Upsert a plugin annotation for `(mac, dst)` — same replace-or-append
+/// shape as `file_upsert_by_mac`, just keyed on two fields instead of
+/// one. An empty `note` still replaces/appends a (now-empty) line rather
+/// than removing it — a plugin clearing its own note is a normal update,
+/// not a delete a different mechanism needs to handle.
+pub async fn upsert_plugin_note(path: &Path, mac: &str, dst: &str, plugin_name: &str, note: &str) -> std::io::Result<()> {
+    let mac_lc = mac.to_lowercase();
+    let new_line = format!("{mac_lc}\t{dst}\t{plugin_name}\t{note}");
+    let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let mut out = String::with_capacity(existing.len() + new_line.len() + 1);
+    let mut found = false;
+    for line in existing.lines() {
+        let mut f = line.splitn(4, '\t');
+        let k_mac = f.next().unwrap_or("").trim().to_lowercase();
+        let k_dst = f.next().unwrap_or("").trim();
+        if k_mac == mac_lc && k_dst == dst {
+            out.push_str(&new_line);
+            out.push('\n');
+            found = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !found {
+        out.push_str(&new_line);
+        out.push('\n');
+    }
+    write_atomic(path, out).await
+}
+
 /// Read OUI database: each line is `AABBCC\tVendor Name` (6/7/9 hex chars).
 pub async fn read_oui(path: &Path) -> HashMap<String, String> {
     read_lines(path)
@@ -331,6 +415,63 @@ pub fn oui_lookup<'a>(oui: &'a HashMap<String, String>, mac: &str) -> &'a str {
     ""
 }
 
+/// Whether `s` is safe to use as a domain rule: non-empty, only
+/// alphanumeric/`.`/`-`, no leading/trailing `.`. Shared between
+/// `routes::device`'s `approve_domain` HTTP handler and
+/// `observation::write_domain_rule` — the latter is reachable from the
+/// daemon's automatic observation-window materialization with a domain
+/// sourced from a device's own DNS query log, not from an HTTP form, so it
+/// needs the same validation at that entry point rather than trusting the
+/// caller: an unvalidated domain gets embedded directly into a dnsmasq
+/// conf line (`nftset=/{domain}/...`) and nft set names.
+/// Whether `s` is safe to use as a network/interface name in a file path
+/// or nft set name — non-empty, only alphanumeric/`_`. Shared with
+/// `routes::device`'s own (private, identical) `valid_net` — used by
+/// `plugins::handle_plugin_line`'s `add_rule` action for the same reason
+/// `is_valid_domain` is: it's an external-plugin-supplied `iface`, not one
+/// that arrived through an already-validated HTTP form, and it flows
+/// straight into file paths (`{iface}-device-rules`) and nft set names
+/// (`{iface}_allow_{mac}_4`) in `observation::write_domain_rule`/
+/// `write_ip_rule` — an unvalidated value there is a path-traversal risk,
+/// not just a cosmetic one.
+pub fn is_valid_iface(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `s` is a well-formed `aa:bb:cc:dd:ee:ff` MAC address. Shared
+/// with `routes::device`'s own (private, identical) `valid_mac` — used by
+/// `plugins::handle_plugin_line`'s `add_rule` action, since that's an
+/// external-plugin-supplied MAC, not one that arrived through the device
+/// page's own validated form.
+pub fn is_valid_mac(mac: &str) -> bool {
+    mac.len() == 17
+        && mac.chars().enumerate().all(|(i, c)| {
+            if i % 3 == 2 { c == ':' } else { c.is_ascii_hexdigit() }
+        })
+}
+
+pub fn is_valid_domain(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && !s.starts_with('.')
+        && !s.ends_with('.')
+}
+
+/// Whether `s` is safe to use as a plugin name in a file path
+/// (`{plugins_dir}/{name}.info`) — non-empty, capped length, and not
+/// exactly `.` or `..` (belt-and-suspenders: the `.info` suffix already
+/// means the constructed path component can never literally equal `..`,
+/// but this keeps the rule easy to state on its own). Covers both
+/// external plugins (filenames like `log-everything.sh`, hence `.`
+/// allowed) and compiled-in `RustPlugin` names (`device-approved-notifier`).
+pub fn is_valid_plugin_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && s != "."
+        && s != ".."
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
 /// Whether `mac` has the locally-administered bit set (bit 1 of the first
 /// octet) — the standard tell for a randomized "private" MAC address, which
 /// iOS/Android/Windows all set when generating one per network. These have
@@ -347,7 +488,7 @@ pub fn is_randomized_mac(mac: &str) -> bool {
 
 // ── File mutation helpers ─────────────────────────────────────────────────────
 
-async fn write_atomic(path: &Path, content: String) -> std::io::Result<()> {
+pub(crate) async fn write_atomic(path: &Path, content: String) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     tokio::fs::write(&tmp, &content).await?;
     tokio::fs::rename(&tmp, path).await
@@ -593,6 +734,31 @@ JOIN_HISTORY_RETENTION=30d
         assert!(!conf.fingerprint_suggest);
     }
 
+    // ── iface_for_ip ──────────────────────────────────────────────────────────
+
+    fn conf(iface: &str, subnet: &str) -> NetworkConf {
+        NetworkConf { iface: iface.to_string(), subnet: subnet.to_string(), ..Default::default() }
+    }
+
+    #[test]
+    fn iface_for_ip_matches_containing_subnet() {
+        let confs = vec![conf("guest", "10.10.0.0/24"), conf("untrusted", "10.20.0.0/24")];
+        assert_eq!(iface_for_ip(&confs, "10.10.0.5"), Some("guest".to_string()));
+        assert_eq!(iface_for_ip(&confs, "10.20.0.5"), Some("untrusted".to_string()));
+    }
+
+    #[test]
+    fn iface_for_ip_no_match_outside_any_subnet() {
+        let confs = vec![conf("guest", "10.10.0.0/24")];
+        assert_eq!(iface_for_ip(&confs, "192.168.1.5"), None);
+    }
+
+    #[test]
+    fn iface_for_ip_ignores_conf_with_malformed_subnet() {
+        let confs = vec![conf("broken", "not-a-subnet"), conf("guest", "10.10.0.0/24")];
+        assert_eq!(iface_for_ip(&confs, "10.10.0.5"), Some("guest".to_string()));
+    }
+
     // ── read_lines / read_labels / mac_in_file / read_pending ────────────────
 
     #[tokio::test]
@@ -749,6 +915,65 @@ JOIN_HISTORY_RETENTION=30d
         assert_eq!(oui_lookup(&oui, "AA:BB:CC:DD:EE:FF"), "");
     }
 
+    // ── is_valid_iface ────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_valid_iface_accepts_alphanumeric_and_underscore() {
+        assert!(is_valid_iface("guest"));
+        assert!(is_valid_iface("mv_bg"));
+    }
+
+    #[test]
+    fn is_valid_iface_rejects_empty_and_path_traversal() {
+        assert!(!is_valid_iface(""));
+        assert!(!is_valid_iface("../../etc/cron.d/evil"));
+        assert!(!is_valid_iface("guest/../../etc"));
+        assert!(!is_valid_iface("guest\n evil"));
+    }
+
+    // ── is_valid_mac ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_valid_mac_accepts_well_formed() {
+        assert!(is_valid_mac("aa:bb:cc:dd:ee:ff"));
+        assert!(is_valid_mac("AA:BB:CC:DD:EE:FF"));
+    }
+
+    #[test]
+    fn is_valid_mac_rejects_wrong_length_and_separator() {
+        assert!(!is_valid_mac("aa:bb:cc:dd:ee"));
+        assert!(!is_valid_mac("aa-bb-cc-dd-ee-ff"));
+        assert!(!is_valid_mac(""));
+    }
+
+    #[test]
+    fn is_valid_mac_rejects_non_hex() {
+        assert!(!is_valid_mac("zz:bb:cc:dd:ee:ff"));
+    }
+
+    // ── is_valid_domain ───────────────────────────────────────────────────────
+
+    #[test]
+    fn is_valid_domain_accepts_well_formed_hostnames() {
+        assert!(is_valid_domain("example.com"));
+        assert!(is_valid_domain("api-v2.example.co.uk"));
+    }
+
+    #[test]
+    fn is_valid_domain_rejects_empty_and_leading_trailing_dot() {
+        assert!(!is_valid_domain(""));
+        assert!(!is_valid_domain(".example.com"));
+        assert!(!is_valid_domain("example.com."));
+    }
+
+    #[test]
+    fn is_valid_domain_rejects_shell_and_path_metacharacters() {
+        assert!(!is_valid_domain("example.com/../../etc/passwd"));
+        assert!(!is_valid_domain("example.com\ninjected"));
+        assert!(!is_valid_domain("example.com;rm -rf /"));
+        assert!(!is_valid_domain("example.com\t/etc"));
+    }
+
     // ── is_randomized_mac ───────────────────────────────────────────────────
 
     #[test]
@@ -821,6 +1046,69 @@ JOIN_HISTORY_RETENTION=30d
         file_remove_pending(&path, "1.2.3.4", "443", "tcp").await.unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "1.2.3.4\t80\ttcp\t1000\n");
+    }
+
+    // ── plugin notes ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_plugin_notes_parses_four_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-notes");
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\t1.2.3.4\tmy-plugin\tflagged by my feed\n").await.unwrap();
+        let notes = read_plugin_notes(&path).await;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(notes[0].dst, "1.2.3.4");
+        assert_eq!(notes[0].plugin_name, "my-plugin");
+        assert_eq!(notes[0].note, "flagged by my feed");
+    }
+
+    #[tokio::test]
+    async fn upsert_plugin_note_appends_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-notes");
+        upsert_plugin_note(&path, "AA:BB:CC:DD:EE:FF", "1.2.3.4", "my-plugin", "note one").await.unwrap();
+        let notes = read_plugin_notes(&path).await;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].note, "note one");
+    }
+
+    #[tokio::test]
+    async fn upsert_plugin_note_replaces_existing_entry_for_same_mac_and_dst() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-notes");
+        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "1.2.3.4", "my-plugin", "old note").await.unwrap();
+        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "1.2.3.4", "my-plugin", "new note").await.unwrap();
+        let notes = read_plugin_notes(&path).await;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].note, "new note");
+    }
+
+    #[tokio::test]
+    async fn upsert_plugin_note_keeps_notes_for_other_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-notes");
+        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "1.2.3.4", "my-plugin", "note a").await.unwrap();
+        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "5.6.7.8", "my-plugin", "note b").await.unwrap();
+        let notes = read_plugin_notes(&path).await;
+        assert_eq!(notes.len(), 2);
+    }
+
+    // ── is_valid_plugin_name ──────────────────────────────────────────────────
+
+    #[test]
+    fn is_valid_plugin_name_accepts_filenames_and_rust_plugin_names() {
+        assert!(is_valid_plugin_name("log-everything.sh"));
+        assert!(is_valid_plugin_name("device-approved-notifier"));
+    }
+
+    #[test]
+    fn is_valid_plugin_name_rejects_empty_dot_dotdot_and_path_separators() {
+        assert!(!is_valid_plugin_name(""));
+        assert!(!is_valid_plugin_name("."));
+        assert!(!is_valid_plugin_name(".."));
+        assert!(!is_valid_plugin_name("a/b"));
+        assert!(!is_valid_plugin_name("../etc/passwd"));
     }
 
     #[tokio::test]

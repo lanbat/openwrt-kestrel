@@ -1,0 +1,22 @@
+#!/bin/sh /etc/rc.common
+# Persistent kestreld monitor: follows the system log in real time for
+# blocked-connection/allowlist-rejection/LAN-access events (closing a real
+# gap the old cron-based check-access-log.sh had — logd's bounded buffer
+# can evict events between scans, silently dropping them, not just
+# delaying them), captures device-control pending connections the same
+# way, and runs WAN/VPN/bandwidth checks on internal timers. Replaces the
+# check-wan/check-vpn/check-bandwidth/check-access-log cron entries.
+#
+# procd respawns it if it ever dies, same as dnsmasq/hostapd.
+
+START=95
+USE_PROCD=1
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/kestreld --daemon
+    procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-5}
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}

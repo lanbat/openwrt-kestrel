@@ -64,6 +64,21 @@ struct PendingRow {
     /// banIP feed description for `dst`, if it's flagged in any enabled
     /// threat feed (spamhaus, feodo, dshield, ...); empty otherwise.
     description: String,
+    /// Domain this device resolved to `dst` shortly before this connection
+    /// attempt, if one was found — see `data::dns_answers::correlate_ip`.
+    /// Empty when no matching DNS answer is on record (e.g. the device
+    /// already had the answer cached from before the daemon started).
+    resolved_domain: String,
+    /// Descriptions of every domain threat-intel feed (`data::threat_domains`)
+    /// that flags `resolved_domain`; empty when unflagged or there's no
+    /// resolved domain.
+    domain_threats: Vec<String>,
+    /// A plugin-contributed note for this destination, if any — see
+    /// `plugins::Action::Annotate`. Empty when no plugin has annotated it.
+    plugin_note: String,
+    /// Which plugin wrote `plugin_note` — links to its
+    /// `/cgi-bin/plugin_info` detail page. Empty iff `plugin_note` is.
+    plugin_name: String,
 }
 
 struct RuleRow {
@@ -85,6 +100,14 @@ struct DnsRow {
     /// Whether this domain (or a parent of it) is on adblock's compiled
     /// blocklist.
     blocked: bool,
+    /// Descriptions of every domain threat-intel feed (`data::threat_domains`)
+    /// that flags this domain (or a parent of it) — a different signal
+    /// from `blocked` (ad/tracker blocklist vs. known-malicious); empty
+    /// when unflagged.
+    threats: Vec<String>,
+    /// Most recent IP this domain resolved to for this device, if a
+    /// persisted DNS answer is on record; empty otherwise.
+    resolved_ip: String,
 }
 
 struct HistRow {
@@ -121,6 +144,8 @@ pub struct DeviceForm {
     /// WAN (must match a configured `/etc/kestrel/split-routing/vpn-<name>.conf`);
     /// empty/absent means plain WAN, same as today.
     pub route: Option<String>,
+    // start_observe
+    pub duration: Option<String>,
     // approve_pending / deny_pending
     pub dst_ip: Option<String>,
     pub dst_port: Option<String>,
@@ -365,15 +390,41 @@ pub async fn get(
 
     let ruled_dsts: std::collections::HashSet<&str> = rules.iter().map(|r| r.dst.as_str()).collect();
 
-    let pending: Vec<PendingRow> = raw_pending.into_iter()
+    // DNS answers this device has resolved recently, used both to
+    // correlate a pending IP connection back to the domain that resolved
+    // to it, and to show the DNS query history's most recent answer.
+    let dns_answers_path = base_dir.join(format!("{net}-dns-answers-{mac_n}"));
+    let dns_answers = crate::data::dns_answers::read_dns_answers(&dns_answers_path).await;
+    let threat_path = base_dir.join("threat-domains.txt");
+
+    let plugin_notes_path = base_dir.join(format!("{net}-plugin-notes"));
+    let plugin_notes = files::read_plugin_notes(&plugin_notes_path).await;
+
+    let mut pending: Vec<PendingRow> = raw_pending.into_iter()
         .filter(|p| !ruled_dsts.contains(p.dst.as_str()))
         .map(|p| {
             let description = snap.banip.lookup(&p.dst)
                 .map(crate::data::banip::describe)
                 .unwrap_or_default();
-            PendingRow { dst: p.dst, port: p.port, proto: p.proto, description }
+            let resolved_domain = crate::data::dns_answers::correlate_ip(&dns_answers, &p.dst, p.ts)
+                .unwrap_or_default();
+            let matching_note = plugin_notes.iter().find(|n| n.mac == mac && n.dst == p.dst);
+            let plugin_note = matching_note.map(|n| n.note.clone()).unwrap_or_default();
+            let plugin_name = matching_note.map(|n| n.plugin_name.clone()).unwrap_or_default();
+            PendingRow { dst: p.dst, port: p.port, proto: p.proto, description, resolved_domain, domain_threats: Vec::new(), plugin_note, plugin_name }
         })
         .collect();
+
+    let resolved_domains: Vec<String> = pending.iter()
+        .filter(|p| !p.resolved_domain.is_empty())
+        .map(|p| p.resolved_domain.clone())
+        .collect();
+    let domain_threat_feeds = crate::data::threat_domains::lookup_domains(&threat_path, &resolved_domains).await;
+    for p in pending.iter_mut() {
+        if let Some(feeds) = domain_threat_feeds.get(&p.resolved_domain) {
+            p.domain_threats = feeds.iter().map(|f| crate::data::threat_domains::describe(f)).collect();
+        }
+    }
 
     let rules: Vec<RuleRow> = rules.into_iter()
         .map(|r| {
@@ -403,10 +454,15 @@ pub async fn get(
     let blocklist = crate::data::adblock::flag_domains(
         std::path::Path::new(crate::data::adblock::LIST_PATH), &domains,
     ).await;
+    let threat_feeds = crate::data::threat_domains::lookup_domains(&threat_path, &domains).await;
     let dns_queries: Vec<DnsRow> = queried.into_iter()
         .map(|(domain, qtype)| {
             let blocked = blocklist.get(&domain).copied().unwrap_or(false);
-            DnsRow { domain, qtype, blocked }
+            let threats = threat_feeds.get(&domain).cloned().unwrap_or_default()
+                .iter().map(|f| crate::data::threat_domains::describe(f)).collect();
+            let resolved_ip = crate::data::dns_answers::most_recent_ip_for_domain(&dns_answers, &domain)
+                .unwrap_or_default();
+            DnsRow { domain, qtype, blocked, threats, resolved_ip }
         })
         .collect();
 
@@ -561,6 +617,32 @@ pub async fn post(
             ok()
         }
 
+        "start_observe" => {
+            // Whitelisted against the exact options the form offers,
+            // rather than accepting any string `dur_secs` can parse — the
+            // `<select>` is client-side only, so an arbitrary POSTed
+            // duration (e.g. an absurdly large one) must still be rejected
+            // server-side.
+            let duration = form.duration.as_deref().unwrap_or("1h");
+            let dur_secs = match duration {
+                "15m" | "1h" | "8h" | "24h" => crate::routes::approve_access::dur_secs(duration),
+                _ => return err("Invalid duration"),
+            };
+            if dev_ip.is_empty() && dev_ip6.is_empty() { return err("Device has no tracked IP"); }
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let ip = if dev_ip.is_empty() { None } else { Some(dev_ip.as_str()) };
+            let ip6 = if dev_ip6.is_empty() { None } else { Some(dev_ip6.as_str()) };
+            crate::observation::start(&base_dir, net, &mac, ip, ip6, dur_secs, now).await;
+
+            if !notify_url.is_empty() {
+                let body = format!("{}: observing all connections for {duration} on {net}, then approving what it used.\n\nLabel: {dev_label}", if dev_label.is_empty() { mac.as_str() } else { &dev_label });
+                crate::cmd::ntfy(&notify_url, &format!("Observation started — {net}"), "default", "eye", &body).await;
+            }
+            ok()
+        }
+
         "revoke_join_approval" => {
             let approved_path = base_dir.join(format!("{net}-join-approved"));
             let _ = files::file_remove_line(&approved_path, &mac).await;
@@ -592,11 +674,7 @@ pub async fn post(
 
         "approve_domain" => {
             let domain: String = form.domain.as_deref().unwrap_or("").trim().to_lowercase();
-            let valid_domain = !domain.is_empty()
-                && domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-                && !domain.starts_with('.')
-                && !domain.ends_with('.');
-            if !valid_domain { return err("Invalid domain"); }
+            if !files::is_valid_domain(&domain) { return err("Invalid domain"); }
 
             let route: String = form.route.as_deref().unwrap_or("").trim().to_lowercase();
             let vpn_tier = if route.is_empty() {
@@ -608,39 +686,7 @@ pub async fn post(
                 }
             };
 
-            let rules_path = base_dir.join(format!("{net}-device-rules"));
-            // Remove any existing rule for this mac+domain first (not just
-            // dedup) — re-approving with a different route needs to replace
-            // the old entry, same as `revoke_rule`'s mac+dst matching.
-            let _ = files::file_remove_rule(&rules_path, &mac, &domain).await;
-            let entry = format!("{mac}\t{domain}\tallow\t\t\t{route}");
-            let _ = files::file_append(&rules_path, &entry).await;
-
-            // Update dnsmasq per-device conf
-            let dconf = format!("/etc/dnsmasq.d/{net}-device-{mac_n}.conf");
-            let mut nftset = format!("4#inet#fw4#{net}_allow_{mac_n}_4,6#inet#fw4#{net}_allow_{mac_n}_6");
-            if !route.is_empty() {
-                nftset.push_str(&format!(
-                    ",4#inet#fw4#{net}_route_{mac_n}_{route}_4,6#inet#fw4#{net}_route_{mac_n}_{route}_6"
-                ));
-            }
-            let dentry = format!("nftset=/{domain}/{nftset}");
-            let dexisting = tokio::fs::read_to_string(&dconf).await.unwrap_or_default();
-            let filtered: String = dexisting.lines()
-                .filter(|l| !l.starts_with(&format!("nftset=/{domain}/")))
-                .flat_map(|l| [l, "\n"])
-                .collect();
-            let _ = tokio::fs::write(&dconf, format!("{filtered}{dentry}\n")).await;
-
-            if let Some(tier) = &vpn_tier {
-                crate::cmd::nft_add_set(&format!("{net}_route_{mac_n}_{}_4", tier.name), "4").await;
-                crate::cmd::nft_add_set(&format!("{net}_route_{mac_n}_{}_6", tier.name), "6").await;
-            }
-            crate::cmd::reload_dnsmasq().await;
-            if vpn_tier.is_some() {
-                crate::regen_inspect::run(&base_dir, &state.split_routing_dir, net).await;
-                crate::cmd::spawn_macfilter(net);
-            }
+            crate::observation::write_domain_rule(&base_dir, &state.split_routing_dir, net, &mac, &domain, &route).await;
 
             if !notify_url.is_empty() {
                 let route_suffix = vpn_tier.as_ref().map(|t| format!(" via {} VPN", t.name)).unwrap_or_default();
@@ -663,18 +709,7 @@ pub async fn post(
                 return err("Invalid proto");
             }
 
-            let rules_path = base_dir.join(format!("{net}-device-rules"));
-            let entry = format!("{mac}\t{dst_ip}\tallow\t{dst_port}\t{dst_proto}");
-            let existing = tokio::fs::read_to_string(&rules_path).await.unwrap_or_default();
-            if !existing.contains(&entry) {
-                let _ = files::file_append(&rules_path, &entry).await;
-            }
-
-            if dst_ip.contains(':') {
-                crate::cmd::nft_add_element(&format!("{net}_allow_{mac_n}_6"), dst_ip, "").await;
-            } else {
-                crate::cmd::nft_add_element(&format!("{net}_allow_{mac_n}_4"), dst_ip, "").await;
-            }
+            crate::observation::write_ip_rule(&base_dir, net, &mac, dst_ip, dst_port, &dst_proto).await;
 
             let pending_path = base_dir.join(format!("{net}-pending-{mac_n}"));
             let _ = files::file_remove_pending(&pending_path, dst_ip, dst_port, &dst_proto).await;

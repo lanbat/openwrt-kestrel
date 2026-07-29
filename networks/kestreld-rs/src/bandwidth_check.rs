@@ -57,6 +57,16 @@ fn combine_by_mac(
 }
 
 pub async fn run(base_dir: &Path) -> i32 {
+    run_and_report(base_dir).await.0
+}
+
+/// Same as `run`, but also reports every `(mac, bytes)` that just crossed
+/// its network's threshold this call, so `daemon.rs` can broadcast a
+/// `plugins::Event::BandwidthThresholdCrossed` per device — `run` stays
+/// the CLI-facing entry point (`kestreld --check-bandwidth`, exit code
+/// only).
+pub async fn run_and_report(base_dir: &Path) -> (i32, Vec<(String, u64)>) {
+    let mut crossed = Vec::new();
     let confs = files::read_all_network_confs(base_dir).await;
     let nft_state = nft::fetch().await;
     let leases = dhcp::fetch().await;
@@ -98,6 +108,7 @@ pub async fn run(base_dir: &Path) -> i32 {
                 _ => ip.clone(),
             };
             let _ = files::file_append(&alerted_path, mac).await;
+            crossed.push((mac.clone(), *bytes));
             cmd::ntfy(
                 &conf.notify_url,
                 &format!("Bandwidth alert — {iface}"),
@@ -119,7 +130,7 @@ pub async fn run(base_dir: &Path) -> i32 {
         }
     }
 
-    0
+    (0, crossed)
 }
 
 #[cfg(test)]

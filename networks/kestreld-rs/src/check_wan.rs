@@ -53,9 +53,19 @@ fn now_secs() -> u64 {
 }
 
 pub async fn run(base_dir: &Path) -> i32 {
+    run_and_report(base_dir).await.0
+}
+
+/// Same as `run`, but also reports whether WAN state actually changed
+/// (`Some(now_up)`) so `daemon.rs` can broadcast a
+/// `plugins::Event::WanStateChanged` — `run` stays the CLI-facing entry
+/// point (`kestreld --check-wan`, exit code only). Like the rest of this
+/// function, only runs at all when some network has a `NOTIFY_URL`
+/// configured; a plugin wanting WAN events today needs that too.
+pub async fn run_and_report(base_dir: &Path) -> (i32, Option<bool>) {
     let confs = files::read_all_network_confs(base_dir).await;
     let Some(notify_url) = confs.into_iter().map(|c| c.notify_url).find(|u| !u.is_empty()) else {
-        return 0;
+        return (0, None);
     };
 
     let state_file = base_dir.join("wan-state");
@@ -70,7 +80,8 @@ pub async fn run(base_dir: &Path) -> i32 {
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
 
-    match decide(state, &last, down_since, now_secs()) {
+    let transition = decide(state, &last, down_since, now_secs());
+    match transition {
         Transition::WentDown => {
             let _ = tokio::fs::write(&down_since_file, format!("{}\n", now_secs())).await;
             let _ = tokio::fs::write(&state_file, "down\n").await;
@@ -96,7 +107,12 @@ pub async fn run(base_dir: &Path) -> i32 {
         }
     }
 
-    0
+    let reported = match transition {
+        Transition::WentDown => Some(false),
+        Transition::CameUp { .. } => Some(true),
+        Transition::None => None,
+    };
+    (0, reported)
 }
 
 #[cfg(test)]

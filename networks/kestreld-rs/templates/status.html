@@ -104,6 +104,37 @@ button{font-size:.75rem;padding:.15rem .45rem;cursor:pointer;background:#1976d2;
 </table>
 {% endfor %}
 
+{% for sec in openvpn_sections %}
+<h2>OpenVPN — {{ sec.name }}</h2>
+<table>
+  <tr><th>Client</th><th>Real address</th><th>Virtual address</th><th>Connected since</th><th>Traffic ↓/↑</th></tr>
+  {% for p in sec.peers %}
+  <tr>
+    <td>{{ p.common_name }}</td>
+    <td>{{ p.real_address }}</td>
+    <td class="dim">{{ p.virtual_address }}</td>
+    <td>{{ p.connected_since }}</td>
+    <td>{{ p.traffic }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endfor %}
+
+{% if !ipsec_peers.is_empty() %}
+<h2>IPsec</h2>
+<table>
+  <tr><th>Connection</th><th>Remote</th><th>Established</th><th>Traffic ↓/↑</th></tr>
+  {% for p in ipsec_peers %}
+  <tr>
+    <td>{{ p.name }}</td>
+    <td class="dim">{{ p.remote }}</td>
+    <td>{{ p.established }}</td>
+    <td>{{ p.traffic }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
 {% for net in networks %}
 <h2>{{ net.iface }}{% if !net.ssid.is_empty() %} — {{ net.ssid }}{% endif %} <a href="/cgi-bin/network?net={{ net.iface }}" style="font-size:.75rem;font-weight:400;text-transform:none;letter-spacing:0;color:#1976d2;margin-left:.5rem">Network →</a></h2>
 {% if !net.description.is_empty() %}<div class="net-desc">{{ net.description }}</div>{% endif %}

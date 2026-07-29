@@ -1,0 +1,43 @@
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Plugin — {{ name }}</title>
+<style>
+:root{color-scheme:light}
+*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:1rem;color:#111}
+h1{font-size:1.4rem;margin-bottom:.15rem}
+.sub{color:#888;font-size:.85rem;margin-bottom:2rem}
+h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:#888;
+   border-bottom:1px solid #e0e0e0;padding-bottom:.3rem;margin:1.75rem 0 .6rem}
+.card{background:#f5f5f5;border-radius:8px;padding:.7rem 1rem;margin:.4rem 0}
+.row{display:flex;justify-content:space-between;font-size:.9rem;padding:.18rem 0}
+.lbl{color:#666}.val{font-weight:600}
+.dim{color:#aaa}
+a{color:#1976d2;text-decoration:none}
+.note{font-size:.85rem;color:#444;margin:.3rem 0 .6rem;line-height:1.5}
+.warn{color:#e65100}
+</style></head><body>
+<h1>🔌 {{ name }}</h1>
+<div class="sub"><a href="/cgi-bin/status">Dashboard</a></div>
+
+{% if !known %}
+<p class="note warn">{{ description }}</p>
+{% else %}
+<h2>Plugin</h2>
+<div class="card">
+<div class="row"><span class="lbl">Type</span><span class="val">{{ kind }}</span></div>
+<div class="row"><span class="lbl">Version</span><span class="val {% if version.is_empty() %}dim{% endif %}">{% if version.is_empty() %}—{% else %}{{ version }}{% endif %}</span></div>
+<div class="row"><span class="lbl">Maintainer</span><span class="val">{{ maintainer }}</span></div>
+<div class="row"><span class="lbl">Website</span>
+  <span class="val">
+    {% if website.is_empty() %}<span class="dim">—</span>{% else %}<a href="{{ website }}">{{ website }}</a>{% endif %}
+  </span>
+</div>
+</div>
+
+<h2>What it does</h2>
+<p class="note">{{ description }}</p>
+{% endif %}
+
+<p class="note dim">Toggle this plugin on the router via <code>/etc/kestrel/plugins/disabled</code> — see the README's Plugins section.</p>
+</body></html>

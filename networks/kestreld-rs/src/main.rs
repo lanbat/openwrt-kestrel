@@ -23,6 +23,15 @@ fn main() {
         std::process::exit(code);
     }
 
+    // Cron-invoked subcommand, same shape as --update-oui above — refreshes
+    // the domain threat-intel feed `data::threat_domains` checks DNS
+    // queries/resolved domains against on the device page.
+    if args.get(1).map(String::as_str) == Some("--update-threat-intel") {
+        let base_dir = PathBuf::from("/etc/kestrel/networks");
+        let code = current_thread_rt().block_on(kestreld::threat_intel_update::run(&base_dir));
+        std::process::exit(code);
+    }
+
     // Cron-invoked subcommand, replacing the old `sh tools/check-wan.sh`
     // cron entry (see networks/install.sh).
     if args.get(1).map(String::as_str) == Some("--check-wan") {
@@ -78,6 +87,19 @@ fn main() {
         let split_routing_dir = PathBuf::from("/etc/kestrel/split-routing");
         let code = current_thread_rt()
             .block_on(kestreld::regen_inspect::run(&base_dir, &split_routing_dir, iface));
+        std::process::exit(code);
+    }
+
+    // The persistent monitor daemon: procd-supervised (respawn) via the
+    // init.d service install.sh sets up, replacing the check-wan/
+    // check-vpn/check-bandwidth cron entries and the check-access-log
+    // one — see daemon.rs's module doc for why this is a genuinely
+    // long-running, multi-task process rather than another one-shot
+    // subcommand, and thus uses multi_thread_rt() below.
+    if args.get(1).map(String::as_str) == Some("--daemon") {
+        let base_dir = PathBuf::from("/etc/kestrel/networks");
+        let split_routing_dir = PathBuf::from("/etc/kestrel/split-routing");
+        let code = multi_thread_rt().block_on(kestreld::daemon::run(base_dir, split_routing_dir));
         std::process::exit(code);
     }
 

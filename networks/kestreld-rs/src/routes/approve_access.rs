@@ -41,7 +41,7 @@ pub struct ApiResult {
     pub redirect: Option<String>,
 }
 
-fn dur_secs(d: &str) -> u64 {
+pub(crate) fn dur_secs(d: &str) -> u64 {
     if let Some(n) = d.strip_suffix('d') { n.parse::<u64>().unwrap_or(0) * 86400 }
     else if let Some(n) = d.strip_suffix('h') { n.parse::<u64>().unwrap_or(0) * 3600 }
     else if let Some(n) = d.strip_suffix('m') { n.parse::<u64>().unwrap_or(0) * 60 }
