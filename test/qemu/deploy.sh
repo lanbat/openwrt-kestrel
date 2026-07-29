@@ -53,7 +53,7 @@ $SSH "
 echo "==> Wiring up uhttpd CGI (matches the real router's packaged deployment)..."
 $SSH "
     mkdir -p /www/cgi-bin
-    for ep in status device network identity qr approve-access approve-join rotate-password; do
+    for ep in status device network identity qr approve-access approve-join rotate-password plugin_info; do
         ln -sf /usr/bin/kestreld /www/cgi-bin/\$ep
     done
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then

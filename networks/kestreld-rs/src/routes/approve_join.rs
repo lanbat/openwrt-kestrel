@@ -481,20 +481,31 @@ async fn approve_device(
     let _ = files::file_append(&ips_file, &format!("{mac} {stored_ip}")).await;
 
     // Device control state
+    let ip_store = if is_ipv6 {
+        base_dir.join(format!("{net}-device-ip6s"))
+    } else {
+        base_dir.join(format!("{net}-device-ips"))
+    };
     if conf.device_control {
-        let ip_store = if is_ipv6 {
-            base_dir.join(format!("{net}-device-ip6s"))
-        } else {
-            base_dir.join(format!("{net}-device-ips"))
-        };
         let _ = files::file_upsert_by_mac(&ip_store, mac, &format!("{mac}\t{ip}")).await;
-        crate::regen_inspect::run(base_dir, split_routing_dir, net).await;
     }
 
     // Save label
     let lbl_path = base_dir.join(format!("{net}-device-labels"));
     let _ = files::file_upsert_by_mac(&lbl_path, mac, &format!("{mac}\t{label}")).await;
     crate::cmd::write_device_dns(base_dir, net, mac, label, "").await;
+
+    // regen_inspect reads both the label and (for DEVICE_CONTROL networks)
+    // the device-ip files it was just given above — it must run *after*
+    // both are written, or a device's very first approval regenerates the
+    // inspect chain from stale (empty) label/IP data and never gets its
+    // per-device allow/observe sets until something else happens to
+    // trigger another regen. Confirmed against a real QEMU VM: approving
+    // a brand-new device produced an inspect chain with no per-device
+    // rules at all until this was fixed.
+    if conf.device_control {
+        crate::regen_inspect::run(base_dir, split_routing_dir, net).await;
+    }
 
     // ntfy
     if !conf.notify_url.is_empty() {

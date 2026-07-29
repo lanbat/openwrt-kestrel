@@ -687,7 +687,7 @@ NOTIFYEOF
     # daemon, no extra port, no reverse proxy needed.
     mkdir -p /www/cgi-bin
     if [ -x /usr/bin/kestreld ]; then
-        for _ep in status device network identity qr approve-access approve-join rotate-password; do
+        for _ep in status device network identity qr approve-access approve-join rotate-password plugin_info; do
             ln -sf /usr/bin/kestreld "/www/cgi-bin/${_ep}"
         done
     else

@@ -140,8 +140,19 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path, iface: &str) -> i32 
                 out.push_str(&format!("    iifname \"br-{iface}\" ip6 saddr {ip6} ct state new ip6 daddr @{iface}_allow_{mn}_6 accept\n"));
             }
         }
-        out.push_str(&format!("    iifname \"br-{iface}\" ip saddr @{iface}_observe_4 accept\n"));
-        out.push_str(&format!("    iifname \"br-{iface}\" ip6 saddr @{iface}_observe_6 accept\n"));
+        // Logs *and* accepts (unlike the per-device allow-set rules above,
+        // which just accept) — an observed device's whole point is that
+        // `daemon.rs::handle_new` needs to see the same `EXTNET-{iface}-NEW:`
+        // line it would for a blocked connection, so it still gets
+        // captured into `{iface}-pending-{mac}` for `observation.rs` to
+        // materialize once the window closes. A plain `accept` here would
+        // let the traffic through with nothing ever recording what it
+        // connected to — confirmed against a real conntrack/logread on
+        // the QEMU VM: the observed connection reached the destination
+        // but never appeared in `logread` or the pending file until this
+        // was fixed.
+        out.push_str(&format!("    iifname \"br-{iface}\" ip saddr @{iface}_observe_4 ct state new limit rate 60/minute log prefix \"EXTNET-{iface}-NEW: \" level info accept\n"));
+        out.push_str(&format!("    iifname \"br-{iface}\" ip6 saddr @{iface}_observe_6 ct state new limit rate 60/minute log prefix \"EXTNET-{iface}-NEW: \" level info accept\n"));
         out.push_str(&format!("    iifname \"br-{iface}\" ct state new limit rate 60/minute log prefix \"EXTNET-{iface}-NEW: \" level info drop\n"));
     }
     out.push_str("}\n");
