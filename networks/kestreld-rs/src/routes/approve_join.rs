@@ -319,7 +319,7 @@ pub async fn post(
         let labels = snap.labels.get(net).cloned().unwrap_or_default();
         for (pending_mac, pending_ip) in &pending {
             if let Some(label) = labels.get(pending_mac) {
-                approve_device(base_dir, conf, net, pending_mac, pending_ip, "", label, &remote_ip, &actor_mac).await;
+                approve_device(base_dir, &state.split_routing_dir, conf, net, pending_mac, pending_ip, "", label, &remote_ip, &actor_mac).await;
             }
         }
         return Json(ApiResult { ok: true, error: None, redirect });
@@ -359,7 +359,7 @@ pub async fn post(
                 return Json(ApiResult { ok: false, error: Some("Label is required to approve a device".into()), redirect: None });
             }
 
-            approve_device(base_dir, conf, net, &mac, ip, host, &label, &remote_ip, &actor_mac).await;
+            approve_device(base_dir, &state.split_routing_dir, conf, net, &mac, ip, host, &label, &remote_ip, &actor_mac).await;
 
             // Opportunistically learn/refresh this identity's fingerprint —
             // using only whatever the join prompt already gathered and
@@ -442,6 +442,7 @@ pub async fn post(
 #[allow(clippy::too_many_arguments)]
 async fn approve_device(
     base_dir: &std::path::Path,
+    split_routing_dir: &std::path::Path,
     conf: &crate::data::files::NetworkConf,
     net: &str,
     mac: &str,
@@ -487,7 +488,7 @@ async fn approve_device(
             base_dir.join(format!("{net}-device-ips"))
         };
         let _ = files::file_upsert_by_mac(&ip_store, mac, &format!("{mac}\t{ip}")).await;
-        crate::cmd::regen_inspect(net).await;
+        crate::regen_inspect::run(base_dir, split_routing_dir, net).await;
     }
 
     // Save label

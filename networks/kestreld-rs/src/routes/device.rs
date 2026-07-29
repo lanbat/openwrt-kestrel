@@ -74,7 +74,7 @@ struct RuleRow {
     css: String,
     /// "WAN" or the VPN tier name this rule's traffic is routed through —
     /// see `data::vpn`. Only ever set for domain rules (see
-    /// `tools/regen-inspect.sh`'s marking-rule generation, which is
+    /// `regen_inspect::run`'s marking-rule generation, which is
     /// gated the same way).
     route: String,
 }
@@ -557,7 +557,7 @@ pub async fn post(
             };
             let limits_path = base_dir.join(format!("{net}-device-limits"));
             let _ = files::file_upsert_by_mac(&limits_path, &mac, &format!("{mac}\t{lim}")).await;
-            crate::cmd::regen_inspect(net).await;
+            crate::regen_inspect::run(&base_dir, &state.split_routing_dir, net).await;
             ok()
         }
 
@@ -638,7 +638,7 @@ pub async fn post(
             }
             crate::cmd::reload_dnsmasq().await;
             if vpn_tier.is_some() {
-                crate::cmd::regen_inspect(net).await;
+                crate::regen_inspect::run(&base_dir, &state.split_routing_dir, net).await;
                 crate::cmd::spawn_macfilter(net);
             }
 
@@ -767,7 +767,7 @@ pub async fn post(
             let _ = tokio::fs::remove_file(format!("/etc/dnsmasq.d/{net}-device-{mac_n}.conf")).await;
             let _ = tokio::fs::remove_file(format!("/etc/dnsmasq.d/{net}-dns-{mac_n}.conf")).await;
             crate::cmd::reload_dnsmasq().await;
-            crate::cmd::regen_inspect(net).await;
+            crate::regen_inspect::run(&base_dir, &state.split_routing_dir, net).await;
 
             if !notify_url.is_empty() {
                 let body = format!("{} has been removed from {net}.\n\nMAC: {mac}\nIPv4: {dev_ip}\nIPv6: {dev_ip6}", if dev_label.is_empty() { mac.as_str() } else { &dev_label });

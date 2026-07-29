@@ -14,6 +14,12 @@ pub struct WgPeer {
     pub allowed_ips: String,
     pub last_seen: String,
     pub traffic: String,
+    /// Raw last-handshake unix timestamp (0 if never) — kept alongside
+    /// the dashboard's own `online` (180s threshold) and `last_seen`
+    /// (formatted) fields so other callers, e.g. the daily digest's
+    /// "active in the last 24h" count, can apply their own window
+    /// instead of the dashboard's.
+    pub handshake_ts: u64,
 }
 
 pub async fn fetch_servers(now_ts: u64) -> Vec<WgServer> {
@@ -78,7 +84,7 @@ pub async fn fetch_servers(now_ts: u64) -> Vec<WgServer> {
             // Find matching dump line by public key
             let peer_line = peer_lines.iter().find(|l| l.starts_with(&pk));
 
-            let (online, endpoint, last_seen, traffic) = if let Some(line) = peer_line {
+            let (online, endpoint, last_seen, traffic, handshake_ts) = if let Some(line) = peer_line {
                 let cols: Vec<&str> = line.split('\t').collect();
                 let ep = cols.get(2).copied().unwrap_or("").to_string();
                 let ep = if ep == "(none)" { String::new() } else { ep };
@@ -97,15 +103,16 @@ pub async fn fetch_servers(now_ts: u64) -> Vec<WgServer> {
                 } else {
                     "—".to_string()
                 };
-                (online, ep, last_seen, traffic)
+                (online, ep, last_seen, traffic, hs)
             } else {
-                (false, String::new(), "—".to_string(), "—".to_string())
+                (false, String::new(), "—".to_string(), "—".to_string(), 0)
             };
 
             peers.push(WgPeer {
                 online,
                 label,
                 endpoint,
+                handshake_ts,
                 allowed_ips: aips.replace(' ', ", "),
                 last_seen,
                 traffic,

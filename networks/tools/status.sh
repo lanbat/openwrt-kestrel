@@ -130,7 +130,7 @@ if [ -z "$zones" ]; then
     exit 0
 fi
 
-printf '\n  openwrt-extra-networks — network status\n'
+printf '\n  kestrel — network status\n'
 for z in $zones; do
     _zone_info "$z"
 done

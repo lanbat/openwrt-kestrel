@@ -59,9 +59,8 @@ pub async fn reload_dnsmasq() {
         .await;
 }
 
-pub async fn regen_inspect(iface: &str) {
-    let _ = silent(Command::new("/etc/kestrel/networks/_regen-inspect.sh")
-        .arg(iface))
+pub async fn fw4_reload() {
+    let _ = silent(Command::new("fw4").args(["-q", "reload"]))
         .status()
         .await;
 }
@@ -96,6 +95,42 @@ pub async fn ntfy(url: &str, title: &str, priority: &str, icon: &str, body: &str
         ]))
         .status()
         .await;
+}
+
+/// Same as `ntfy()` but with a clickable action button (ntfy.sh's
+/// `Actions:` header) — used by the periodic WAN/VPN monitor subcommands
+/// to link straight to the dashboard.
+pub async fn ntfy_with_action(url: &str, title: &str, priority: &str, icon: &str,
+    action_label: &str, action_url: &str, body: &str)
+{
+    if url.is_empty() { return; }
+    let _ = silent(Command::new("curl")
+        .args([
+            "-s", "-o", "/dev/null",
+            "-H", &format!("Title: {title}"),
+            "-H", &format!("Priority: {priority}"),
+            "-H", &format!("Tags: {icon}"),
+            "-H", &format!("Actions: view, {action_label}, {action_url}"),
+            "-d", body,
+            url,
+        ]))
+        .status()
+        .await;
+}
+
+/// The router's live `br-lan` IPv4 address, falling back to the
+/// conventional 192.168.1.1 if it can't be determined.
+pub async fn router_lan_ip() -> String {
+    let (_, out) = run("ip", &["addr", "show", "br-lan"]).await;
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("inet ")?.split('/').next().map(str::to_string))
+        .unwrap_or_else(|| "192.168.1.1".to_string())
+}
+
+/// `http://{router LAN IP}/cgi-bin/status`, for linking a push notification
+/// straight to the dashboard.
+pub async fn dashboard_url() -> String {
+    format!("http://{}/cgi-bin/status", router_lan_ip().await)
 }
 
 pub async fn write_device_dns(base_dir: &std::path::Path, iface: &str, mac: &str, label: &str, domain: &str) {

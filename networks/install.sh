@@ -486,20 +486,24 @@ fi
 
 # ── device control inspect chain ─────────────────────────────────────────────
 # When DEVICE_CONTROL=yes, new outbound connections from approved devices are
-# inspected per-device. regen-inspect.sh generates the nftables chain; it is
-# also called from kestreld's approve-join route when a device is approved.
-# The /cgi-bin/device symlink itself is (re)created unconditionally below,
-# regardless of DEVICE_CONTROL.
+# inspected per-device. `kestreld --regen-inspect` (a built-in subcommand,
+# not a separate script — see networks/kestreld-rs/src/regen_inspect.rs)
+# generates the nftables chain; kestreld's own approve/revoke/label routes
+# call the same logic in-process when a device changes. The /cgi-bin/device
+# symlink itself is (re)created unconditionally below, regardless of
+# DEVICE_CONTROL.
 
 if [ "${DEVICE_CONTROL:-no}" = yes ]; then
-    cp "${SCRIPT_DIR}/tools/regen-inspect.sh" "${BASE_DIR}/_regen-inspect.sh"
-    chmod 0755 "${BASE_DIR}/_regen-inspect.sh"
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
         uci set uhttpd.main.cgi_prefix=/cgi-bin
         uci commit uhttpd
         /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
     fi
-    sh "${BASE_DIR}/_regen-inspect.sh" "$IFACE" || true
+    if [ -x /usr/bin/kestreld ]; then
+        /usr/bin/kestreld --regen-inspect "$IFACE" || true
+    else
+        echo "WARNING: /usr/bin/kestreld not found — skipping inspect-chain generation (will apply on the next device-rule change)" >&2
+    fi
 else
     rm -f /etc/nftables.d/25-${IFACE}-inspect.nft
 fi
@@ -515,7 +519,7 @@ chain ${IFACE}_counter {
 }
 EOF
 
-# Main LAN counter — created once; used by digest.sh when lan-notify.conf exists.
+# Main LAN counter — created once; used by kestreld --digest when lan-notify.conf exists.
 cat >/etc/nftables.d/24-lan-counter.nft <<'EOF'
 chain lan_counter {
     type filter hook forward priority 0; policy accept;
@@ -524,7 +528,7 @@ chain lan_counter {
 }
 EOF
 
-# Per-device byte tracking (used by bandwidth-check.sh and the status dashboard).
+# Per-device byte tracking (used by kestreld --check-bandwidth and the status dashboard).
 # Created when NOTIFY_URL is set; removed when it is unset.
 rm -f /etc/nftables.d/26-${IFACE}-device-track.nft
 if [ -n "$NOTIFY_URL" ]; then
@@ -687,7 +691,7 @@ NOTIFYEOF
             ln -sf /usr/bin/kestreld "/www/cgi-bin/${_ep}"
         done
     else
-        echo "WARNING: /usr/bin/kestreld not found — install the extra-networks package first" >&2
+        echo "WARNING: /usr/bin/kestreld not found — install the kestrel package first" >&2
     fi
     if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
         uci set uhttpd.main.cgi_prefix=/cgi-bin
@@ -695,11 +699,11 @@ NOTIFYEOF
         /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
     fi
 
-    _cron_set extra-networks-monitor  "* * * * * sh ${SCRIPT_DIR}/tools/check-access-log.sh"
-    _cron_set extra-networks-digest   "0 8 * * * sh ${SCRIPT_DIR}/tools/digest.sh"
-    _cron_set extra-networks-bwcheck  "0 * * * * sh ${SCRIPT_DIR}/tools/bandwidth-check.sh"
-    _cron_set extra-networks-vpncheck "*/5 * * * * sh ${SCRIPT_DIR}/tools/check-vpn.sh"
-    _cron_set extra-networks-wancheck "*/5 * * * * sh ${SCRIPT_DIR}/tools/check-wan.sh"
+    _cron_set extra-networks-monitor  "* * * * * /usr/bin/kestreld --check-access-log"
+    _cron_set extra-networks-digest   "0 8 * * * /usr/bin/kestreld --digest"
+    _cron_set extra-networks-bwcheck  "0 * * * * /usr/bin/kestreld --check-bandwidth"
+    _cron_set extra-networks-vpncheck "*/5 * * * * /usr/bin/kestreld --check-vpn"
+    _cron_set extra-networks-wancheck "*/5 * * * * /usr/bin/kestreld --check-wan"
     # BusyBox crond does not support @reboot — use an init.d service instead
     ( crontab -l 2>/dev/null | grep -vF '# extra-networks-reboot' ) | crontab -
     printf '#!/bin/sh /etc/rc.common\nSTART=98\nstart() { ( sleep 30; sh "%s/tools/notify-reboot.sh" ) & }\n' \
@@ -784,13 +788,18 @@ cp "${SCRIPT_DIR}/tools/wifi-recover-hotplug" /etc/hotplug.d/net/30-wifi-recover
 chmod 0755 /etc/hotplug.d/net/30-wifi-recover
 
 # ── OUI database ──────────────────────────────────────────────────────────────
-cp "${SCRIPT_DIR}/tools/oui-update.sh" "${BASE_DIR}/oui-update.sh"
-chmod 0755 "${BASE_DIR}/oui-update.sh"
-sh "${BASE_DIR}/oui-update.sh"
+# `kestreld --update-oui` (a built-in subcommand, not a separate script —
+# see networks/kestreld-rs/src/oui_update.rs) fetches and merges the same
+# sources tools/oui-update.sh used to.
+if [ -x /usr/bin/kestreld ]; then
+    /usr/bin/kestreld --update-oui
+else
+    echo "WARNING: /usr/bin/kestreld not found — skipping initial OUI database fetch (will run on the next scheduled cron)" >&2
+fi
 
 # Weekly refresh every Sunday at 03:00
 ( crontab -l 2>/dev/null | grep -vF '# extra-networks-oui'
-  printf '0 3 * * 0 sh %s/oui-update.sh 2>/dev/null # extra-networks-oui\n' "$BASE_DIR"
+  printf '0 3 * * 0 /usr/bin/kestreld --update-oui 2>/dev/null # extra-networks-oui\n'
 ) | crontab -
 
 # ── summary ───────────────────────────────────────────────────────────────────

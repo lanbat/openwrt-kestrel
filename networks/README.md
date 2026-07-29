@@ -1,4 +1,4 @@
-# openwrt-extra-networks
+# networks
 
 Manage isolated WiFi networks on OpenWrt — IoT, guest, untrusted — with a single parameterized install script. Each network gets its own subnet, firewall zone, DNS policy, and rate limit, plus optional push-notified join approval, per-device outbound access control, scheduled access windows, password rotation, and a live web dashboard — deployed in seconds, no LuCI needed.
 
@@ -45,13 +45,9 @@ Each network is a config file. Add a new one by copying an example.
 
 ## Setup
 
-### 1. Clone onto your router
+### 1. Clone the repo
 
-```sh
-cd /root
-git clone https://github.com/lanbat/openwrt-extra-networks.git
-cd openwrt-extra-networks
-```
+See the top-level [README](../README.md#install-on-the-router) for cloning and package-install instructions, then `cd networks/` — the steps below (and the rest of this file) assume that's your working directory.
 
 ### 2. Create a config
 
@@ -226,7 +222,7 @@ In short: `guest` → gate who joins; `untrusted` → gate what already-known de
 
 ### LAN access approval
 
-When an isolated device tries to reach a service on your LAN (192.168.1.x or its IPv6 equivalent), nftables logs the connection attempt and `check-access-log.sh` (runs every minute via cron) catches it and sends you a push notification with an **Approve** button.
+When an isolated device tries to reach a service on your LAN (192.168.1.x or its IPv6 equivalent), nftables logs the connection attempt and `kestreld --check-access-log` (runs every minute via cron) catches it and sends you a push notification with an **Approve** button.
 
 What happens, step by step:
 
@@ -317,11 +313,11 @@ When a device is labeled — either at approval time or later via the device pag
 
 Sent every morning at 08:00. Includes:
 
-- **System health** — uptime, 1-min load average, memory usage %
+- **System health** — uptime, memory usage %
 - **VPN status** — up/down per tier (if split-routing is configured)
 - **Blocklists** — domain and IP count per category (from the last `update-routing-sets` run), and how long ago it ran
 - **WireGuard server peers** — how many peers were active in the last 24h (for server-mode WG interfaces)
-- **Traffic** — ↓/↑ totals, connected device count (active DHCP leases), active LAN access rule count per network
+- **Traffic** — ↓/↑ totals and connected device count (active DHCP leases) per network
 - **Blocked counts** — LAN access requests and allowlist rejections logged since boot
 - **Expiring rules** — any temporary LAN access rules expiring today or tomorrow
 - **Calendar events** — upcoming events for the next 7 days (if `GCAL_URL` is configured — see [Global settings](#global-settings)); recurring weekly and biweekly events are expanded correctly
@@ -359,7 +355,7 @@ WAN connectivity is checked every 5 minutes by pinging `1.1.1.1` and `8.8.8.8`. 
 
 ### VPN monitoring
 
-If `/etc/kestrel/split-routing/` is present, each VPN tier (`vpn-*.conf`) is monitored independently every 5 minutes. A high-priority alert fires when a tier goes down; a default-priority alert fires when it recovers. State is persisted in `/etc/kestrel/networks/vpn-state-<iface>` so only transitions trigger alerts. Uses the `NOTIFY_URL` from the first configured extra-networks network.
+If `/etc/kestrel/split-routing/` is present, each VPN tier (`vpn-*.conf`) is monitored independently every 5 minutes. A high-priority alert fires when a tier goes down; a default-priority alert fires when it recovers. State is persisted in `/etc/kestrel/networks/vpn-state-<iface>` so only transitions trigger alerts. Uses the `NOTIFY_URL` from the first configured network.
 
 ### WireGuard VPN server peers
 
@@ -592,7 +588,7 @@ The device page shows the hardware manufacturer for each device based on its MAC
 The database is refreshed automatically every Sunday at 03:00. To refresh it manually:
 
 ```sh
-sh /etc/kestrel/networks/oui-update.sh
+kestreld --update-oui
 ```
 
 **Randomized MACs:** Modern phones and laptops randomize their MAC address per network for privacy. These MACs have the locally-administered bit set (second bit of the first byte) and have no OUI entry by design — the device page shows "Randomized MAC" for them instead of a blank.
@@ -627,7 +623,7 @@ Example:
 
 ```sh
 # /etc/kestrel/networks/config
-REPO_DIR=/root/openwrt-kestrel/extra-networks
+REPO_DIR=/root/openwrt-kestrel/networks
 STATUS_AUTOREFRESH=no
 GCAL_URL=https://calendar.google.com/calendar/ical/<your-calendar-id>/basic.ics
 GCAL_TZ_OFFSET=1

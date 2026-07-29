@@ -1,5 +1,5 @@
 #!/bin/sh
-# Shared helpers for extra-networks tools. Copied to /etc/kestrel/networks/_lib.sh by install.sh.
+# Shared helpers for the networks/tools scripts. Copied to /etc/kestrel/networks/_lib.sh by install.sh.
 # Source with: . /etc/kestrel/networks/_lib.sh
 
 # Load NOTIFY_URL (and other fields) from a network's notify.conf.
