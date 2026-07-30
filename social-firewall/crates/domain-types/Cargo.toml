@@ -1,0 +1,9 @@
+[package]
+name = "domain-types"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = "1"
+
+[dev-dependencies]

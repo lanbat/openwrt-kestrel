@@ -1,0 +1,9 @@
+[package]
+name = "state-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+domain-types = { path = "../domain-types" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+thiserror = "1"

@@ -1,0 +1,7 @@
+[package]
+name = "policy-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+domain-types = { path = "../domain-types" }

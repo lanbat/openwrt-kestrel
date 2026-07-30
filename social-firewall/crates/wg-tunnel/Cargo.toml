@@ -1,0 +1,13 @@
+[package]
+name = "wg-tunnel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+domain-types = { path = "../domain-types" }
+state-store = { path = "../state-store" }
+crypto_box = { version = "0.9", features = ["std"] }
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"

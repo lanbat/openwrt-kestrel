@@ -1,0 +1,17 @@
+[package]
+name = "dashboard"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+domain-types = { path = "../domain-types" }
+state-store = { path = "../state-store" }
+# Deliberately not axum/warp/actix — this is a single-node, read-only,
+# router-local page with no auth/session/routing complexity to justify an
+# async web framework. `tiny_http` is a small, synchronous, dependency-light
+# HTTP/1.1 server (no TLS features enabled), matching the "avoid a heavy
+# web framework" scoping decision from the plan this implements.
+tiny_http = { version = "0.12", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
