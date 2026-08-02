@@ -12,6 +12,17 @@ actually building and porting parts of it.
 - `split-routing/` — per-domain VPN routing: `install.sh` + shell tools, and
   `nft-resolve-rs/` (blocklist → nftables resolver). Runtime state at
   `/etc/kestrel/split-routing/`.
+- `social-firewall/` — a separate, optional Rust workspace (its own
+  `Cargo.toml`, own `install.sh`, own OpenWrt package under
+  `release/openwrt/social-firewall/`) implementing decentralized,
+  opinion-based firewall policy. Deliberately independent of everything
+  else in this repo — no shared code, no shared runtime state
+  (`/etc/kestrel/social-firewall/`), and no install-order dependency in
+  either direction. Its own `cargo test --workspace` is fast and needs no
+  QEMU VM (no shell scripts to port, no real system state to touch) —
+  only the real `nft`-enforcement half (`crates/nft-enforcer`) needs the
+  QEMU VM, and only for that crate's own `INTEGRATION_TESTING.md`
+  checklist.
 - `test/qemu/` — boots a real OpenWrt image under QEMU with virtual WiFi
   radios (`mac80211_hwsim`). See below — this is not optional for a lot of
   changes.
@@ -298,6 +309,14 @@ Don't use `make release` for a full multi-arch release — it's the
 aarch64-only local path and immediately calls `gh release create` itself,
 which would race the CI-triggered publish job for the same tag. Just
 commit, bump the version, tag, and push the tag; let CI publish.
+
+`social-firewall` has its own, separate `make release-social-firewall` —
+tagged `sf-v*` (not `v*`, so it can never collide with or accidentally
+trigger the `v*`-triggered kestrel release workflow above) — but no CI
+automation yet: it's aarch64-only (or whatever `CROSS_TARGET` is
+overridden to) and manual, matching the "single target for now" scope
+decision from when this package was built. A multi-arch CI pipeline for
+it is a real but deliberately deferred follow-up, not an oversight.
 
 ## Code style
 

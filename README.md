@@ -23,6 +23,10 @@ Two cooperating toolkits for OpenWrt routers, delivered as a single native packa
 **Blocklist resolution** ([`nft-resolve`](split-routing/nft-resolve-rs/))
 - Resolves Adblock, dnsmasq, hosts, RPZ, Unbound, ipset, clash, and plain-domain blocklist formats into nftables sets, with parallel DNS resolution
 
+**Decentralized firewall policy** ([`social-firewall`](social-firewall/), optional, fully independent of everything above)
+- Routers publish signed, reason-required opinions on domains/IPs and follow other routers with a trust weight; a cron-driven applier aggregates followed opinions into real nftables enforcement, in its own dedicated table
+- Entirely separate package (`sh install.sh social-firewall`) — neither depends on nor is required by `kestrel`
+
 ## Components
 
 ### kestreld
@@ -61,6 +65,12 @@ Source: [`networks/`](networks/README.md)
 Shell scripts that route specific domains and IPs through a WireGuard VPN without moving the default gateway. Uses nft-resolve for blocklist management and dnsmasq for lazy domain resolution.
 
 Source: [`split-routing/`](split-routing/docs/mullvad-routing.md) · [formats](split-routing/docs/supported-formats.md) · [troubleshooting](split-routing/docs/troubleshooting.md) · [WireGuard server setup](split-routing/docs/wireguard-vpn.md)
+
+### social-firewall (optional)
+
+A separate Rust workspace and OpenWrt package (`sf` CLI + a cron-driven `sf apply` policy applier), with its own `.apk`/`.ipk` release and its own install/uninstall path — has no dependency on `kestrel` and nothing above depends on it. Publishes/ingests signed opinions and trust-weighted follows, then enforces the aggregate result via a dedicated `inet social_firewall` nftables table that never touches `fw4` or any other package's rules.
+
+Source: [`social-firewall/`](social-firewall/)
 
 ## Install on the router
 
@@ -109,11 +119,21 @@ sh networks/install.sh networks/configs/untrusted.conf
 sh split-routing/install.sh
 ```
 
+**social-firewall** is entirely optional and independent of everything above — install it only if you want decentralized, opinion-based policy on this router. It's a separate package with its own release, so install that first (`social-firewall_*.ipk`/`social-firewall-*.apk` from the same [releases page](https://github.com/lanbat/openwrt-kestrel/releases/latest)), then wire up its cron entry:
+
+```sh
+sh install.sh social-firewall
+
+# to remove later — leaves its config/database in place unless --purge is passed too
+sh install.sh social-firewall remove
+```
+
 ## How they interact
 
 - Both sub-projects write to `/etc/dnsmasq.d/` and `/etc/nftables.d/` with distinct filenames — no conflicts.
 - split-routing's VPN mark chain excludes traffic from extra-network bridges (`br-guest`, `br-untrusted`, etc.) so isolated network traffic always uses the normal WAN, never the VPN tunnel.
 - `nft-resolve` is available to both sub-projects for bulk domain resolution.
+- `social-firewall` doesn't interact with any of the above at all — its own SQLite database, its own cron entry, and its own `inet social_firewall` nftables table, entirely separate from `fw4` and from `split-routing`'s tables. It can be installed, removed, or left out entirely without anything else on the router noticing.
 
 ## Building from source
 
@@ -138,6 +158,11 @@ make package \
   ARCH=mipsel \
   OPENWRT_ARCH=mipsel_24kc
 ```
+
+`social-firewall` is a separate package with its own build/package/release/
+deploy/clean targets (`make build-social-firewall`, `make
+package-social-firewall`, etc.) — `make package`/`make build` (no suffix)
+never touches it, and vice versa.
 
 Supported targets and their `cross` Docker images are in [`Cross.toml`](Cross.toml).
 Releases (`.github/workflows/release.yml`) build all of them automatically.
