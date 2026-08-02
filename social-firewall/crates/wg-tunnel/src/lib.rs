@@ -42,6 +42,18 @@ use std::time::Duration;
 
 pub const NFT_TABLE: &str = "social_firewall_tunnels";
 
+/// Applied to every peer this crate ever adds — every tunnel it manages
+/// is inherently a peer across the internet, often with at least one
+/// side behind NAT (the same scenario WireGuard's own docs recommend 25s
+/// for). Without this, an idle tunnel's NAT/firewall mapping can expire
+/// silently: the interface stays administratively up throughout, so
+/// nothing in `reconcile()`'s own diff-and-apply loop would ever notice
+/// — it just quietly stops passing traffic until something happens to
+/// re-trigger a handshake. Unconditional, not a `WgTunnelConfig` knob,
+/// since there's no legitimate case here where a remote peer-to-peer
+/// tunnel wouldn't want it.
+pub const PERSISTENT_KEEPALIVE_SECS: u32 = 25;
+
 #[derive(thiserror::Error, Debug)]
 pub enum WgTunnelError {
     #[error("state store error: {0}")]
@@ -127,12 +139,14 @@ impl<'a> WgTunnelController<'a> {
     }
 
     /// Adds (or updates, if already present) a WireGuard peer — real
-    /// `wg set <iface> peer <pubkey> allowed-ips <allowed_ip> [endpoint
+    /// `wg set <iface> peer <pubkey> allowed-ips <allowed_ip>
+    /// persistent-keepalive <PERSISTENT_KEEPALIVE_SECS> [endpoint
     /// <hint>]`. Idempotent: `wg set` on an already-configured peer
     /// simply updates it in place.
     pub fn add_or_update_peer(&self, peer_wg_pubkey: &WgPublicKeyBytes, allowed_ip: &str, endpoint_hint: Option<&str>) -> Result<(), WgTunnelError> {
         let pubkey_b64 = base64_encode(&peer_wg_pubkey.0);
-        let mut args = vec!["set", self.config.interface_name.as_str(), "peer", pubkey_b64.as_str(), "allowed-ips", allowed_ip];
+        let keepalive_secs = PERSISTENT_KEEPALIVE_SECS.to_string();
+        let mut args = vec!["set", self.config.interface_name.as_str(), "peer", pubkey_b64.as_str(), "allowed-ips", allowed_ip, "persistent-keepalive", keepalive_secs.as_str()];
         if let Some(hint) = endpoint_hint {
             args.push("endpoint");
             args.push(hint);
@@ -435,6 +449,27 @@ mod tests {
         let (_, args) = calls.last().unwrap();
         assert!(args.contains(&"endpoint".to_string()));
         assert!(args.contains(&"203.0.113.9:51820".to_string()));
+        assert!(args.contains(&"persistent-keepalive".to_string()), "an endpoint being present must not crowd out the keepalive flag");
+    }
+
+    /// Every peer this crate ever manages is inherently a remote,
+    /// often-NAT'd tunnel — a missing `persistent-keepalive` is exactly
+    /// the class of bug that lets an idle tunnel's NAT mapping expire
+    /// silently while the interface stays administratively "up," with
+    /// nothing in `reconcile()`'s diff loop ever noticing. This must
+    /// never regress, endpoint hint or not.
+    #[test]
+    fn add_or_update_peer_always_sets_persistent_keepalive() {
+        let store = StateStore::open_in_memory().unwrap();
+        let runner = FakeCommandRunner::new_all_success();
+        let ctrl = controller(&runner, &store);
+
+        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None).unwrap();
+
+        let calls = runner.calls();
+        let (_, args) = calls.last().unwrap();
+        assert!(args.contains(&"persistent-keepalive".to_string()));
+        assert!(args.contains(&PERSISTENT_KEEPALIVE_SECS.to_string()));
     }
 
     #[test]
