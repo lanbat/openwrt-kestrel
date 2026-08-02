@@ -23,6 +23,19 @@ fn group_id_str(id: GroupId) -> String {
     id.0.to_string()
 }
 
+/// Human-readable age, for display only — never used in any decision.
+fn format_age(now: i64, issued_at: i64) -> String {
+    let secs = (now - issued_at).max(0);
+    let days = secs / 86_400;
+    if days == 0 {
+        "issued today".to_string()
+    } else if days == 1 {
+        "issued 1 day ago".to_string()
+    } else {
+        format!("issued {days} days ago")
+    }
+}
+
 // ── Group wire format ──────────────────────────────────────────────────────
 
 fn users_to_json(users: &[UserId]) -> serde_json::Value {
@@ -153,6 +166,7 @@ pub fn create_group(store: &StateStore, name: &str, description: &str, join_prom
     };
     let (group, identity_pubkey) = build_and_store_group(store, template)?;
     println!("created group {} (\"{name}\")", group_id_str(group.group_id));
+    println!("note: you are the sole owner — if you lose your identity, this group can never be updated again. consider adding a co-owner once you have someone you trust.");
     export_group(&group, &identity_pubkey, out)
 }
 
@@ -179,6 +193,9 @@ pub fn list_groups(store: &StateStore) -> Result<()> {
             println!("  join prompt    : {prompt}");
         }
         println!("  owners         : {}", g.owners.iter().map(user_id_str).collect::<Vec<_>>().join(", "));
+        if g.owners.len() == 1 {
+            println!("  ! single point of failure: only one owner, no succession plan — if their identity is lost or compromised, this group can never be updated again. add a co-owner to fix this.");
+        }
         if !g.admins.is_empty() {
             println!("  admins         : {}", g.admins.iter().map(user_id_str).collect::<Vec<_>>().join(", "));
         }
@@ -266,6 +283,22 @@ pub fn list_pending_group_joins(store: &StateStore, group_id: &str) -> Result<()
     for r in pending {
         println!("#{} from {}{}", r.sequence, user_id_str(&r.requester), r.answer.map(|a| format!(": {a}")).unwrap_or_default());
     }
+    Ok(())
+}
+
+/// Tallies every join-request decision this router has recorded for a
+/// group — see `StateStore::group_join_track_record`'s own doc on why
+/// this is most meaningful run from the owner's own router (a self-audit
+/// of admission quality) rather than as something a prospective member
+/// on a different router can currently query remotely.
+pub fn group_join_track_record(store: &StateStore, group_id: &str) -> Result<()> {
+    let group_id = parse_group_id(group_id)?;
+    let record = store.group_join_track_record(group_id)?;
+    println!("join-request track record for {}:", group_id_str(group_id));
+    println!("  approved : {}", record.approved);
+    println!("  rejected : {}", record.rejected);
+    println!("  blocked  : {}", record.blocked);
+    println!("  pending  : {}", record.pending);
     Ok(())
 }
 
@@ -510,12 +543,20 @@ pub fn set_group_voting_right(store: &StateStore, group_id: &str, user: &str, vo
     export_group(&group, &identity_pubkey, out)
 }
 
-pub fn cast_group_vote(store: &StateStore, group_id: &str, target_kind: &str, target_value: &str, stance: &str, reason_code: &str, note: Option<String>, out: Option<PathBuf>) -> Result<()> {
+/// `ttl_seconds` gives the vote a lifespan — an aging vote counts exactly
+/// as much as a fresh one in `group_stance_for`'s tally (no automatic
+/// decay; changing that would be an aggregation-algorithm change, not a
+/// visibility fix), so an explicit TTL is the only way a voter can make
+/// their own stance stop counting without the owner having to remove
+/// them. `None` (the default, matching every previous release of this
+/// command) means the vote never expires on its own.
+pub fn cast_group_vote(store: &StateStore, group_id: &str, target_kind: &str, target_value: &str, stance: &str, reason_code: &str, note: Option<String>, ttl_seconds: Option<i64>, out: Option<PathBuf>) -> Result<()> {
     let group_id = parse_group_id(group_id)?;
     let (voter, seed) = self_identity(store)?;
     let kp = crypto::Keypair::from_seed(&seed);
     let target = parse_target(target_kind, target_value)?;
     let sequence = store.next_group_vote_sequence(group_id, &voter)?;
+    let now = now_unix();
 
     let mut vote = GroupVote {
         group_id,
@@ -524,8 +565,8 @@ pub fn cast_group_vote(store: &StateStore, group_id: &str, target_kind: &str, ta
         target,
         stance: parse_stance(stance)?,
         reason: Reason { code: parse_reason_code(reason_code)?, note, evidence: vec![] },
-        issued_at: now_unix(),
-        expires_at: None,
+        issued_at: now,
+        expires_at: ttl_seconds.map(|s| now + s),
         signature: domain_types::SignatureBytes([0; 64]),
     };
     let signing_bytes = vote.signing_bytes();
@@ -676,7 +717,13 @@ pub fn explain_group_vote(store: &StateStore, group_id: &str, target_kind: &str,
             Some(v) => {
                 let status = if counts { "counts" } else { "expired, does not count" };
                 let note = v.reason.note.map(|n| format!(": {n}")).unwrap_or_default();
-                println!("  {} : {:?} ({status}) — {}{note}", user_id_str(&voter), v.stance, reason_code_str(v.reason.code));
+                // Age is shown purely for the reviewer's judgment —
+                // `group_stance_for` itself never treats an old vote
+                // differently from a fresh one unless the voter set an
+                // explicit `--ttl-seconds` at cast time (see
+                // `cast-group-vote`'s own doc on why this is a
+                // visibility fix, not an aggregation change).
+                println!("  {} : {:?} ({status}) — {} ({}){note}", user_id_str(&voter), v.stance, reason_code_str(v.reason.code), format_age(now, v.issued_at));
             }
             None => println!("  {} : no vote cast", user_id_str(&voter)),
         }

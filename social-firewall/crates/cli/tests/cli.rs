@@ -827,3 +827,58 @@ fn party_line_moderation_and_voice_gate_posting_correctly() {
     assert!(post3.status.success(), "a voiced member must be able to post on a moderated party line: {}", stderr(&post3));
     assert!(stdout(&sf(bob_dir.path(), "bob.sqlite", &["list-party-line", "--group", &group_id])).contains("voiced now!"));
 }
+
+#[test]
+fn group_vote_ttl_stops_counting_once_expired() {
+    let dir = tempfile::tempdir().unwrap();
+    init_identity(dir.path(), "alice.sqlite", "alice");
+
+    let group_path = dir.path().join("group.json");
+    let create = sf(dir.path(), "alice.sqlite", &["create-group", "--name", "watch", "--description", "d", "--out", group_path.to_str().unwrap()]);
+    assert!(create.status.success(), "create-group failed: {}", stderr(&create));
+    let group_id = extract_group_id(&create);
+
+    // A negative TTL puts `expires_at` in the past immediately — a fast,
+    // deterministic way to test the expired path without sleeping.
+    let vote = sf(dir.path(), "alice.sqlite", &["cast-group-vote", "--group", &group_id, "--target-kind", "ip", "--target-value", "203.0.113.9", "--stance", "deny", "--reason-code", "malware", "--ttl-seconds=-10"]);
+    assert!(vote.status.success(), "cast-group-vote failed: {}", stderr(&vote));
+
+    let explain = stdout(&sf(dir.path(), "alice.sqlite", &["explain-group-vote", "--group", &group_id, "--target-kind", "ip", "--target-value", "203.0.113.9"]));
+    assert!(explain.contains("expired, does not count"), "a vote with a negative TTL must show as expired, got:\n{explain}");
+
+    let eval = stdout(&sf(dir.path(), "alice.sqlite", &["evaluate-target", "--target-kind", "ip", "--target-value", "203.0.113.9"]));
+    assert!(!eval.contains("decision   : Deny"), "an expired vote must not drive the aggregate decision, got:\n{eval}");
+}
+
+#[test]
+fn group_join_track_record_reflects_a_rejection() {
+    let alice_dir = tempfile::tempdir().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+
+    init_identity(alice_dir.path(), "alice.sqlite", "alice");
+    let bob = init_identity(bob_dir.path(), "bob.sqlite", "bob");
+
+    let group_path = alice_dir.path().join("group.json");
+    let create = sf(alice_dir.path(), "alice.sqlite", &["create-group", "--name", "watch", "--description", "d", "--out", group_path.to_str().unwrap()]);
+    assert!(create.status.success(), "create-group failed: {}", stderr(&create));
+    let group_id = extract_group_id(&create);
+
+    let before = stdout(&sf(alice_dir.path(), "alice.sqlite", &["group-join-track-record", "--group", &group_id]));
+    assert!(before.contains("rejected : 0"));
+
+    let bob_group = bob_dir.path().join("group.json");
+    std::fs::copy(&group_path, &bob_group).unwrap();
+    assert!(sf(bob_dir.path(), "bob.sqlite", &["ingest-group", "--file", bob_group.to_str().unwrap()]).status.success());
+    let join_path = bob_dir.path().join("join.json");
+    assert!(sf(bob_dir.path(), "bob.sqlite", &["request-group-join", "--group", &group_id, "--out", join_path.to_str().unwrap()]).status.success());
+    let alice_join = alice_dir.path().join("join.json");
+    std::fs::copy(&join_path, &alice_join).unwrap();
+    assert!(sf(alice_dir.path(), "alice.sqlite", &["ingest-group-join-request", "--file", alice_join.to_str().unwrap()]).status.success());
+
+    let bob_ref = format!("{}/{}", bob.federation, bob.local_id);
+    let reject = sf(alice_dir.path(), "alice.sqlite", &["reject-group-join", "--requester", &bob_ref, "--sequence", "0"]);
+    assert!(reject.status.success(), "reject-group-join failed: {}", stderr(&reject));
+
+    let after = stdout(&sf(alice_dir.path(), "alice.sqlite", &["group-join-track-record", "--group", &group_id]));
+    assert!(after.contains("rejected : 1"), "expected the rejection to be tallied, got:\n{after}");
+}

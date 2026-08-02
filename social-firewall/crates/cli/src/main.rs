@@ -399,6 +399,13 @@ enum Command {
         #[arg(long)]
         group: String,
     },
+    /// Tally every join-request decision this router has recorded for a
+    /// group (approved/rejected/blocked/pending) — a self-audit of
+    /// admission quality, most meaningful run by the group's own owner.
+    GroupJoinTrackRecord {
+        #[arg(long)]
+        group: String,
+    },
     /// Approve a pending join request — requires this router's identity
     /// to already be an owner/admin of the group.
     ApproveGroupJoin {
@@ -527,6 +534,11 @@ enum Command {
         reason_code: String,
         #[arg(long)]
         note: Option<String>,
+        /// Gives this vote a lifespan, after which it stops counting
+        /// toward the group's aggregate stance without the owner needing
+        /// to remove you. Omit for a vote that never expires on its own.
+        #[arg(long)]
+        ttl_seconds: Option<i64>,
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -710,6 +722,7 @@ fn main() -> Result<()> {
         Command::RequestGroupJoin { group, answer, out } => group::request_group_join(&store, &group, answer, out)?,
         Command::IngestGroupJoinRequest { file } => group::ingest_group_join_request(&store, &file)?,
         Command::ListPendingGroupJoins { group } => group::list_pending_group_joins(&store, &group)?,
+        Command::GroupJoinTrackRecord { group } => group::group_join_track_record(&store, &group)?,
         Command::ApproveGroupJoin { group, requester, sequence, voting, out } => group::approve_group_join(&store, &group, &requester, sequence, voting, out)?,
         Command::RejectGroupJoin { requester, sequence } => group::reject_group_join(&store, &requester, sequence)?,
         Command::BlockGroupUser { group, user, reason_code, note, out } => group::block_group_user(&store, &group, &user, &reason_code, note, out)?,
@@ -721,8 +734,8 @@ fn main() -> Result<()> {
         Command::SetGroupPartyLineModeration { group, moderated, out } => group::set_group_party_line_moderation(&store, &group, moderated, out)?,
         Command::SetGroupVoice { group, user, voiced, out } => group::set_group_voice(&store, &group, &user, voiced, out)?,
         Command::SetGroupVotingRight { group, user, voting, out } => group::set_group_voting_right(&store, &group, &user, voting, out)?,
-        Command::CastGroupVote { group, target_kind, target_value, stance, reason_code, note, out } => {
-            group::cast_group_vote(&store, &group, &target_kind, &target_value, &stance, &reason_code, note, out)?
+        Command::CastGroupVote { group, target_kind, target_value, stance, reason_code, note, ttl_seconds, out } => {
+            group::cast_group_vote(&store, &group, &target_kind, &target_value, &stance, &reason_code, note, ttl_seconds, out)?
         }
         Command::IngestGroupVote { file } => group::ingest_group_vote(&store, &file)?,
         Command::SetGroupTrust { group, allow_weight, deny_weight, exclude } => group::set_group_trust(&store, &group, allow_weight, deny_weight, exclude)?,

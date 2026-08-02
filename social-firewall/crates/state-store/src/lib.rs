@@ -1858,6 +1858,16 @@ impl StateStore {
 
 // ── Groups ───────────────────────────────────────────────────────────────
 
+/// A tally of every join-request decision this router has recorded for a
+/// group — see `StateStore::group_join_track_record`'s own doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GroupJoinTrackRecord {
+    pub approved: u64,
+    pub rejected: u64,
+    pub blocked: u64,
+    pub pending: u64,
+}
+
 impl StateStore {
     /// MAX-based counter, scoped to this *group* (not an author) — any
     /// current owner/admin can publish the next version, unlike every
@@ -2088,6 +2098,33 @@ impl StateStore {
             params![status, requester.federation.0 .0.as_slice(), requester.local_id.0.as_slice(), sequence as i64],
         )?;
         Ok(())
+    }
+
+    /// A tally over `group_join_requests.status` for `group_id` — every
+    /// decision this router has ever made or seen for this group's join
+    /// requests, already sitting in the table, just never counted. Most
+    /// meaningful from the owner's own router (the only one that sees
+    /// every decision it made), where it's a self-audit: a careless
+    /// owner can see their own approve/reject/block pattern the same way
+    /// `explain-group-vote` already lets them see block reports against
+    /// a voter. Not (yet) something a prospective member on a different
+    /// router can query remotely — that would need the owner to actively
+    /// export it, which this doesn't do.
+    pub fn group_join_track_record(&self, group_id: GroupId) -> Result<GroupJoinTrackRecord, StoreError> {
+        let mut record = GroupJoinTrackRecord::default();
+        let mut stmt = self.conn.prepare("SELECT status, COUNT(*) FROM group_join_requests WHERE group_id = ?1 GROUP BY status")?;
+        let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        for r in rows {
+            let (status, count) = r?;
+            match status.as_str() {
+                "approved" => record.approved = count as u64,
+                "rejected" => record.rejected = count as u64,
+                "blocked" => record.blocked = count as u64,
+                "pending" => record.pending = count as u64,
+                _ => {}
+            }
+        }
+        Ok(record)
     }
 
     // ── Group blocking ────────────────────────────────────────────────
@@ -3888,6 +3925,44 @@ mod tests {
 
         store.set_group_join_request_status(&requester, 0, "approved").unwrap();
         assert!(store.list_pending_group_join_requests(group_id()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn group_join_track_record_is_all_zero_with_no_requests() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert_eq!(store.group_join_track_record(group_id()).unwrap(), GroupJoinTrackRecord::default());
+    }
+
+    #[test]
+    fn group_join_track_record_tallies_every_status() {
+        let store = StateStore::open_in_memory().unwrap();
+        let a = user(2, 1);
+        let b = user(2, 2);
+        let c = user(2, 3);
+        let d = user(2, 4);
+        store.store_group_join_request(&GroupJoinRequest { requester: a, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_group_join_request(&GroupJoinRequest { requester: b, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_group_join_request(&GroupJoinRequest { requester: c, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_group_join_request(&GroupJoinRequest { requester: d, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.set_group_join_request_status(&a, 0, "approved").unwrap();
+        store.set_group_join_request_status(&b, 0, "rejected").unwrap();
+        store.set_group_join_request_status(&c, 0, "rejected").unwrap();
+        // d stays pending.
+
+        let record = store.group_join_track_record(group_id()).unwrap();
+        assert_eq!(record, GroupJoinTrackRecord { approved: 1, rejected: 2, blocked: 0, pending: 1 });
+    }
+
+    #[test]
+    fn group_join_track_record_counts_an_auto_blocked_request() {
+        let store = StateStore::open_in_memory().unwrap();
+        let blocked_user = user(2, 1);
+        store.block_group_user(group_id(), &blocked_user, &sample_block_reason(), 1000).unwrap();
+        store.store_group_join_request(&GroupJoinRequest { requester: blocked_user, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+
+        let record = store.group_join_track_record(group_id()).unwrap();
+        assert_eq!(record.blocked, 1);
+        assert_eq!(record.pending, 0);
     }
 
     #[test]
