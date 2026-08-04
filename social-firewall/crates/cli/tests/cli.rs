@@ -380,6 +380,39 @@ fn full_tunnel_handshake_flow_reaches_a_selected_route() {
 }
 
 #[test]
+fn request_tunnel_falls_back_to_file_export_when_no_iroh_node_id_is_known() {
+    let alice_dir = tempfile::tempdir().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+    let alice = init_identity(alice_dir.path(), "alice.sqlite", "alice");
+    init_identity(bob_dir.path(), "bob.sqlite", "bob");
+
+    // `ingest-tunnel-advertisement` is follow-gated (see
+    // `StateStore::ingest_tunnel_advertisement`), so bob must follow
+    // alice before ingesting her advertisement — the brief's Step 6 draft
+    // had this the other way around, which doesn't work against the
+    // actual current code; reordered here the same way the existing
+    // `full_tunnel_handshake_flow_reaches_a_selected_route` test above
+    // already does it.
+    assert!(sf(bob_dir.path(), "bob.sqlite", &["add-follow", "--federation", &alice.federation, "--user", &alice.local_id, "--allow-weight", "1.0", "--deny-weight", "1.0"]).status.success());
+
+    let ad_path = alice_dir.path().join("ad.json");
+    let offer = sf(alice_dir.path(), "alice.sqlite", &["offer-tunnel", "--description", "d", "--target", "domain:example.com", "--visibility", "public", "--out", ad_path.to_str().unwrap()]);
+    assert!(offer.status.success(), "offer-tunnel failed: {}", stderr(&offer));
+
+    let bob_ad = bob_dir.path().join("ad.json");
+    std::fs::copy(&ad_path, &bob_ad).unwrap();
+    assert!(sf(bob_dir.path(), "bob.sqlite", &["ingest-tunnel-advertisement", "--file", bob_ad.to_str().unwrap()]).status.success());
+
+    // No `set-follow-node-id` was ever run — bob has no known Iroh
+    // address for alice, so delivery must fall back to the file.
+    let out_path = bob_dir.path().join("request.json");
+    let request = sf(bob_dir.path(), "bob.sqlite", &["request-tunnel", "--advertisement", &format!("{}/{}/0", alice.federation, alice.local_id), "--out", out_path.to_str().unwrap()]);
+    assert!(request.status.success(), "request-tunnel failed: {}", stderr(&request));
+    assert!(stdout(&request).contains("not known or unreachable") || stdout(&request).contains("exported"), "expected a fallback-to-file message, got:\n{}", stdout(&request));
+    assert!(out_path.exists(), "the fallback file export must still happen when no Iroh address is known");
+}
+
+#[test]
 fn full_shared_rule_list_flow_reaches_trust_weighted_deny() {
     let alice_dir = tempfile::tempdir().unwrap();
     let bob_dir = tempfile::tempdir().unwrap();

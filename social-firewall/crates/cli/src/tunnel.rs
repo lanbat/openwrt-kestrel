@@ -92,6 +92,40 @@ pub(crate) fn read_maybe_sealed(store: &StateStore, path: &Path) -> Result<serde
     parse_maybe_sealed_bytes(store, &bytes)
 }
 
+pub(crate) enum DeliveryOutcome {
+    Delivered,
+    NoKnownAddress,
+    Failed(String),
+}
+
+/// Attempts real delivery via Iroh if `recipient`'s `iroh_node_id` is
+/// known; the caller is responsible for writing the fallback file in
+/// every case except `Delivered` — this function never writes to disk
+/// itself, keeping "how to fall back" a caller decision (each call site
+/// already has its own `--out`/`--out-dir` convention to preserve).
+/// One Iroh keypair/endpoint is generated per call — acceptable for this
+/// phase's request/accept cadence (a handful of sends per reconciliation
+/// run, not a hot path); reusing a single long-lived endpoint across
+/// sends is a reasonable future optimization once this is proven, not
+/// built now.
+pub(crate) fn try_deliver(store: &StateStore, recipient: &UserId, kind: p2p_transport::StatementKind, payload: &[u8]) -> DeliveryOutcome {
+    let Ok(Some(rule)) = store.get_follow(recipient) else { return DeliveryOutcome::NoKnownAddress };
+    let Some(node_id) = rule.iroh_node_id else { return DeliveryOutcome::NoKnownAddress };
+    let seed = match store.get_iroh_keypair_seed() {
+        Ok(Some(seed)) => seed,
+        _ => return DeliveryOutcome::Failed("no local Iroh keypair yet — run `sf listen` once to generate one".to_string()),
+    };
+    let transport = match p2p_transport::IrohTransport::new(seed, b"social-firewall/1") {
+        Ok(t) => t,
+        Err(e) => return DeliveryOutcome::Failed(e.to_string()),
+    };
+    let envelope = p2p_transport::Envelope { kind, payload: payload.to_vec() };
+    match transport.send(&node_id, &envelope) {
+        Ok(()) => DeliveryOutcome::Delivered,
+        Err(e) => DeliveryOutcome::Failed(e.to_string()),
+    }
+}
+
 pub(crate) fn user_id_str(u: &UserId) -> String {
     format!("{}/{}", u.federation.0, u.local_id)
 }
@@ -533,10 +567,16 @@ pub fn request_tunnel(store: &StateStore, advertisement: &str, out: Option<PathB
     println!("requested tunnel #{} against {}/{}", req.sequence, user_id_str(&ad.provider), ad.sequence);
 
     let plaintext = serde_json::to_vec(&connection_request_to_json(&req, &identity_pubkey))?;
-    if let Some(path) = out {
-        // Always sealed — a connection request is inherently pairwise.
-        write_maybe_sealed(&plaintext, Some(&ad.messaging_pubkey), &path)?;
-        println!("exported (sealed to provider) to {}", path.display());
+    match try_deliver(store, &ad.provider, p2p_transport::StatementKind::TunnelConnectionRequest, &plaintext) {
+        DeliveryOutcome::Delivered => {
+            println!("delivered to {}'s node", user_id_str(&ad.provider));
+        }
+        DeliveryOutcome::NoKnownAddress | DeliveryOutcome::Failed(_) => {
+            if let Some(path) = &out {
+                write_maybe_sealed(&plaintext, Some(&ad.messaging_pubkey), path)?;
+                println!("{}'s node_id not known or unreachable — exported to {} for manual delivery", user_id_str(&ad.provider), path.display());
+            }
+        }
     }
     Ok(())
 }
@@ -684,10 +724,18 @@ pub fn accept_tunnel_request(store: &StateStore, requester: &str, sequence: u64,
         accept.assigned_tunnel_ip6.as_deref().map(|ip6| format!(" / {ip6}")).unwrap_or_default()
     );
 
-    if let Some(path) = out {
-        // Always sealed — a connection accept is inherently pairwise.
-        write_maybe_sealed(&serde_json::to_vec(&accept_to_json(&accept, &identity_pubkey))?, Some(&req.requester_messaging_pubkey), &path)?;
-        println!("exported (sealed to requester) to {}", path.display());
+    let plaintext = serde_json::to_vec(&accept_to_json(&accept, &identity_pubkey))?;
+    match try_deliver(store, &requester_user, p2p_transport::StatementKind::TunnelConnectionAccept, &plaintext) {
+        DeliveryOutcome::Delivered => {
+            println!("delivered to {}'s node", user_id_str(&requester_user));
+        }
+        DeliveryOutcome::NoKnownAddress | DeliveryOutcome::Failed(_) => {
+            if let Some(path) = out {
+                // Always sealed — a connection accept is inherently pairwise.
+                write_maybe_sealed(&plaintext, Some(&req.requester_messaging_pubkey), &path)?;
+                println!("{}'s node_id not known or unreachable — exported (sealed to requester) to {}", user_id_str(&requester_user), path.display());
+            }
+        }
     }
     Ok(())
 }
@@ -973,9 +1021,17 @@ pub fn sync_tunnels(
             continue;
         }
         let (accept, identity_pubkey) = do_accept_tunnel_request(store, provider, &seed, &req)?;
-        let path = out_dir.join(format!("tunnel-accept-{}-{}.json", user_id_str(&req.requester).replace('/', "_"), req.sequence));
-        write_maybe_sealed(&serde_json::to_vec(&accept_to_json(&accept, &identity_pubkey))?, Some(&req.requester_messaging_pubkey), &path)?;
-        println!("auto-accepted connection request #{} from {}: exported to {}", req.sequence, user_id_str(&req.requester), path.display());
+        let plaintext = serde_json::to_vec(&accept_to_json(&accept, &identity_pubkey))?;
+        match try_deliver(store, &req.requester, p2p_transport::StatementKind::TunnelConnectionAccept, &plaintext) {
+            DeliveryOutcome::Delivered => {
+                println!("auto-accepted connection request #{} from {}: delivered to their node", req.sequence, user_id_str(&req.requester));
+            }
+            DeliveryOutcome::NoKnownAddress | DeliveryOutcome::Failed(_) => {
+                let path = out_dir.join(format!("tunnel-accept-{}-{}.json", user_id_str(&req.requester).replace('/', "_"), req.sequence));
+                write_maybe_sealed(&plaintext, Some(&req.requester_messaging_pubkey), &path)?;
+                println!("auto-accepted connection request #{} from {}: node_id not known or unreachable — exported to {}", req.sequence, user_id_str(&req.requester), path.display());
+            }
+        }
         report.auto_accepts += 1;
     }
 
