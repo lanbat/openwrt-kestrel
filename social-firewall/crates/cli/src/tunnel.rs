@@ -24,6 +24,7 @@ use domain_types::{
     TunnelConnectionAccept, TunnelConnectionRequest, TunnelServiceRequest, TunnelTrustRule,
     UserId, Visibility, WgPublicKeyBytes,
 };
+use p2p_transport::PeerTransport;
 use state_store::StateStore;
 use std::path::{Path, PathBuf};
 
@@ -753,6 +754,56 @@ pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
     ingest_tunnel_accept_bytes(store, &bytes)
 }
 
+/// The receive-side counterpart to Task 6's send-side wiring: dispatches
+/// a decoded envelope's payload to the exact same `ingest_*_bytes`
+/// function the file-based CLI path calls, so every signature check and
+/// follow-gate runs completely unchanged regardless of how the bytes
+/// arrived. A malformed or rejected payload returns `Err` — `sf listen`
+/// (Step 7) logs and continues rather than propagating a failure that
+/// would kill the whole listener.
+pub fn dispatch_envelope(store: &StateStore, kind: p2p_transport::StatementKind, payload: &[u8]) -> Result<()> {
+    match kind {
+        p2p_transport::StatementKind::TunnelConnectionRequest => ingest_tunnel_request_bytes(store, payload),
+        p2p_transport::StatementKind::TunnelConnectionAccept => ingest_tunnel_accept_bytes(store, payload),
+    }
+}
+
+/// The first genuinely persistent process in this codebase — accepts
+/// inbound Iroh connections and dispatches each received envelope via
+/// `dispatch_envelope`. A malformed envelope, a decode failure, or an
+/// `ingest_*` rejection is logged and the loop continues; nothing here
+/// can crash the listener or affect another connection (see the design
+/// spec's Error handling section).
+pub fn listen(store: &StateStore) -> Result<()> {
+    let seed = match store.get_iroh_keypair_seed()? {
+        Some(seed) => seed,
+        None => {
+            let seed: [u8; 32] = {
+                use rand::RngCore;
+                let mut s = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut s);
+                s
+            };
+            store.set_iroh_keypair_seed(&seed)?;
+            seed
+        }
+    };
+    let transport = p2p_transport::IrohTransport::new(seed, b"social-firewall/1").map_err(|e| anyhow::anyhow!("failed to start Iroh transport: {e}"))?;
+    println!("listening — this node's Iroh id: {}", transport.node_id());
+    loop {
+        match transport.recv() {
+            Ok((from, envelope)) => match dispatch_envelope(store, envelope.kind, &envelope.payload) {
+                Ok(()) => println!("dispatched {:?} from {from}", envelope.kind),
+                Err(e) => eprintln!("rejected envelope from {from}: {e}"),
+            },
+            Err(e) => {
+                eprintln!("transport closed: {e}");
+                return Ok(());
+            }
+        }
+    }
+}
+
 pub fn select_tunnel(store: &StateStore, advertisement: &str, targets: &[(String, String)]) -> Result<()> {
     let advertisement_ref = parse_statement_ref(advertisement)?;
     let (requester, _) = self_identity(store)?;
@@ -1038,6 +1089,40 @@ mod sync_tunnels_tests {
 
     fn wg_config(dir: &Path) -> wg_tunnel::WgTunnelConfig {
         wg_tunnel::WgTunnelConfig { scratch_dir: dir.to_path_buf(), dnsmasq_dir: dir.to_path_buf(), ..wg_tunnel::WgTunnelConfig::default() }
+    }
+
+    #[test]
+    fn dispatch_envelope_routes_a_tunnel_connection_request_to_the_same_ingest_path() {
+        let (store, self_user) = store_with_self_identity();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let bob = user(2);
+        let req = TunnelConnectionRequest {
+            requester: bob,
+            sequence: 0,
+            advertisement: StatementRef { author: self_user, sequence: 0 },
+            requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
+            requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
+            requested_at: 0,
+            signature: domain_types::SignatureBytes([0; 64]),
+        };
+        // A real signature is required — dispatch_envelope must reject an
+        // unsigned/garbage payload the same way ingest_tunnel_request does.
+        let bob_kp = crypto::Keypair::generate();
+        let mut signed_req = req.clone();
+        signed_req.signature = bob_kp.sign(crypto::contexts::TUNNEL_CONNECTION_REQUEST, &req.signing_bytes());
+        let json = connection_request_to_json(&signed_req, &bob_kp.public_key());
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, &bytes).unwrap();
+
+        assert_eq!(store.list_pending_tunnel_connection_requests().unwrap().len(), 1, "the request must have been stored via the normal ingest path");
+    }
+
+    #[test]
+    fn dispatch_envelope_rejects_a_tampered_payload_without_panicking() {
+        let (store, _self_user) = store_with_self_identity();
+        let result = dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, b"not even json");
+        assert!(result.is_err());
     }
 
     #[test]

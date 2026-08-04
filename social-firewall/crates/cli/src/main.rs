@@ -319,6 +319,13 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Accept inbound Iroh connections and dispatch each received
+    /// envelope to the same ingest path `ingest-tunnel-request`/
+    /// `ingest-tunnel-accept` use for a file. Runs until the transport
+    /// closes — no arguments, always uses this router's own Iroh
+    /// identity (generated on first use, same as `sf init-identity`'s
+    /// signing keypair).
+    Listen,
     /// Publish a signed, named, categorized bundle of rules for other
     /// operators to subscribe to.
     PublishList {
@@ -742,6 +749,7 @@ fn main() -> Result<()> {
                 report.auto_responses, report.auto_accepts, report.auto_consumes, report.peers_added, report.peers_removed
             );
         }
+        Command::Listen => tunnel::listen(&store)?,
         Command::PublishList { name, description, categories, entries_file, visibility, recipient, out, out_dir } => {
             list::publish_list(&store, &name, &description, &categories, &entries_file, &visibility, &recipient, out, out_dir)?
         }
