@@ -69,6 +69,13 @@ enum Command {
         /// `--user-name` instead of the raw hex `--user`.
         #[arg(long)]
         name: Option<String>,
+        /// This peer's Iroh node id, if known — enables automated
+        /// delivery for statement types that have a known recipient (see
+        /// docs/superpowers/specs/2026-08-04-p2p-transport-design.md).
+        /// Omit if unknown; the existing manual export/ingest path is
+        /// unaffected either way.
+        #[arg(long)]
+        iroh_node_id: Option<String>,
     },
     /// Relabel an already-followed user without touching their trust
     /// weights — omit `--name` to clear the label.
@@ -79,6 +86,15 @@ enum Command {
         user: String,
         #[arg(long)]
         name: Option<String>,
+    },
+    /// Set or clear an already-followed user's Iroh node id for p2p delivery.
+    SetFollowNodeId {
+        #[arg(long)]
+        federation: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        node_id: Option<String>,
     },
     /// Set a reasonless, private, local-only stance for a target.
     SetOverride {
@@ -670,10 +686,11 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::InitIdentity { display_name } => init_identity(&store, display_name)?,
-        Command::AddFollow { federation, user, allow_weight, deny_weight, advisory, exclude, name } => {
-            add_follow(&store, &federation, &user, allow_weight, deny_weight, advisory, exclude, name)?
+        Command::AddFollow { federation, user, allow_weight, deny_weight, advisory, exclude, name, iroh_node_id } => {
+            add_follow(&store, &federation, &user, allow_weight, deny_weight, advisory, exclude, name, iroh_node_id)?
         }
         Command::SetFollowName { federation, user, name } => set_follow_name(&store, &federation, &user, name)?,
+        Command::SetFollowNodeId { federation, user, node_id } => set_follow_node_id(&store, &federation, &user, node_id)?,
         Command::SetOverride { target_kind, target_value, stance, emergency, note, ttl_seconds } => {
             set_override(&store, &target_kind, &target_value, &stance, emergency, note, ttl_seconds)?
         }
@@ -964,6 +981,7 @@ fn add_follow(
     advisory: bool,
     exclude: bool,
     name: Option<String>,
+    iroh_node_id: Option<String>,
 ) -> Result<()> {
     let federation = FederationId(parse_hash32(federation)?);
     let local_id = parse_hash32(user)?;
@@ -975,7 +993,7 @@ fn add_follow(
         excluded: exclude,
         category_filter: None,
         display_name: name,
-        iroh_node_id: None,
+        iroh_node_id,
         expires_at: None,
         created_at: now_unix(),
     };
@@ -997,6 +1015,18 @@ fn set_follow_name(store: &StateStore, federation: &str, user: &str, name: Optio
     match name {
         Some(n) => println!("{}/{} is now labeled \"{n}\"", target_user.federation.0, target_user.local_id),
         None => println!("label cleared for {}/{}", target_user.federation.0, target_user.local_id),
+    }
+    Ok(())
+}
+
+fn set_follow_node_id(store: &StateStore, federation: &str, user: &str, node_id: Option<String>) -> Result<()> {
+    let target_user = UserId { federation: FederationId(parse_hash32(federation)?), local_id: parse_hash32(user)? };
+    let mut rule = store.get_follow(&target_user)?.context("not following this user yet — run `add-follow` first")?;
+    rule.iroh_node_id = node_id.clone();
+    store.upsert_follow(&rule)?;
+    match node_id {
+        Some(id) => println!("{}/{} is now reachable via Iroh node {id}", target_user.federation.0, target_user.local_id),
+        None => println!("Iroh node id cleared for {}/{}", target_user.federation.0, target_user.local_id),
     }
     Ok(())
 }
