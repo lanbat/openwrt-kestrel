@@ -1,0 +1,9 @@
+[package]
+name = "p2p-transport"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]
