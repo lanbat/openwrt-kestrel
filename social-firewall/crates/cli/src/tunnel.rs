@@ -759,7 +759,7 @@ pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
 /// function the file-based CLI path calls, so every signature check and
 /// follow-gate runs completely unchanged regardless of how the bytes
 /// arrived. A malformed or rejected payload returns `Err` — `sf listen`
-/// (Step 7) logs and continues rather than propagating a failure that
+/// (below) logs and continues rather than propagating a failure that
 /// would kill the whole listener.
 pub fn dispatch_envelope(store: &StateStore, kind: p2p_transport::StatementKind, payload: &[u8]) -> Result<()> {
     match kind {
