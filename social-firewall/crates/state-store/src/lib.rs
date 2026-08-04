@@ -333,6 +333,27 @@ impl StateStore {
             .transpose()
     }
 
+    /// Reverse lookup of `LocalTrustRule::iroh_node_id`: given an Iroh
+    /// node id observed on an inbound connection, which followed user
+    /// (if any) does it belong to? `None` means nobody this router
+    /// follows has claimed that node id, which is the network path's
+    /// equivalent of "a stranger handed you a file" — `cli::tunnel::
+    /// listen` refuses to dispatch in that case.
+    ///
+    /// Not scoped to a federation, unlike `resolve_user_by_name`: a node
+    /// id is a global cryptographic identity, not a per-federation label.
+    pub fn find_follow_by_iroh_node_id(&self, node_id: &str) -> Result<Option<UserId>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT federation_id, local_id FROM follows WHERE iroh_node_id = ?1",
+                params![node_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?
+            .map(|(fed, local)| Ok(UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? }))
+            .transpose()
+    }
+
     pub fn upsert_federation_trust(&self, rule: &FederationTrustRule) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO federation_trust_rules (federation_id, allow_weight, deny_weight, via_relay_full_membership, category_filter, expires_at, created_at)
@@ -3955,6 +3976,32 @@ mod tests {
         rule.iroh_node_id = Some("deadbeef".repeat(8));
         store.upsert_follow(&rule).unwrap();
         assert_eq!(store.get_follow(&alice).unwrap().unwrap().iroh_node_id.as_deref(), Some(rule.iroh_node_id.unwrap().as_str()));
+    }
+
+    #[test]
+    fn find_follow_by_iroh_node_id_resolves_only_a_node_id_a_follow_actually_claimed() {
+        let store = StateStore::open_in_memory().unwrap();
+        let alice = user(1, 1);
+        let node_id = "deadbeef".repeat(8);
+        assert_eq!(store.find_follow_by_iroh_node_id(&node_id).unwrap(), None, "nothing is known before any follow claims it");
+
+        let mut rule = follow(alice, 1.0, 1.0);
+        rule.iroh_node_id = Some(node_id.clone());
+        store.upsert_follow(&rule).unwrap();
+
+        assert_eq!(store.find_follow_by_iroh_node_id(&node_id).unwrap(), Some(alice));
+        assert_eq!(store.find_follow_by_iroh_node_id(&"beefdead".repeat(8)).unwrap(), None, "an unrelated node id must not resolve");
+    }
+
+    #[test]
+    fn find_follow_by_iroh_node_id_ignores_follows_with_no_node_id() {
+        let store = StateStore::open_in_memory().unwrap();
+        // A follow with `iroh_node_id = NULL` must not be matched by any
+        // lookup — `WHERE iroh_node_id = ?1` never matches NULL in SQL,
+        // but this pins that behavior rather than assuming it.
+        store.upsert_follow(&follow(user(1, 1), 1.0, 1.0)).unwrap();
+        assert_eq!(store.find_follow_by_iroh_node_id("").unwrap(), None);
+        assert_eq!(store.find_follow_by_iroh_node_id(&"aa".repeat(32)).unwrap(), None);
     }
 
     #[test]

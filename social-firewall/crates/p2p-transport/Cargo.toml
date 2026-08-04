@@ -6,7 +6,10 @@ edition.workspace = true
 [dependencies]
 thiserror = "1"
 iroh = { version = "1.0.3", default-features = false, features = ["metrics", "fast-apple-datapath", "tls-ring"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# `sync` is for `tokio::sync::Semaphore` (the accept loop's concurrency
+# cap) — declared explicitly rather than relying on another dependency's
+# feature unification to happen to enable it.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 anyhow = "1"
 
 [dev-dependencies]

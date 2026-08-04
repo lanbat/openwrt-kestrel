@@ -113,7 +113,12 @@ pub(crate) fn try_deliver(store: &StateStore, recipient: &UserId, kind: p2p_tran
     let Some(node_id) = rule.iroh_node_id else { return DeliveryOutcome::NoKnownAddress };
     let seed = match store.get_iroh_keypair_seed() {
         Ok(Some(seed)) => seed,
-        _ => return DeliveryOutcome::Failed("no local Iroh keypair yet — run `sf listen` once to generate one".to_string()),
+        // Distinct from the error case below: this one is a normal
+        // "you haven't set this up yet" with an obvious fix, not a
+        // malfunction. Collapsing the two would have reported a corrupt
+        // or unreadable database as a missing keypair.
+        Ok(None) => return DeliveryOutcome::Failed("no local Iroh keypair yet — run `sf listen` once to generate one".to_string()),
+        Err(e) => return DeliveryOutcome::Failed(format!("could not read the local Iroh keypair from the store: {e}")),
     };
     let transport = match p2p_transport::IrohTransport::new(seed, b"social-firewall/1") {
         Ok(t) => t,
@@ -123,6 +128,39 @@ pub(crate) fn try_deliver(store: &StateStore, recipient: &UserId, kind: p2p_tran
     match transport.send(&node_id, &envelope) {
         Ok(()) => DeliveryOutcome::Delivered,
         Err(e) => DeliveryOutcome::Failed(e.to_string()),
+    }
+}
+
+/// Reports a `try_deliver` outcome to the operator and answers the one
+/// question every call site then has: do I still need to write the
+/// fallback file? Shared by all three call sites so they cannot drift
+/// apart in how they describe a failure.
+///
+/// `Failed(msg)`'s message goes to stderr and is never discarded — a
+/// delivery that failed because the peer's router refused, timed out, or
+/// could not decode the envelope is a materially different situation
+/// from a peer whose node id was simply never recorded, and only this
+/// message distinguishes them.
+///
+/// Note the ceiling on what `Delivered` can mean: `PeerTransport::send`
+/// returning `Ok(())` proves the peer's *transport* received and decoded
+/// the statement, not that the peer's ingest logic accepted it (see
+/// `p2p_transport`'s module docs). So "delivered" here means the bytes
+/// arrived, and skipping the fallback file is safe only in that sense.
+pub(crate) fn needs_file_fallback(outcome: DeliveryOutcome, peer: &UserId) -> bool {
+    match outcome {
+        DeliveryOutcome::Delivered => {
+            println!("delivered to {}'s node", user_id_str(peer));
+            false
+        }
+        DeliveryOutcome::NoKnownAddress => {
+            println!("no Iroh node_id on record for {} — falling back to file export", user_id_str(peer));
+            true
+        }
+        DeliveryOutcome::Failed(msg) => {
+            eprintln!("delivery to {}'s node failed: {msg} — falling back to file export", user_id_str(peer));
+            true
+        }
     }
 }
 
@@ -567,15 +605,18 @@ pub fn request_tunnel(store: &StateStore, advertisement: &str, out: Option<PathB
     println!("requested tunnel #{} against {}/{}", req.sequence, user_id_str(&ad.provider), ad.sequence);
 
     let plaintext = serde_json::to_vec(&connection_request_to_json(&req, &identity_pubkey))?;
-    match try_deliver(store, &ad.provider, p2p_transport::StatementKind::TunnelConnectionRequest, &plaintext) {
-        DeliveryOutcome::Delivered => {
-            println!("delivered to {}'s node", user_id_str(&ad.provider));
-        }
-        DeliveryOutcome::NoKnownAddress | DeliveryOutcome::Failed(_) => {
-            if let Some(path) = &out {
+    // The arms are split rather than sharing one `NoKnownAddress |
+    // Failed(_)` pattern because `Failed`'s message is the only place an
+    // operator can learn *why* delivery failed — "unreachable right now"
+    // and "we have no address for this peer at all" want very different
+    // responses, and collapsing them discarded that distinction.
+    if needs_file_fallback(try_deliver(store, &ad.provider, p2p_transport::StatementKind::TunnelConnectionRequest, &plaintext), &ad.provider) {
+        match &out {
+            Some(path) => {
                 write_maybe_sealed(&plaintext, Some(&ad.messaging_pubkey), path)?;
-                println!("{}'s node_id not known or unreachable — exported to {} for manual delivery", user_id_str(&ad.provider), path.display());
+                println!("exported to {} for manual delivery", path.display());
             }
+            None => eprintln!("no --out path given — this connection request has not reached {} by any route", user_id_str(&ad.provider)),
         }
     }
     Ok(())
@@ -725,16 +766,14 @@ pub fn accept_tunnel_request(store: &StateStore, requester: &str, sequence: u64,
     );
 
     let plaintext = serde_json::to_vec(&accept_to_json(&accept, &identity_pubkey))?;
-    match try_deliver(store, &requester_user, p2p_transport::StatementKind::TunnelConnectionAccept, &plaintext) {
-        DeliveryOutcome::Delivered => {
-            println!("delivered to {}'s node", user_id_str(&requester_user));
-        }
-        DeliveryOutcome::NoKnownAddress | DeliveryOutcome::Failed(_) => {
-            if let Some(path) = out {
+    if needs_file_fallback(try_deliver(store, &requester_user, p2p_transport::StatementKind::TunnelConnectionAccept, &plaintext), &requester_user) {
+        match out {
+            Some(path) => {
                 // Always sealed — a connection accept is inherently pairwise.
                 write_maybe_sealed(&plaintext, Some(&req.requester_messaging_pubkey), &path)?;
-                println!("{}'s node_id not known or unreachable — exported (sealed to requester) to {}", user_id_str(&requester_user), path.display());
+                println!("exported (sealed to requester) to {}", path.display());
             }
+            None => eprintln!("no --out path given — this accept has not reached {} by any route", user_id_str(&requester_user)),
         }
     }
     Ok(())
@@ -816,12 +855,42 @@ pub fn dispatch_envelope(store: &StateStore, kind: p2p_transport::StatementKind,
     }
 }
 
+/// Decides whether an envelope arriving over the network from Iroh node
+/// id `from` should be dispatched at all.
+///
+/// `from` is authenticated by Iroh as part of the QUIC/TLS handshake, so
+/// it is a real identity claim rather than a self-reported one, and it
+/// is safe to gate on. Everything the file-based ingest path could
+/// assume about provenance came from a human choosing to copy a file
+/// from someone they knew; on the network path there is no human in the
+/// loop, and anyone who learns this router's node id can open a
+/// connection to it. Requiring the sender's node id to match a follow
+/// this router has explicitly recorded restores that same "someone
+/// vetted this sender" property, automatically.
+///
+/// Fails **closed**: if the store cannot be read, the envelope is not
+/// dispatched. A lookup failure is not evidence that the sender is
+/// trusted.
+///
+/// Note that this is an additional gate, not a replacement for anything.
+/// Signature verification and every other check inside `ingest_*_bytes`
+/// still run afterwards, exactly as they do for a file.
+pub(crate) fn known_follow_for_node_id(store: &StateStore, from: &str) -> Option<UserId> {
+    match store.find_follow_by_iroh_node_id(from) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("could not check whether {from} is a known follow ({e}) — refusing the envelope");
+            None
+        }
+    }
+}
+
 /// The first genuinely persistent process in this codebase — accepts
 /// inbound Iroh connections and dispatches each received envelope via
-/// `dispatch_envelope`. A malformed envelope, a decode failure, or an
-/// `ingest_*` rejection is logged and the loop continues; nothing here
-/// can crash the listener or affect another connection (see the design
-/// spec's Error handling section).
+/// `dispatch_envelope`. A malformed envelope, a decode failure, an
+/// unrecognized sender, or an `ingest_*` rejection is logged and the
+/// loop continues; nothing here can crash the listener or affect
+/// another connection (see the design spec's Error handling section).
 pub fn listen(store: &StateStore) -> Result<()> {
     let seed = match store.get_iroh_keypair_seed()? {
         Some(seed) => seed,
@@ -840,10 +909,16 @@ pub fn listen(store: &StateStore) -> Result<()> {
     println!("listening — this node's Iroh id: {}", transport.node_id());
     loop {
         match transport.recv() {
-            Ok((from, envelope)) => match dispatch_envelope(store, envelope.kind, &envelope.payload) {
-                Ok(()) => println!("dispatched {:?} from {from}", envelope.kind),
-                Err(e) => eprintln!("rejected envelope from {from}: {e}"),
-            },
+            Ok((from, envelope)) => {
+                let Some(peer) = known_follow_for_node_id(store, &from) else {
+                    eprintln!("rejected {:?} from unrecognized node {from} — no follow claims this Iroh node_id (add it with `sf set-follow-node-id`)", envelope.kind);
+                    continue;
+                };
+                match dispatch_envelope(store, envelope.kind, &envelope.payload) {
+                    Ok(()) => println!("dispatched {:?} from {} ({from})", envelope.kind, user_id_str(&peer)),
+                    Err(e) => eprintln!("rejected envelope from {} ({from}): {e}", user_id_str(&peer)),
+                }
+            }
             Err(e) => {
                 eprintln!("transport closed: {e}");
                 return Ok(());
@@ -1022,15 +1097,11 @@ pub fn sync_tunnels(
         }
         let (accept, identity_pubkey) = do_accept_tunnel_request(store, provider, &seed, &req)?;
         let plaintext = serde_json::to_vec(&accept_to_json(&accept, &identity_pubkey))?;
-        match try_deliver(store, &req.requester, p2p_transport::StatementKind::TunnelConnectionAccept, &plaintext) {
-            DeliveryOutcome::Delivered => {
-                println!("auto-accepted connection request #{} from {}: delivered to their node", req.sequence, user_id_str(&req.requester));
-            }
-            DeliveryOutcome::NoKnownAddress | DeliveryOutcome::Failed(_) => {
-                let path = out_dir.join(format!("tunnel-accept-{}-{}.json", user_id_str(&req.requester).replace('/', "_"), req.sequence));
-                write_maybe_sealed(&plaintext, Some(&req.requester_messaging_pubkey), &path)?;
-                println!("auto-accepted connection request #{} from {}: node_id not known or unreachable — exported to {}", req.sequence, user_id_str(&req.requester), path.display());
-            }
+        println!("auto-accepted connection request #{} from {}", req.sequence, user_id_str(&req.requester));
+        if needs_file_fallback(try_deliver(store, &req.requester, p2p_transport::StatementKind::TunnelConnectionAccept, &plaintext), &req.requester) {
+            let path = out_dir.join(format!("tunnel-accept-{}-{}.json", user_id_str(&req.requester).replace('/', "_"), req.sequence));
+            write_maybe_sealed(&plaintext, Some(&req.requester_messaging_pubkey), &path)?;
+            println!("exported to {} for manual delivery", path.display());
         }
         report.auto_accepts += 1;
     }
@@ -1179,6 +1250,105 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let result = dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, b"not even json");
         assert!(result.is_err());
+    }
+
+    fn follow_with_node_id(user: UserId, iroh_node_id: Option<String>) -> domain_types::LocalTrustRule {
+        domain_types::LocalTrustRule {
+            user,
+            allow_weight: 1.0,
+            deny_weight: 1.0,
+            advisory_only: false,
+            excluded: false,
+            category_filter: None,
+            display_name: None,
+            iroh_node_id,
+            expires_at: None,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn known_follow_for_node_id_matches_only_a_node_id_a_follow_recorded() {
+        let (store, _self_user) = store_with_self_identity();
+        let bob = user(2);
+        let bobs_node = "b0b".repeat(16);
+        store.upsert_follow(&follow_with_node_id(bob, Some(bobs_node.clone()))).unwrap();
+        // A follow with no node id recorded must never match anything.
+        store.upsert_follow(&follow_with_node_id(user(3), None)).unwrap();
+
+        assert_eq!(known_follow_for_node_id(&store, &bobs_node), Some(bob));
+        assert!(known_follow_for_node_id(&store, &"dead".repeat(12)).is_none(), "a node id no follow claims must not resolve");
+        assert!(known_follow_for_node_id(&store, "").is_none());
+    }
+
+    /// The gate must stop an envelope that `dispatch_envelope` would
+    /// otherwise have happily accepted — so this builds a genuinely
+    /// valid, correctly-signed request, shows the gate refuses its
+    /// sender, and then shows the very same bytes *do* dispatch once
+    /// called directly. That second half is what proves the gate is the
+    /// only thing that rejected it, rather than the payload being
+    /// invalid for some unrelated reason.
+    #[test]
+    fn an_envelope_from_an_unrecognized_node_is_not_dispatched() {
+        let (store, self_user) = store_with_self_identity();
+        let (_ad, _pubkey) =
+            build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let bob = user(2);
+        // Bob is followed, but with a *different* node id than the one
+        // the connection arrives from.
+        store.upsert_follow(&follow_with_node_id(bob, Some("b0b".repeat(16)))).unwrap();
+
+        let bob_kp = crypto::Keypair::generate();
+        let mut req = TunnelConnectionRequest {
+            requester: bob,
+            sequence: 0,
+            advertisement: StatementRef { author: self_user, sequence: 0 },
+            requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
+            requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
+            requested_at: 0,
+            signature: domain_types::SignatureBytes([0; 64]),
+        };
+        req.signature = bob_kp.sign(crypto::contexts::TUNNEL_CONNECTION_REQUEST, &req.signing_bytes());
+        let bytes = serde_json::to_vec(&connection_request_to_json(&req, &bob_kp.public_key())).unwrap();
+
+        // What `listen` does: refuse before dispatching.
+        let attacker_node = "acab".repeat(12);
+        assert!(known_follow_for_node_id(&store, &attacker_node).is_none(), "an unrecognized sender must not resolve to a follow");
+        assert_eq!(store.list_pending_tunnel_connection_requests().unwrap().len(), 0, "nothing may be ingested from an unrecognized sender");
+
+        // The payload itself was always fine — only the sender was not.
+        dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, &bytes).unwrap();
+        assert_eq!(store.list_pending_tunnel_connection_requests().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_recognized_follows_node_id_passes_the_gate_and_dispatches() {
+        let (store, self_user) = store_with_self_identity();
+        let (_ad, _pubkey) =
+            build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let bob = user(2);
+        let bobs_node = "b0b".repeat(16);
+        store.upsert_follow(&follow_with_node_id(bob, Some(bobs_node.clone()))).unwrap();
+
+        let bob_kp = crypto::Keypair::generate();
+        let mut req = TunnelConnectionRequest {
+            requester: bob,
+            sequence: 0,
+            advertisement: StatementRef { author: self_user, sequence: 0 },
+            requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
+            requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
+            requested_at: 0,
+            signature: domain_types::SignatureBytes([0; 64]),
+        };
+        req.signature = bob_kp.sign(crypto::contexts::TUNNEL_CONNECTION_REQUEST, &req.signing_bytes());
+        let bytes = serde_json::to_vec(&connection_request_to_json(&req, &bob_kp.public_key())).unwrap();
+
+        // Exactly `listen`'s sequence: gate, then dispatch.
+        let peer = known_follow_for_node_id(&store, &bobs_node).expect("a follow that recorded this node id must be recognized");
+        assert_eq!(peer, bob);
+        dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, &bytes).unwrap();
+
+        assert_eq!(store.list_pending_tunnel_connection_requests().unwrap().len(), 1);
     }
 
     #[test]

@@ -1,8 +1,13 @@
-use crate::envelope::{Envelope, StatementKind};
+use crate::envelope::Envelope;
 use crate::transport::{PeerTransport, TransportError};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+
+/// Peer address → that peer's inbox sender. Named rather than spelled
+/// out inline so the struct field below stays readable (and clippy's
+/// `type_complexity` stays quiet).
+type PeerInboxes = HashMap<String, Sender<(String, Envelope)>>;
 
 /// An in-memory `PeerTransport` for tests — no network, no async
 /// runtime. `pair()` wires two instances to each other so a test can
@@ -14,7 +19,7 @@ use std::sync::{Arc, Mutex};
 pub struct FakeTransport {
     my_address: String,
     inbox: Arc<Mutex<Receiver<(String, Envelope)>>>,
-    peers: Arc<Mutex<HashMap<String, Sender<(String, Envelope)>>>>,
+    peers: Arc<Mutex<PeerInboxes>>,
 }
 
 impl FakeTransport {
@@ -50,6 +55,10 @@ impl PeerTransport for FakeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests construct envelopes, so this stays scoped to them —
+    // importing it at module level made it an `unused_imports` warning on
+    // every non-test build.
+    use crate::envelope::StatementKind;
 
     #[test]
     fn two_fake_transports_exchange_an_envelope() {
