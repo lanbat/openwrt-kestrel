@@ -67,12 +67,8 @@ pub(crate) fn write_maybe_sealed(plaintext: &[u8], recipient: Option<&MessagingP
     Ok(())
 }
 
-/// Reads `path`, unsealing first if it's a sealed envelope (using this
-/// router's own messaging keypair — generated on first use, same as
-/// `own_messaging_keypair` above), and returns the parsed inner JSON.
-pub(crate) fn read_maybe_sealed(store: &StateStore, path: &Path) -> Result<serde_json::Value> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let json: serde_json::Value = serde_json::from_str(&text)?;
+pub(crate) fn parse_maybe_sealed_bytes(store: &StateStore, bytes: &[u8]) -> Result<serde_json::Value> {
+    let json: serde_json::Value = serde_json::from_slice(bytes)?;
     if json.get("sealed").and_then(|v| v.as_bool()) == Some(true) {
         let ciphertext_hex = json.get("ciphertext_hex").and_then(|v| v.as_str()).context("missing `ciphertext_hex`")?;
         let ciphertext = hex::decode(ciphertext_hex)?;
@@ -82,6 +78,17 @@ pub(crate) fn read_maybe_sealed(store: &StateStore, path: &Path) -> Result<serde
     } else {
         Ok(json)
     }
+}
+
+/// Reads `path`, unsealing first if it's a sealed envelope (using this
+/// router's own messaging keypair — generated on first use, same as
+/// elsewhere). Thin wrapper around `parse_maybe_sealed_bytes` — the file
+/// I/O is the only thing this layer adds, so `sf listen` (which receives
+/// bytes directly over the network, never a file) can share the same
+/// parsing/unsealing core.
+pub(crate) fn read_maybe_sealed(store: &StateStore, path: &Path) -> Result<serde_json::Value> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_maybe_sealed_bytes(store, &bytes)
 }
 
 pub(crate) fn user_id_str(u: &UserId) -> String {
@@ -533,8 +540,8 @@ pub fn request_tunnel(store: &StateStore, advertisement: &str, out: Option<PathB
     Ok(())
 }
 
-pub fn ingest_tunnel_request(store: &StateStore, file: &Path) -> Result<()> {
-    let json = read_maybe_sealed(store, file)?;
+pub(crate) fn ingest_tunnel_request_bytes(store: &StateStore, bytes: &[u8]) -> Result<()> {
+    let json = parse_maybe_sealed_bytes(store, bytes)?;
     let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
     let requester = parse_user_ref(get_str("requester")?)?;
     let identity_pubkey = PublicKeyBytes(bytes32(get_str("identity_pubkey")?)?);
@@ -552,6 +559,11 @@ pub fn ingest_tunnel_request(store: &StateStore, file: &Path) -> Result<()> {
     store.store_tunnel_connection_request(&req)?;
     println!("ingested tunnel connection request #{} from {} (pending review)", req.sequence, user_id_str(&req.requester));
     Ok(())
+}
+
+pub fn ingest_tunnel_request(store: &StateStore, file: &Path) -> Result<()> {
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    ingest_tunnel_request_bytes(store, &bytes)
 }
 
 pub fn list_pending_tunnel_requests(store: &StateStore) -> Result<()> {
@@ -679,8 +691,8 @@ pub fn accept_tunnel_request(store: &StateStore, requester: &str, sequence: u64,
     Ok(())
 }
 
-pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
-    let json = read_maybe_sealed(store, file)?;
+pub(crate) fn ingest_tunnel_accept_bytes(store: &StateStore, bytes: &[u8]) -> Result<()> {
+    let json = parse_maybe_sealed_bytes(store, bytes)?;
     let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
     let provider = parse_user_ref(get_str("provider")?)?;
     let identity_pubkey = PublicKeyBytes(bytes32(get_str("identity_pubkey")?)?);
@@ -734,6 +746,11 @@ pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
         accept.assigned_tunnel_ip6.as_deref().map(|ip6| format!(" / {ip6}")).unwrap_or_default()
     );
     Ok(())
+}
+
+pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    ingest_tunnel_accept_bytes(store, &bytes)
 }
 
 pub fn select_tunnel(store: &StateStore, advertisement: &str, targets: &[(String, String)]) -> Result<()> {
