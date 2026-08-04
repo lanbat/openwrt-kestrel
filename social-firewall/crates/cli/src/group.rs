@@ -625,7 +625,7 @@ pub fn set_group_trust(store: &StateStore, group_id: &str, allow_weight: f64, de
     Ok(())
 }
 
-pub fn publish_party_line(store: &StateStore, group_id: &str, body: &str, out_dir: &Path) -> Result<()> {
+pub fn publish_party_line(store: &StateStore, group_id: &str, body: &str, in_reply_to: Option<(String, String)>, out_dir: &Path) -> Result<()> {
     let group_id = parse_group_id(group_id)?;
     let (author, seed) = self_identity(store)?;
     let kp = crypto::Keypair::from_seed(&seed);
@@ -634,19 +634,29 @@ pub fn publish_party_line(store: &StateStore, group_id: &str, body: &str, out_di
         bail!("you don't currently have posting rights on this group's party line (not a member, or the channel is moderated and you're not voiced)");
     }
     let sequence = store.next_party_line_sequence(group_id, &author)?;
+    let in_reply_to = in_reply_to.map(|(kind, value)| parse_target(&kind, &value)).transpose()?;
 
-    let mut msg = PartyLineMessage { group_id, author, sequence, body: body.to_string(), issued_at: now_unix(), signature: domain_types::SignatureBytes([0; 64]) };
+    let mut msg = PartyLineMessage { group_id, author, sequence, body: body.to_string(), in_reply_to, issued_at: now_unix(), signature: domain_types::SignatureBytes([0; 64]) };
     let signing_bytes = msg.signing_bytes();
     msg.signature = kp.sign(crypto::contexts::PARTY_LINE_MESSAGE, &signing_bytes);
     store.store_party_line_message(&msg)?;
     println!("published party-line message #{sequence} to group {}", group_id_str(group_id));
 
+    let (in_reply_to_target_kind, in_reply_to_target_value) = match &msg.in_reply_to {
+        Some(t) => {
+            let (k, v) = target_to_kind_value(t)?;
+            (Some(k), Some(v))
+        }
+        None => (None, None),
+    };
     let plaintext = serde_json::to_vec(&serde_json::json!({
         "group_id": group_id_str(msg.group_id),
         "author": user_id_str(&msg.author),
         "identity_pubkey": hex::encode(kp.public_key().0),
         "sequence": msg.sequence,
         "body": msg.body,
+        "in_reply_to_target_kind": in_reply_to_target_kind,
+        "in_reply_to_target_value": in_reply_to_target_value,
         "issued_at": msg.issued_at,
         "signature": hex::encode(msg.signature.0),
     }))?;
@@ -680,11 +690,16 @@ pub fn ingest_party_line(store: &StateStore, file: &Path) -> Result<()> {
     let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
     let author = parse_user_ref(get_str("author")?)?;
     let identity_pubkey = PublicKeyBytes(bytes32(get_str("identity_pubkey")?)?);
+    let in_reply_to = match (json.get("in_reply_to_target_kind").and_then(|v| v.as_str()), json.get("in_reply_to_target_value").and_then(|v| v.as_str())) {
+        (Some(kind), Some(value)) => Some(parse_target(kind, value)?),
+        _ => None,
+    };
     let msg = PartyLineMessage {
         group_id: parse_group_id(get_str("group_id")?)?,
         author,
         sequence: json.get("sequence").and_then(|v| v.as_u64()).context("missing `sequence`")?,
         body: get_str("body")?.to_string(),
+        in_reply_to,
         issued_at: json.get("issued_at").and_then(|v| v.as_i64()).context("missing `issued_at`")?,
         signature: domain_types::SignatureBytes(bytes64(get_str("signature")?)?),
     };
@@ -739,15 +754,145 @@ pub fn explain_group_vote(store: &StateStore, group_id: &str, target_kind: &str,
     Ok(())
 }
 
+/// Formats a user the way real IRC/mIRC shows a join/part line: `nick
+/// (ident@host)`. `ident` is the peer's `local_id`, truncated to 8 hex
+/// chars for display only — never used for lookup or auth. `host` is the
+/// peer's federation's own display name if known (see
+/// `StateStore::get_federation_display_name`'s own doc on why that's
+/// usually only set for this router's home federation — a foreign peer's
+/// federation falls back to `<hex>.fed`). `nick` is this router's own
+/// address-book label for the user (the follow's `display_name`) if one
+/// has been set, else the same truncated ident — matching how real IRC
+/// shows an unresolved ident (`Guest1234 (Guest1234@host)`).
+/// Just the `nick` portion of `irc_identity` — follow display_name if
+/// set, else the same truncated-local_id fallback. Used where the full
+/// `nick (ident@host)` triple would be noisy (e.g. a poll's per-stance
+/// voter list).
+fn nick_only(store: &StateStore, user: &UserId) -> Result<String> {
+    let ident = &user.local_id.to_string()[..8];
+    Ok(store.get_follow(user)?.and_then(|f| f.display_name).unwrap_or_else(|| ident.to_string()))
+}
+
+fn irc_identity(store: &StateStore, user: &UserId) -> Result<String> {
+    let ident = &user.local_id.to_string()[..8];
+    let host = store.get_federation_display_name(&user.federation)?.unwrap_or_else(|| format!("{}.fed", &user.federation.0.to_string()[..8]));
+    let nick = nick_only(store, user)?;
+    Ok(format!("{nick} ({ident}@{host})"))
+}
+
+/// A compact "poll" summary of a target's current vote breakdown —
+/// reuses `group_vote_breakdown_for` (already tracks every current
+/// voting member's latest, non-expired vote) rather than any new
+/// aggregation logic. An expired or never-cast vote both fold into "no
+/// vote" here — this is the *live* tally, not a full audit; use
+/// `explain-group-vote` for the distinction between the two.
+fn format_poll(store: &StateStore, group_id: GroupId, target: &domain_types::TargetSelector, now: i64) -> Result<String> {
+    let breakdown = store.group_vote_breakdown_for(group_id, target, now)?;
+    let mut by_stance: std::collections::BTreeMap<&'static str, Vec<String>> = std::collections::BTreeMap::new();
+    let mut no_vote: Vec<String> = Vec::new();
+    for (voter, vote, counts) in &breakdown {
+        let nick = nick_only(store, voter)?;
+        match vote {
+            Some(v) if *counts => by_stance.entry(stance_str(v.stance)).or_default().push(nick),
+            _ => no_vote.push(nick),
+        }
+    }
+    let mut parts: Vec<String> = by_stance.into_iter().map(|(stance, nicks)| format!("{stance} {} ({})", nicks.len(), nicks.join(", "))).collect();
+    if !no_vote.is_empty() {
+        parts.push(format!("no vote: {}", no_vote.join(", ")));
+    }
+    Ok(format!("poll: {}", parts.join(" | ")))
+}
+
+/// Mirrors `state-store`'s own private `target_to_kv` exactly (including
+/// rejecting `ProtoPort`, which isn't persistable in this kind/value
+/// shape anywhere in this crate) — needed here purely to build the JSON
+/// export for `in_reply_to`, since that conversion isn't exposed publicly.
+fn target_to_kind_value(t: &domain_types::TargetSelector) -> Result<(String, String)> {
+    use domain_types::TargetSelector;
+    match t {
+        TargetSelector::Domain(s) => Ok(("domain".to_string(), s.clone())),
+        TargetSelector::DomainSuffix(s) => Ok(("domain_suffix".to_string(), s.clone())),
+        TargetSelector::Ip(s) => Ok(("ip".to_string(), s.clone())),
+        TargetSelector::Cidr(s) => Ok(("cidr".to_string(), s.clone())),
+        TargetSelector::Service(s) => Ok(("service".to_string(), s.clone())),
+        TargetSelector::ProtoPort { .. } => bail!("a proto/port target cannot be used as a party-line reply target"),
+    }
+}
+
+fn target_str(t: &domain_types::TargetSelector) -> String {
+    use domain_types::TargetSelector;
+    match t {
+        TargetSelector::Domain(s) => format!("domain:{s}"),
+        TargetSelector::DomainSuffix(s) => format!("domain_suffix:{s}"),
+        TargetSelector::Ip(s) => format!("ip:{s}"),
+        TargetSelector::Cidr(s) => format!("cidr:{s}"),
+        TargetSelector::Service(s) => format!("service:{s}"),
+        TargetSelector::ProtoPort { inner, proto, port } => format!("{}/{proto}:{port}", target_str(inner)),
+    }
+}
+
+/// Merges real messages, the IRC-style join/leave log
+/// (`StateStore::list_group_membership_events`), and every cast vote
+/// (`StateStore::list_group_votes`) into one chronological timeline —
+/// the same way a real IRC client interleaves join/part notices with
+/// chat rather than showing them in a separate window. A vote is shown
+/// every time it's cast, not deduped to the latest per voter — see
+/// `list_group_votes`'s own doc on why that's a real, distinct event.
 pub fn list_party_line(store: &StateStore, group_id: &str) -> Result<()> {
     let group_id = parse_group_id(group_id)?;
     let messages = store.list_party_line_messages(group_id)?;
-    if messages.is_empty() {
-        println!("no party-line messages for {}", group_id_str(group_id));
+    let events = store.list_group_membership_events(group_id)?;
+    let votes = store.list_group_votes(group_id)?;
+    if messages.is_empty() && events.is_empty() && votes.is_empty() {
+        println!("no party-line activity for {}", group_id_str(group_id));
         return Ok(());
     }
+
+    enum Entry {
+        Message(PartyLineMessage),
+        Event(UserId, state_store::MembershipEventKind),
+        Vote(GroupVote),
+    }
+    let mut timeline: Vec<(i64, Entry)> = Vec::new();
     for m in messages {
-        println!("[{}] {}: {}", m.issued_at, user_id_str(&m.author), m.body);
+        timeline.push((m.issued_at, Entry::Message(m)));
+    }
+    for (user, kind, at) in events {
+        timeline.push((at, Entry::Event(user, kind)));
+    }
+    for v in votes {
+        let at = v.issued_at;
+        timeline.push((at, Entry::Vote(v)));
+    }
+    timeline.sort_by_key(|(at, _)| *at);
+
+    let now = now_unix();
+    for (at, entry) in timeline {
+        match entry {
+            Entry::Message(m) => {
+                let reply_note = m.in_reply_to.as_ref().map(|t| format!(" (re: {})", target_str(t))).unwrap_or_default();
+                println!("[{at}] {}{reply_note}: {}", user_id_str(&m.author), m.body);
+            }
+            Entry::Event(user, kind) => {
+                let verb = match kind {
+                    state_store::MembershipEventKind::Joined => "has joined",
+                    state_store::MembershipEventKind::Left => "has left",
+                };
+                println!("[{at}] *** {} {verb} the group", irc_identity(store, &user)?);
+            }
+            Entry::Vote(v) => {
+                let note = v.reason.note.clone().map(|n| format!(": {n}")).unwrap_or_default();
+                println!(
+                    "[{at}] *** {} voted {} on {} \u{2014} {}{note}",
+                    irc_identity(store, &v.voter)?,
+                    stance_str(v.stance),
+                    target_str(&v.target),
+                    reason_code_str(v.reason.code)
+                );
+                println!("      {}", format_poll(store, group_id, &v.target, now)?);
+            }
+        }
     }
     Ok(())
 }

@@ -223,6 +223,10 @@ enum Command {
     },
     /// Browse pending tunnel connection requests awaiting review/accept.
     ListPendingTunnelRequests,
+    /// Per-peer WireGuard transfer totals: how much this router has given
+    /// (provided) vs. taken (consumed) — the substrate `set-tunnel-trust
+    /// --min-reciprocity-ratio` gates auto-accept on.
+    TunnelBalance,
     /// Manually accept a pending connection request — `<federation>/<local-id>`
     /// plus its sequence number. Kept alongside Phase E's auto-accept.
     AcceptTunnelRequest {
@@ -272,6 +276,13 @@ enum Command {
         /// this trusted provider, unchanged from the default.
         #[arg(long)]
         tag_filter: Option<String>,
+        /// Minimum "given / taken" volume ratio this peer must maintain
+        /// (see `sf tunnel-balance`) for `--auto-accept-requests` to keep
+        /// firing — omit for no reciprocity requirement, unchanged from
+        /// the default. Only downgrades auto-accept to manual review,
+        /// never revokes an existing tunnel.
+        #[arg(long)]
+        min_reciprocity_ratio: Option<f64>,
     },
     /// Reconcile tunnel state: auto-respond/auto-accept/auto-consume per
     /// `TunnelTrustRule`, then apply real WireGuard peers and routing.
@@ -566,6 +577,14 @@ enum Command {
         group: String,
         #[arg(long)]
         body: String,
+        /// Attach this message to a specific target's poll (see
+        /// `explain-group-vote`) — e.g. a comment on why you voted the
+        /// way you did, or a dissenting view on someone else's vote.
+        /// Requires `--re-target-value` too, or neither.
+        #[arg(long, requires = "re_target_value")]
+        re_target_kind: Option<String>,
+        #[arg(long, requires = "re_target_kind")]
+        re_target_value: Option<String>,
         #[arg(long)]
         out_dir: PathBuf,
     },
@@ -687,15 +706,16 @@ fn main() -> Result<()> {
         Command::RequestTunnel { advertisement, out } => tunnel::request_tunnel(&store, &advertisement, out)?,
         Command::IngestTunnelRequest { file } => tunnel::ingest_tunnel_request(&store, &file)?,
         Command::ListPendingTunnelRequests => tunnel::list_pending_tunnel_requests(&store)?,
+        Command::TunnelBalance => tunnel::tunnel_balance(&store)?,
         Command::AcceptTunnelRequest { requester, sequence, out } => tunnel::accept_tunnel_request(&store, &requester, sequence, out)?,
         Command::IngestTunnelAccept { file } => tunnel::ingest_tunnel_accept(&store, &file)?,
         Command::SelectTunnel { advertisement, targets } => {
             let targets = targets.iter().map(|s| parse_target_flag(s)).collect::<Result<Vec<_>>>()?;
             tunnel::select_tunnel(&store, &advertisement, &targets)?
         }
-        Command::SetTunnelTrust { federation, user, user_name, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, exclude, tag_filter } => {
+        Command::SetTunnelTrust { federation, user, user_name, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, exclude, tag_filter, min_reciprocity_ratio } => {
             let target_user = resolve_user(&store, &federation, user.as_deref(), user_name.as_deref())?;
-            tunnel::set_tunnel_trust(&store, target_user, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, exclude, tag_filter)?
+            tunnel::set_tunnel_trust(&store, target_user, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, exclude, tag_filter, min_reciprocity_ratio)?
         }
         Command::SyncTunnels { out_dir, interface_name, wg_scratch_dir, dnsmasq_dir, dry_run } => {
             let wg_config = wg_tunnel::WgTunnelConfig { interface_name, scratch_dir: wg_scratch_dir, dnsmasq_dir, ..wg_tunnel::WgTunnelConfig::default() };
@@ -739,7 +759,13 @@ fn main() -> Result<()> {
         }
         Command::IngestGroupVote { file } => group::ingest_group_vote(&store, &file)?,
         Command::SetGroupTrust { group, allow_weight, deny_weight, exclude } => group::set_group_trust(&store, &group, allow_weight, deny_weight, exclude)?,
-        Command::PublishPartyLine { group, body, out_dir } => group::publish_party_line(&store, &group, &body, &out_dir)?,
+        Command::PublishPartyLine { group, body, re_target_kind, re_target_value, out_dir } => {
+            let in_reply_to = match (re_target_kind, re_target_value) {
+                (Some(kind), Some(value)) => Some((kind, value)),
+                _ => None,
+            };
+            group::publish_party_line(&store, &group, &body, in_reply_to, &out_dir)?
+        }
         Command::IngestPartyLine { file } => group::ingest_party_line(&store, &file)?,
         Command::ListPartyLine { group } => group::list_party_line(&store, &group)?,
         Command::ExplainGroupVote { group, target_kind, target_value } => group::explain_group_vote(&store, &group, &target_kind, &target_value)?,

@@ -127,23 +127,35 @@ pub struct CompiledMarkScript {
 /// Idempotent: deletes any existing rule for this fwmark first (a
 /// `while ip rule del ...` loop, matching the hotplug script's own
 /// idempotency idiom) before adding the current one.
+///
+/// Issues both the plain (IPv4) and `-6` (IPv6) forms of each command,
+/// unconditionally — every social-firewall-provisioned tunnel is
+/// dual-stack capable, and `compile_mark_script`'s own nft chain already
+/// unconditionally marks both `ip daddr` and `ip6 daddr` matches with the
+/// same fwmark. Routing only one family while marking both is exactly
+/// the bug this fixes: IPv6 destination traffic would get marked
+/// correctly and then silently fall through to the normal default
+/// route, since nothing told the kernel's IPv6 routing tables to send
+/// that mark to this tunnel.
 pub fn apply_policy_route(runner: &dyn CommandRunner, fwmark: i64, route_table: i64, interface_name: &str, timeout: Duration) -> Result<(), String> {
     let fwmark_str = format!("{fwmark:#x}");
     let table_str = route_table.to_string();
 
-    loop {
-        let out = runner.run("ip", &["rule", "del", "fwmark", &fwmark_str, "lookup", &table_str], timeout);
-        if !out.success {
-            break;
+    for family in ["-4", "-6"] {
+        loop {
+            let out = runner.run("ip", &[family, "rule", "del", "fwmark", &fwmark_str, "lookup", &table_str], timeout);
+            if !out.success {
+                break;
+            }
         }
-    }
-    let add_rule = runner.run("ip", &["rule", "add", "fwmark", &fwmark_str, "lookup", &table_str], timeout);
-    if !add_rule.success {
-        return Err(format!("failed to add ip rule: {}", add_rule.stderr));
-    }
-    let add_route = runner.run("ip", &["route", "replace", "default", "dev", interface_name, "table", &table_str], timeout);
-    if !add_route.success {
-        return Err(format!("failed to add ip route: {}", add_route.stderr));
+        let add_rule = runner.run("ip", &[family, "rule", "add", "fwmark", &fwmark_str, "lookup", &table_str], timeout);
+        if !add_rule.success {
+            return Err(format!("failed to add ip {family} rule: {}", add_rule.stderr));
+        }
+        let add_route = runner.run("ip", &[family, "route", "replace", "default", "dev", interface_name, "table", &table_str], timeout);
+        if !add_route.success {
+            return Err(format!("failed to add ip {family} route: {}", add_route.stderr));
+        }
     }
     Ok(())
 }
@@ -256,10 +268,22 @@ mod tests {
         assert!(compiled.script.contains("limit rate over 1000000 bytes/second drop"));
     }
 
+    /// Queues a one-shot failure for the *first* `ip <family> rule del`
+    /// call of each family, letting each family's idempotent
+    /// `while del succeeds` loop terminate immediately (matching the
+    /// real-world "nothing left to delete" case) instead of spinning
+    /// forever against a `FakeCommandRunner` that otherwise always
+    /// succeeds. Needed by every test below that doesn't itself fail
+    /// fast on an earlier call.
+    fn fail_both_families_first_del(runner: &FakeCommandRunner) {
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+    }
+
     #[test]
     fn apply_policy_route_issues_rule_and_route_commands() {
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
+        fail_both_families_first_del(&runner);
         apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).unwrap();
 
         let calls = runner.calls();
@@ -267,11 +291,43 @@ mod tests {
         assert!(calls.iter().any(|(p, a)| p == "ip" && a.contains(&"route".to_string()) && a.contains(&"replace".to_string())));
     }
 
+    /// Every social-firewall tunnel is dual-stack — a mark-only-one-family
+    /// bug here would silently drop IPv6 traffic instead of routing it
+    /// (see this function's own doc), so both families being issued is
+    /// worth a dedicated, explicit assertion, not just implied by the
+    /// generic "issues rule and route" test above.
+    #[test]
+    fn apply_policy_route_issues_both_ipv4_and_ipv6_legs() {
+        let runner = FakeCommandRunner::new_all_success();
+        fail_both_families_first_del(&runner);
+        apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).unwrap();
+
+        let calls = runner.calls();
+        let has = |family: &str, verb: &str, action: &str| calls.iter().any(|(p, a)| p == "ip" && a.contains(&family.to_string()) && a.contains(&verb.to_string()) && a.contains(&action.to_string()));
+        assert!(has("-4", "rule", "add"), "missing IPv4 rule add");
+        assert!(has("-6", "rule", "add"), "missing IPv6 rule add");
+        assert!(has("-4", "route", "replace"), "missing IPv4 route replace");
+        assert!(has("-6", "route", "replace"), "missing IPv6 route replace");
+    }
+
     #[test]
     fn apply_policy_route_fails_when_ip_rule_add_fails() {
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("add"));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"rule".to_string()) && a.contains(&"add".to_string()));
         assert!(apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn apply_policy_route_fails_when_ipv6_leg_fails_even_if_ipv4_succeeded() {
+        let runner = FakeCommandRunner::new_all_success();
+        fail_both_families_first_del(&runner);
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"add".to_string()));
+        let err = apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("-6"), "error should identify which family failed, got: {err}");
+
+        // The IPv4 leg must have completed fully before IPv6 failed.
+        let calls = runner.calls();
+        assert!(calls.iter().any(|(p, a)| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"route".to_string()) && a.contains(&"replace".to_string())), "IPv4 leg should have completed before the IPv6 failure was hit");
     }
 }

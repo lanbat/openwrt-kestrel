@@ -139,14 +139,27 @@ impl<'a> WgTunnelController<'a> {
     }
 
     /// Adds (or updates, if already present) a WireGuard peer — real
-    /// `wg set <iface> peer <pubkey> allowed-ips <allowed_ip>
+    /// `wg set <iface> peer <pubkey> allowed-ips <v4>[,<v6>]
     /// persistent-keepalive <PERSISTENT_KEEPALIVE_SECS> [endpoint
     /// <hint>]`. Idempotent: `wg set` on an already-configured peer
     /// simply updates it in place.
-    pub fn add_or_update_peer(&self, peer_wg_pubkey: &WgPublicKeyBytes, allowed_ip: &str, endpoint_hint: Option<&str>) -> Result<(), WgTunnelError> {
+    ///
+    /// `allowed_ip_v6`, when given, is comma-joined onto `allowed_ip_v4`
+    /// in the single `allowed-ips` argument `wg`'s own CLI expects — not
+    /// a separate flag. Without an IPv6 entry here, WireGuard's own
+    /// crypto-routing layer would drop this peer's IPv6 traffic before
+    /// it ever reached the policy-routing layer, regardless of what
+    /// `apply_policy_route` does — `allowed-ips` is the one thing
+    /// `apply_policy_route`'s own IPv4/IPv6 symmetry can't substitute
+    /// for.
+    pub fn add_or_update_peer(&self, peer_wg_pubkey: &WgPublicKeyBytes, allowed_ip_v4: &str, allowed_ip_v6: Option<&str>, endpoint_hint: Option<&str>) -> Result<(), WgTunnelError> {
         let pubkey_b64 = base64_encode(&peer_wg_pubkey.0);
         let keepalive_secs = PERSISTENT_KEEPALIVE_SECS.to_string();
-        let mut args = vec!["set", self.config.interface_name.as_str(), "peer", pubkey_b64.as_str(), "allowed-ips", allowed_ip, "persistent-keepalive", keepalive_secs.as_str()];
+        let allowed_ips = match allowed_ip_v6 {
+            Some(v6) => format!("{allowed_ip_v4},{v6}"),
+            None => allowed_ip_v4.to_string(),
+        };
+        let mut args = vec!["set", self.config.interface_name.as_str(), "peer", pubkey_b64.as_str(), "allowed-ips", allowed_ips.as_str(), "persistent-keepalive", keepalive_secs.as_str()];
         if let Some(hint) = endpoint_hint {
             args.push("endpoint");
             args.push(hint);
@@ -198,6 +211,37 @@ impl<'a> WgTunnelController<'a> {
         Ok(peers)
     }
 
+    /// Same `wg show <iface> dump` call `list_configured_peers` already
+    /// makes, but also reads columns 5/6 (transfer-rx, transfer-tx) —
+    /// WireGuard tracks these natively per peer, so this is free data
+    /// that was already flowing past unused. The substrate for the
+    /// tunnel-reciprocity signal (see
+    /// `state_store::StateStore::list_tunnel_balances`); this method only
+    /// reads live state, it doesn't touch `state-store` itself.
+    pub fn list_peer_transfers(&self) -> Result<Vec<(WgPublicKeyBytes, u64, u64)>, WgTunnelError> {
+        let out = self.runner.run("wg", &["show", self.config.interface_name.as_str(), "dump"], self.config.command_timeout);
+        if !out.success {
+            return Ok(Vec::new());
+        }
+        let mut transfers = Vec::new();
+        for (i, line) in out.stdout.lines().enumerate() {
+            if i == 0 {
+                continue; // interface line, not a peer
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            let (Some(pubkey_field), Some(rx_field), Some(tx_field)) = (fields.first(), fields.get(5), fields.get(6)) else { continue };
+            let Some(bytes) = base64_decode(pubkey_field) else { continue };
+            if bytes.len() != 32 {
+                continue;
+            }
+            let (Ok(rx), Ok(tx)) = (rx_field.parse::<u64>(), tx_field.parse::<u64>()) else { continue };
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            transfers.push((WgPublicKeyBytes(arr), rx, tx));
+        }
+        Ok(transfers)
+    }
+
     /// Diffs `state-store`'s `provisioned_tunnels` (desired state — every
     /// row with `status == "active"`, regardless of direction: this
     /// router is a WireGuard peer of the other party either way) against
@@ -223,7 +267,8 @@ impl<'a> WgTunnelController<'a> {
         let mut added = 0;
         for t in &desired_active {
             if !live.contains(&t.peer_wg_pubkey) {
-                self.add_or_update_peer(&t.peer_wg_pubkey, &format!("{}/32", t.tunnel_ip), None)?;
+                let allowed_ip_v6 = t.tunnel_ip6.as_ref().map(|ip6| format!("{ip6}/128"));
+                self.add_or_update_peer(&t.peer_wg_pubkey, &format!("{}/32", t.tunnel_ip), allowed_ip_v6.as_deref(), None)?;
                 added += 1;
             }
         }
@@ -233,6 +278,19 @@ impl<'a> WgTunnelController<'a> {
             if !desired_active.iter().any(|t| &t.peer_wg_pubkey == live_pubkey) {
                 self.remove_peer(live_pubkey)?;
                 removed += 1;
+            }
+        }
+
+        // Feed the tunnel-reciprocity ledger from the same `wg show dump`
+        // data `list_configured_peers` above already reads — see
+        // `list_peer_transfers`'s own doc. A pubkey can match more than
+        // one `desired_active` row (a peer this router both provides to
+        // and consumes from at once) — see `list_tunnel_balances`'s
+        // documented limitation on why that case can't be split by role.
+        let now = now_unix();
+        for (pubkey, rx, tx) in self.list_peer_transfers()? {
+            for t in desired_active.iter().filter(|t| t.peer_wg_pubkey == pubkey) {
+                self.store.record_transfer_sample(&t.peer, t.direction, rx, tx, now)?;
             }
         }
 
@@ -372,6 +430,10 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,13 +505,46 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store);
 
-        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", Some("203.0.113.9:51820")).unwrap();
+        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None, Some("203.0.113.9:51820")).unwrap();
 
         let calls = runner.calls();
         let (_, args) = calls.last().unwrap();
         assert!(args.contains(&"endpoint".to_string()));
         assert!(args.contains(&"203.0.113.9:51820".to_string()));
         assert!(args.contains(&"persistent-keepalive".to_string()), "an endpoint being present must not crowd out the keepalive flag");
+    }
+
+    /// The IPv6 allowed-ip must be comma-joined onto the v4 one in a
+    /// single `allowed-ips` argument (real `wg` CLI syntax), not passed
+    /// as a separate flag — and it must survive alongside an endpoint
+    /// hint too, not crowd it out or vice versa.
+    #[test]
+    fn add_or_update_peer_comma_joins_ipv6_onto_the_allowed_ips_argument() {
+        let store = StateStore::open_in_memory().unwrap();
+        let runner = FakeCommandRunner::new_all_success();
+        let ctrl = controller(&runner, &store);
+
+        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", Some("fd99::c8:4/128"), Some("203.0.113.9:51820")).unwrap();
+
+        let calls = runner.calls();
+        let (_, args) = calls.last().unwrap();
+        assert!(args.contains(&"10.99.0.4/32,fd99::c8:4/128".to_string()), "expected a single comma-joined allowed-ips value, got: {args:?}");
+        assert!(args.contains(&"endpoint".to_string()));
+        assert!(args.contains(&"203.0.113.9:51820".to_string()));
+    }
+
+    #[test]
+    fn add_or_update_peer_without_ipv6_uses_only_the_v4_allowed_ip() {
+        let store = StateStore::open_in_memory().unwrap();
+        let runner = FakeCommandRunner::new_all_success();
+        let ctrl = controller(&runner, &store);
+
+        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None, None).unwrap();
+
+        let calls = runner.calls();
+        let (_, args) = calls.last().unwrap();
+        assert!(args.contains(&"10.99.0.4/32".to_string()));
+        assert!(!args.iter().any(|a| a.contains(',')), "must not emit a trailing comma or empty second entry when no IPv6 address is assigned");
     }
 
     /// Every peer this crate ever manages is inherently a remote,
@@ -464,7 +559,7 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store);
 
-        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None).unwrap();
+        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None, None).unwrap();
 
         let calls = runner.calls();
         let (_, args) = calls.last().unwrap();
@@ -511,6 +606,19 @@ mod tests {
     }
 
     #[test]
+    fn list_peer_transfers_parses_rx_and_tx_from_wg_dump_output() {
+        let store = StateStore::open_in_memory().unwrap();
+        let runner = FakeCommandRunner::new_all_success();
+        let peer_key = WgPublicKeyBytes([9; 32]);
+        let peer_b64 = base64_encode(&peer_key.0);
+        runner.set_default_stdout(format!("privkeyb64\tpubkeyb64\t51820\toff\n{peer_b64}\t(none)\t(none)\t10.99.0.4/32\t0\t12345\t6789\toff\n"));
+        let ctrl = controller(&runner, &store);
+
+        let transfers = ctrl.list_peer_transfers().unwrap();
+        assert_eq!(transfers, vec![(peer_key, 12345, 6789)]);
+    }
+
+    #[test]
     fn reconcile_ensures_the_interface_exists() {
         let store = store_with_identity();
         let runner = FakeCommandRunner::new_all_success();
@@ -532,6 +640,7 @@ mod tests {
             fwmark: 0x1000,
             route_table: 200,
             tunnel_ip: "10.99.0.4".into(),
+            tunnel_ip6: Some("fd99::c8:4".into()),
             status: "active".into(),
             created_at: 0,
             advertisement_sequence: None,
@@ -550,7 +659,8 @@ mod tests {
         assert_eq!(result.peers_added, 1);
         assert_eq!(result.peers_removed, 0);
         let calls = runner.calls();
-        assert!(calls.iter().any(|(p, a)| p == "wg" && a.first().map(String::as_str) == Some("set") && a.contains(&"allowed-ips".to_string())));
+        let wg_set = calls.iter().find(|(p, a)| p == "wg" && a.first().map(String::as_str) == Some("set") && a.contains(&"allowed-ips".to_string())).expect("must issue a wg set ... allowed-ips call");
+        assert!(wg_set.1.contains(&"10.99.0.4/32,fd99::c8:4/128".to_string()), "reconcile must thread the provisioned tunnel's own tunnel_ip6 through to allowed-ips, got: {:?}", wg_set.1);
     }
 
     #[test]
@@ -567,6 +677,22 @@ mod tests {
 
         assert_eq!(result.peers_added, 0, "an already-live desired peer must not be re-added");
         assert_eq!(result.peers_removed, 0);
+    }
+
+    #[test]
+    fn reconcile_records_a_transfer_sample_for_each_desired_active_peer() {
+        let store = store_with_identity();
+        let entry = provisioned(1, [7; 32]); // direction: Consuming
+        store.upsert_provisioned_tunnel(&entry).unwrap();
+        let runner = FakeCommandRunner::new_all_success();
+        let pubkey_b64 = base64_encode(&entry.peer_wg_pubkey.0);
+        runner.set_default_stdout(format!("privkeyb64\tpubkeyb64\t51820\toff\n{pubkey_b64}\t(none)\t(none)\t10.99.0.4/32\t0\t1000\t2000\toff\n"));
+        let ctrl = controller(&runner, &store);
+
+        ctrl.reconcile().unwrap();
+
+        let balances = store.list_tunnel_balances().unwrap();
+        assert_eq!(balances, vec![state_store::TunnelBalance { peer: entry.peer, given_to: 0, taken_from: 1000 + 2000 }]);
     }
 
     #[test]
@@ -608,7 +734,8 @@ mod tests {
     fn provision_routing_applies_mark_script_dnsmasq_snippet_and_policy_route() {
         let store = store_with_identity();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
@@ -626,7 +753,8 @@ mod tests {
     fn provision_routing_populates_the_static_set_for_selected_cidrs() {
         let store = store_with_identity();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
@@ -661,7 +789,8 @@ mod tests {
         // loop needs a queued failure to actually terminate against a
         // fake runner that otherwise always succeeds — see the identical
         // pattern in `routing::tests::apply_policy_route_issues_rule_and_route_commands`.
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
@@ -704,7 +833,8 @@ mod tests {
             .set_provisioned_tunnel_selected_targets(&entry.peer, state_store::TunnelDirection::Consuming, &[domain_types::TargetSelector::Domain("example.com".into())])
             .unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
@@ -725,7 +855,8 @@ mod tests {
             .set_provisioned_tunnel_selected_targets(&entry.peer, state_store::TunnelDirection::Consuming, &[domain_types::TargetSelector::Cidr("10.0.0.0/8".into())])
             .unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
@@ -751,8 +882,10 @@ mod tests {
             .set_provisioned_tunnel_selected_targets(&entry.peer, state_store::TunnelDirection::Consuming, &[domain_types::TargetSelector::Domain("example.com".into())])
             .unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("rule") && a.get(1).map(String::as_str) == Some("del"));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 

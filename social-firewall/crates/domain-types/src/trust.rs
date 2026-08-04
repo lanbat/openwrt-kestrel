@@ -102,6 +102,19 @@ pub struct TunnelTrustRule {
     /// default) means every advertisement from this trusted provider is
     /// eligible, unchanged from before this field existed.
     pub tag_filter: Option<String>,
+    /// A minimum "given / taken" volume ratio (from
+    /// `state_store::StateStore::list_tunnel_balances`) this peer must
+    /// maintain for `auto_accept_requests` to keep firing — the tunnel
+    /// free-riding guard: bandwidth has a real cost, unlike an opinion,
+    /// so a peer who only ever consumes never earns an automatic reason
+    /// to keep being served. `None` (the default) means no reciprocity
+    /// requirement at all, unchanged from before this field existed.
+    /// This only ever downgrades an auto-accept to the same manual-review
+    /// queue every untrusted request already sits in — it never revokes
+    /// an existing connection retroactively, and it's checked only past a
+    /// minimum absolute volume so a brand-new relationship is never
+    /// flagged on noise (see `sync_tunnels`' own doc on both floors).
+    pub min_reciprocity_ratio: Option<f64>,
     pub expires_at: Option<Timestamp>,
     pub created_at: Timestamp,
 }
@@ -183,6 +196,7 @@ mod tests {
             auto_respond_to_service_requests: false,
             excluded: false,
             tag_filter: None,
+            min_reciprocity_ratio: None,
             expires_at: None,
             created_at: 0,
         };
@@ -200,6 +214,7 @@ mod tests {
             auto_respond_to_service_requests: false,
             excluded: false,
             tag_filter: None,
+            min_reciprocity_ratio: None,
             expires_at: Some(100),
             created_at: 0,
         };

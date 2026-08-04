@@ -566,6 +566,23 @@ pub fn list_pending_tunnel_requests(store: &StateStore) -> Result<()> {
     Ok(())
 }
 
+/// The tunnel-reciprocity signal, visibility-first per this crate's usual
+/// pattern — see `StateStore::list_tunnel_balances`'s own doc, including
+/// its documented limitation for a peer this router both provides to and
+/// consumes from at once.
+pub fn tunnel_balance(store: &StateStore) -> Result<()> {
+    let balances = store.list_tunnel_balances()?;
+    if balances.is_empty() {
+        println!("no tunnel transfer data recorded yet");
+        return Ok(());
+    }
+    for b in balances {
+        let ratio = if b.given_to > 0 { format!("{:.3}", b.taken_from as f64 / b.given_to as f64) } else { "n/a".to_string() };
+        println!("{}: given {}B, taken {}B (received/given ratio: {ratio})", user_id_str(&b.peer), b.given_to, b.taken_from);
+    }
+    Ok(())
+}
+
 /// Manually accepts a pending connection request — kept alongside
 /// Phase E's auto-accept (`TunnelTrustRule.auto_accept_requests`) the
 /// same way `LocalOverride` always exists alongside trust-weighted
@@ -585,6 +602,12 @@ fn do_accept_tunnel_request(store: &StateStore, provider: UserId, seed: &[u8; 32
     // tunnel gets a distinct /24 out of a private range without needing
     // a separate IP allocator on top of the fwmark/route-table one.
     let tunnel_ip = format!("10.99.{}.1", route_table - 200);
+    // Same deterministic-from-route_table scheme, one dimension over —
+    // every social-firewall tunnel is dual-stack capable, so this is
+    // always assigned alongside the IPv4 address, never left unset for a
+    // newly accepted tunnel (see `TunnelConnectionAccept::assigned_tunnel_ip6`'s
+    // own doc on why it's still `Option` at the type level).
+    let tunnel_ip6 = format!("fd99::{route_table:x}:1");
 
     store.upsert_provisioned_tunnel(&state_store::ProvisionedTunnel {
         peer: req.requester,
@@ -594,6 +617,7 @@ fn do_accept_tunnel_request(store: &StateStore, provider: UserId, seed: &[u8; 32
         fwmark,
         route_table,
         tunnel_ip: tunnel_ip.clone(),
+        tunnel_ip6: Some(tunnel_ip6.clone()),
         status: "active".to_string(),
         created_at: now_unix(),
         // Not needed here — only the *consuming* side ever enforces
@@ -605,6 +629,7 @@ fn do_accept_tunnel_request(store: &StateStore, provider: UserId, seed: &[u8; 32
         provider,
         request_ref: StatementRef { author: req.requester, sequence: req.sequence },
         assigned_tunnel_ip: tunnel_ip.clone(),
+        assigned_tunnel_ip6: Some(tunnel_ip6.clone()),
         accepted_at: now_unix(),
         signature: domain_types::SignatureBytes([0; 64]),
     };
@@ -622,6 +647,7 @@ fn accept_to_json(accept: &TunnelConnectionAccept, identity_pubkey: &PublicKeyBy
         "request_ref": format!("{}/{}", user_id_str(&accept.request_ref.author), accept.request_ref.sequence),
         "identity_pubkey": hex::encode(identity_pubkey.0),
         "assigned_tunnel_ip": accept.assigned_tunnel_ip,
+        "assigned_tunnel_ip6": accept.assigned_tunnel_ip6,
         "accepted_at": accept.accepted_at,
         "signature": hex::encode(accept.signature.0),
     })
@@ -638,7 +664,12 @@ pub fn accept_tunnel_request(store: &StateStore, requester: &str, sequence: u64,
         .context("no matching pending connection request — check `list-pending-tunnel-requests`")?;
 
     let (accept, identity_pubkey) = do_accept_tunnel_request(store, provider, &seed, &req)?;
-    println!("accepted tunnel connection request #{sequence} from {}: assigned {}", user_id_str(&requester_user), accept.assigned_tunnel_ip);
+    println!(
+        "accepted tunnel connection request #{sequence} from {}: assigned {}{}",
+        user_id_str(&requester_user),
+        accept.assigned_tunnel_ip,
+        accept.assigned_tunnel_ip6.as_deref().map(|ip6| format!(" / {ip6}")).unwrap_or_default()
+    );
 
     if let Some(path) = out {
         // Always sealed — a connection accept is inherently pairwise.
@@ -657,6 +688,7 @@ pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
         provider,
         request_ref: parse_statement_ref(get_str("request_ref")?)?,
         assigned_tunnel_ip: get_str("assigned_tunnel_ip")?.to_string(),
+        assigned_tunnel_ip6: json.get("assigned_tunnel_ip6").and_then(|v| v.as_str()).map(String::from),
         accepted_at: json.get("accepted_at").and_then(|v| v.as_i64()).context("missing `accepted_at`")?,
         signature: domain_types::SignatureBytes(bytes64(get_str("signature")?)?),
     };
@@ -686,6 +718,7 @@ pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
         fwmark,
         route_table,
         tunnel_ip: accept.assigned_tunnel_ip.clone(),
+        tunnel_ip6: accept.assigned_tunnel_ip6.clone(),
         status: "active".to_string(),
         created_at: now_unix(),
         // Lets `wg_tunnel::WgTunnelController::reconcile` look up this
@@ -694,7 +727,12 @@ pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
         advertisement_sequence: Some(ad.sequence),
     })?;
 
-    println!("ingested tunnel connection accept from {}: assigned IP {}", user_id_str(&accept.provider), accept.assigned_tunnel_ip);
+    println!(
+        "ingested tunnel connection accept from {}: assigned IP {}{}",
+        user_id_str(&accept.provider),
+        accept.assigned_tunnel_ip,
+        accept.assigned_tunnel_ip6.as_deref().map(|ip6| format!(" / {ip6}")).unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -719,6 +757,7 @@ pub fn set_tunnel_trust(
     auto_respond_to_service_requests: bool,
     exclude: bool,
     tag_filter: Option<String>,
+    min_reciprocity_ratio: Option<f64>,
 ) -> Result<()> {
     store.upsert_tunnel_trust_rule(&TunnelTrustRule {
         user: target_user,
@@ -727,6 +766,7 @@ pub fn set_tunnel_trust(
         auto_respond_to_service_requests,
         excluded: exclude,
         tag_filter,
+        min_reciprocity_ratio,
         expires_at: None,
         created_at: now_unix(),
     })?;
@@ -735,6 +775,11 @@ pub fn set_tunnel_trust(
 }
 
 // ── Phase E: reconciliation ──────────────────────────────────────────────
+
+/// Below this much given to a peer, `TunnelTrustRule.min_reciprocity_ratio`
+/// is never checked — a brand-new relationship shouldn't get flagged the
+/// moment it starts, only once real volume is at stake.
+const MIN_RECIPROCITY_VOLUME_FLOOR_BYTES: u64 = 100_000_000; // 100MB
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyncTunnelsReport {
@@ -823,6 +868,7 @@ pub fn sync_tunnels(
     // otherwise a node that's simultaneously a provider and a consumer
     // could "accept" its own outgoing request.
     let (provider, seed) = self_identity(store)?;
+    let balances = store.list_tunnel_balances()?;
     for req in store.list_pending_tunnel_connection_requests()? {
         if req.advertisement.author != self_user {
             continue;
@@ -830,6 +876,28 @@ pub fn sync_tunnels(
         let Some(trust) = store.get_tunnel_trust_rule(&req.requester)? else { continue };
         if trust.excluded || !trust.auto_accept_requests {
             continue;
+        }
+        // Reciprocity guard: only checked once this router has given the
+        // peer a meaningful amount (the volume floor), so a brand-new
+        // relationship is never flagged on noise — and it only downgrades
+        // this one auto-accept to the same manual-review queue every
+        // untrusted request already sits in, never revokes the tunnel
+        // this router already granted them.
+        if let Some(floor) = trust.min_reciprocity_ratio {
+            let balance = balances.iter().find(|b| b.peer == req.requester);
+            let given_to = balance.map(|b| b.given_to).unwrap_or(0);
+            let taken_from = balance.map(|b| b.taken_from).unwrap_or(0);
+            if given_to > MIN_RECIPROCITY_VOLUME_FLOOR_BYTES {
+                let ratio = taken_from as f64 / given_to as f64;
+                if ratio < floor {
+                    let sequence = req.sequence;
+                    let requester = user_id_str(&req.requester);
+                    println!(
+                        "skipping auto-accept of connection request #{sequence} from {requester} — reciprocity ratio {ratio:.3} (given {given_to}B, received back {taken_from}B) is below your configured floor {floor:.3}; falling back to manual review"
+                    );
+                    continue;
+                }
+            }
         }
         if dry_run {
             println!("(dry-run) would auto-accept connection request #{} from {}", req.sequence, user_id_str(&req.requester));
@@ -948,7 +1016,7 @@ mod sync_tunnels_tests {
     }
 
     fn trust_rule(user: UserId, auto_accept_requests: bool, auto_consume_advertisements: bool, auto_respond_to_service_requests: bool) -> TunnelTrustRule {
-        TunnelTrustRule { user, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded: false, tag_filter: None, expires_at: None, created_at: 0 }
+        TunnelTrustRule { user, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded: false, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0 }
     }
 
     fn wg_config(dir: &Path) -> wg_tunnel::WgTunnelConfig {
@@ -1059,6 +1127,81 @@ mod sync_tunnels_tests {
         assert_eq!(report.auto_accepts, 0, "a request this router sent to someone else must never be auto-accepted");
     }
 
+    fn pending_request_against_own_ad(store: &StateStore, requester: UserId, provider: UserId) {
+        store
+            .store_tunnel_connection_request(&TunnelConnectionRequest {
+                requester,
+                sequence: 0,
+                advertisement: StatementRef { author: provider, sequence: 0 },
+                requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
+                requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
+                requested_at: 0,
+                signature: domain_types::SignatureBytes([0; 64]),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn reciprocity_floor_skips_auto_accept_when_a_taker_has_given_nothing_back() {
+        let (store, self_user) = store_with_self_identity();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let bob = user(2);
+        pending_request_against_own_ad(&store, bob, self_user);
+        store
+            .upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: false, auto_respond_to_service_requests: false, excluded: false, tag_filter: None, min_reciprocity_ratio: Some(0.1), expires_at: None, created_at: 0 })
+            .unwrap();
+        // Past the volume floor (100MB), given entirely one-way — bob has
+        // never reciprocated at all.
+        store.record_transfer_sample(&bob, state_store::TunnelDirection::Providing, 200_000_000, 0, 100).unwrap();
+
+        let runner = wg_tunnel::FakeCommandRunner::new_all_success();
+        let dir = tempfile::tempdir().unwrap();
+        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+
+        assert_eq!(report.auto_accepts, 0, "a peer below the configured reciprocity floor must fall back to manual review");
+        assert!(store.get_tunnel_connection_accept_for(&bob, 0).unwrap().is_none(), "no accept should have been stored");
+    }
+
+    #[test]
+    fn reciprocity_floor_is_not_checked_below_the_minimum_volume() {
+        let (store, self_user) = store_with_self_identity();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let bob = user(2);
+        pending_request_against_own_ad(&store, bob, self_user);
+        store
+            .upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: false, auto_respond_to_service_requests: false, excluded: false, tag_filter: None, min_reciprocity_ratio: Some(0.1), expires_at: None, created_at: 0 })
+            .unwrap();
+        // Well under the 100MB volume floor, despite a terrible ratio — a
+        // brand-new relationship must never be flagged on noise.
+        store.record_transfer_sample(&bob, state_store::TunnelDirection::Providing, 1_000, 0, 100).unwrap();
+
+        let runner = wg_tunnel::FakeCommandRunner::new_all_success();
+        let dir = tempfile::tempdir().unwrap();
+        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+
+        assert_eq!(report.auto_accepts, 1, "below the volume floor, the reciprocity ratio must not gate auto-accept at all");
+    }
+
+    #[test]
+    fn reciprocity_floor_allows_auto_accept_when_the_ratio_is_met() {
+        let (store, self_user) = store_with_self_identity();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let bob = user(2);
+        pending_request_against_own_ad(&store, bob, self_user);
+        store
+            .upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: false, auto_respond_to_service_requests: false, excluded: false, tag_filter: None, min_reciprocity_ratio: Some(0.1), expires_at: None, created_at: 0 })
+            .unwrap();
+        store.record_transfer_sample(&bob, state_store::TunnelDirection::Providing, 200_000_000, 0, 100).unwrap();
+        // Bob has reciprocated well above the 0.1 floor (0.5).
+        store.record_transfer_sample(&bob, state_store::TunnelDirection::Consuming, 100_000_000, 0, 100).unwrap();
+
+        let runner = wg_tunnel::FakeCommandRunner::new_all_success();
+        let dir = tempfile::tempdir().unwrap();
+        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+
+        assert_eq!(report.auto_accepts, 1, "a peer meeting the reciprocity floor must still be auto-accepted normally");
+    }
+
     #[test]
     fn auto_consumes_an_advertisement_from_a_trusted_provider() {
         let (store, self_user) = store_with_self_identity();
@@ -1100,7 +1243,7 @@ mod sync_tunnels_tests {
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
         store.store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key())).unwrap();
-        store.upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: true, auto_respond_to_service_requests: true, excluded: true, tag_filter: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: true, auto_respond_to_service_requests: true, excluded: true, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0 }).unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();

@@ -369,6 +369,7 @@ fn full_tunnel_handshake_flow_reaches_a_selected_route() {
     let ingest_accept = sf(bob_dir.path(), "bob.sqlite", &["ingest-tunnel-accept", "--file", bob_accept.to_str().unwrap()]);
     assert!(ingest_accept.status.success(), "ingest-tunnel-accept failed: {}", stderr(&ingest_accept));
     assert!(stdout(&ingest_accept).contains("10.99.0.1"), "expected the assigned tunnel IP in output:\n{}", stdout(&ingest_accept));
+    assert!(stdout(&ingest_accept).contains("fd99::c8:1"), "every social-firewall tunnel is dual-stack — expected an assigned IPv6 address too, got:\n{}", stdout(&ingest_accept));
 
     // This is the step that failed with a foreign-key error before bug #2
     // was fixed — the real proof this whole flow is wired correctly end
@@ -612,6 +613,103 @@ fn full_device_approval_flow_reaches_a_trust_weighted_deny() {
 }
 
 #[test]
+fn list_party_line_shows_an_irc_style_join_line_when_a_member_is_approved() {
+    let alice_dir = tempfile::tempdir().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+
+    let _alice = init_identity(alice_dir.path(), "alice.sqlite", "alice");
+    let bob = init_identity(bob_dir.path(), "bob.sqlite", "bob");
+
+    let group_path = alice_dir.path().join("group.json");
+    let create = sf(alice_dir.path(), "alice.sqlite", &["create-group", "--name", "neighborhood watch", "--description", "trusted local ops", "--out", group_path.to_str().unwrap()]);
+    assert!(create.status.success(), "create-group failed: {}", stderr(&create));
+    let group_id = extract_group_id(&create);
+
+    // Alice's own party line is empty before bob ever joins.
+    let empty = sf(alice_dir.path(), "alice.sqlite", &["list-party-line", "--group", &group_id]);
+    assert!(stdout(&empty).contains("no party-line activity"), "expected no activity yet, got:\n{}", stdout(&empty));
+
+    let bob_group = bob_dir.path().join("group.json");
+    std::fs::copy(&group_path, &bob_group).unwrap();
+    assert!(sf(bob_dir.path(), "bob.sqlite", &["ingest-group", "--file", bob_group.to_str().unwrap()]).status.success());
+
+    let join_path = bob_dir.path().join("join.json");
+    assert!(sf(bob_dir.path(), "bob.sqlite", &["request-group-join", "--group", &group_id, "--out", join_path.to_str().unwrap()]).status.success());
+
+    let alice_join = alice_dir.path().join("join.json");
+    std::fs::copy(&join_path, &alice_join).unwrap();
+    assert!(sf(alice_dir.path(), "alice.sqlite", &["ingest-group-join-request", "--file", alice_join.to_str().unwrap()]).status.success());
+
+    let bob_ref = format!("{}/{}", bob.federation, bob.local_id);
+    let approve = sf(alice_dir.path(), "alice.sqlite", &["approve-group-join", "--group", &group_id, "--requester", &bob_ref, "--sequence", "0", "--voting"]);
+    assert!(approve.status.success(), "approve-group-join failed: {}", stderr(&approve));
+
+    // Alice republished the group locally as part of approving — her own
+    // party line should already show bob's join, with no export/ingest
+    // round-trip needed (the event is derived purely from her own
+    // ingest_group diff).
+    let party_line = sf(alice_dir.path(), "alice.sqlite", &["list-party-line", "--group", &group_id]);
+    assert!(party_line.status.success(), "list-party-line failed: {}", stderr(&party_line));
+    let out = stdout(&party_line);
+    assert!(out.contains("*** ") && out.contains("has joined the group"), "expected an IRC-style join line, got:\n{out}");
+    // No display name was ever set for bob on alice's node, so nick and
+    // ident both fall back to bob's truncated local_id (first 8 hex
+    // chars) and host falls back to bob's federation's truncated hex —
+    // alice has no `federations` row for a federation that isn't her own.
+    let ident = &bob.local_id[..8];
+    assert!(out.contains(ident), "expected the fallback truncated local_id `{ident}` in the join line, got:\n{out}");
+    assert!(out.contains(".fed"), "expected the fallback `.fed` host suffix for bob's unknown-to-alice federation, got:\n{out}");
+}
+
+#[test]
+fn list_party_line_shows_a_cast_group_vote() {
+    let alice_dir = tempfile::tempdir().unwrap();
+    let _alice = init_identity(alice_dir.path(), "alice.sqlite", "alice");
+
+    let group_path = alice_dir.path().join("group.json");
+    let create = sf(alice_dir.path(), "alice.sqlite", &["create-group", "--name", "neighborhood watch", "--description", "trusted local ops", "--out", group_path.to_str().unwrap()]);
+    assert!(create.status.success(), "create-group failed: {}", stderr(&create));
+    let group_id = extract_group_id(&create);
+
+    let vote = sf(alice_dir.path(), "alice.sqlite", &["cast-group-vote", "--group", &group_id, "--target-kind", "domain", "--target-value", "ads.example", "--stance", "deny", "--reason-code", "malware"]);
+    assert!(vote.status.success(), "cast-group-vote failed: {}", stderr(&vote));
+
+    let party_line = sf(alice_dir.path(), "alice.sqlite", &["list-party-line", "--group", &group_id]);
+    assert!(party_line.status.success(), "list-party-line failed: {}", stderr(&party_line));
+    let out = stdout(&party_line);
+    assert!(out.contains("voted") && out.contains("domain:ads.example") && out.contains("deny"), "expected the cast vote to show up in the party line, got:\n{out}");
+    assert!(out.contains("poll: deny 1"), "expected an inline poll tally after the vote, got:\n{out}");
+}
+
+#[test]
+fn list_party_line_shows_a_structured_reply_comment_on_a_vote() {
+    let alice_dir = tempfile::tempdir().unwrap();
+    let _alice = init_identity(alice_dir.path(), "alice.sqlite", "alice");
+
+    let group_path = alice_dir.path().join("group.json");
+    let create = sf(alice_dir.path(), "alice.sqlite", &["create-group", "--name", "neighborhood watch", "--description", "trusted local ops", "--out", group_path.to_str().unwrap()]);
+    assert!(create.status.success(), "create-group failed: {}", stderr(&create));
+    let group_id = extract_group_id(&create);
+
+    let vote = sf(alice_dir.path(), "alice.sqlite", &["cast-group-vote", "--group", &group_id, "--target-kind", "domain", "--target-value", "ads.example", "--stance", "deny", "--reason-code", "malware"]);
+    assert!(vote.status.success(), "cast-group-vote failed: {}", stderr(&vote));
+
+    let out_dir = alice_dir.path().join("out");
+    let comment = sf(
+        alice_dir.path(),
+        "alice.sqlite",
+        &["publish-party-line", "--group", &group_id, "--body", "actually this is our CDN, not malware", "--re-target-kind", "domain", "--re-target-value", "ads.example", "--out-dir", out_dir.to_str().unwrap()],
+    );
+    assert!(comment.status.success(), "publish-party-line with a reply target failed: {}", stderr(&comment));
+
+    let party_line = sf(alice_dir.path(), "alice.sqlite", &["list-party-line", "--group", &group_id]);
+    assert!(party_line.status.success(), "list-party-line failed: {}", stderr(&party_line));
+    let out = stdout(&party_line);
+    assert!(out.contains("(re: domain:ads.example)"), "expected the comment to show its structured reply target, got:\n{out}");
+    assert!(out.contains("actually this is our CDN, not malware"), "expected the comment body to show up, got:\n{out}");
+}
+
+#[test]
 fn ingest_device_approval_rejects_an_unfollowed_author() {
     let alice_dir = tempfile::tempdir().unwrap();
     let bob_dir = tempfile::tempdir().unwrap();
@@ -806,8 +904,13 @@ fn party_line_moderation_and_voice_gate_posting_correctly() {
     assert!(sf(bob_dir.path(), "bob.sqlite", &["ingest-group", "--file", bob_group_v3.to_str().unwrap()]).status.success());
 
     // Bob's own prior message must now be hidden — current permission
-    // wins, the same principle already applied to group votes.
-    assert!(stdout(&sf(bob_dir.path(), "bob.sqlite", &["list-party-line", "--group", &group_id])).contains("no party-line messages"));
+    // wins, the same principle already applied to group votes. His
+    // earlier join notice must still show, though: moderation gates who
+    // can *speak*, not membership visibility, the same way real IRC's
+    // `+m` mutes without hiding join/part notices.
+    let after_moderation = stdout(&sf(bob_dir.path(), "bob.sqlite", &["list-party-line", "--group", &group_id]));
+    assert!(!after_moderation.contains("hi everyone"), "bob's un-voiced message must be hidden once moderated, got:\n{after_moderation}");
+    assert!(after_moderation.contains("has joined the group"), "bob's join notice must still show even though his message is hidden, got:\n{after_moderation}");
 
     // Bob, un-voiced, can no longer post.
     let out_dir2 = bob_dir.path().join("out2");

@@ -312,6 +312,12 @@ pub struct PartyLineMessage {
     pub author: UserId,
     pub sequence: u64,
     pub body: String,
+    /// Optional structured reply target — a comment attached to a
+    /// specific target's poll (see `StateStore::group_vote_breakdown_for`),
+    /// provably about it even if posted much later or interleaved with
+    /// unrelated chat. `None` is just a normal message, unchanged from
+    /// before this field existed.
+    pub in_reply_to: Option<TargetSelector>,
     pub issued_at: Timestamp,
     pub signature: SignatureBytes,
 }
@@ -323,6 +329,7 @@ impl PartyLineMessage {
         self.author.canonical_encode(&mut out);
         self.sequence.canonical_encode(&mut out);
         self.body.canonical_encode(&mut out);
+        self.in_reply_to.canonical_encode(&mut out);
         self.issued_at.canonical_encode(&mut out);
         out
     }
@@ -525,9 +532,21 @@ mod tests {
 
     #[test]
     fn party_line_signing_bytes_change_with_body() {
-        let base = PartyLineMessage { group_id: group_id(), author: user(1), sequence: 0, body: "hello".into(), issued_at: 0, signature: SignatureBytes([0; 64]) };
+        let base = PartyLineMessage { group_id: group_id(), author: user(1), sequence: 0, body: "hello".into(), in_reply_to: None, issued_at: 0, signature: SignatureBytes([0; 64]) };
         let mut other = base.clone();
         other.body = "goodbye".into();
         assert_ne!(base.signing_bytes(), other.signing_bytes());
+    }
+
+    #[test]
+    fn party_line_signing_bytes_change_with_in_reply_to() {
+        let base = PartyLineMessage { group_id: group_id(), author: user(1), sequence: 0, body: "this is a CDN, not malware".into(), in_reply_to: None, issued_at: 0, signature: SignatureBytes([0; 64]) };
+        let mut with_reply = base.clone();
+        with_reply.in_reply_to = Some(TargetSelector::Domain("ads.example".into()));
+        assert_ne!(base.signing_bytes(), with_reply.signing_bytes(), "a plain message and a reply-to-a-target message must not sign identically");
+
+        let mut other_target = with_reply.clone();
+        other_target.in_reply_to = Some(TargetSelector::Domain("other.example".into()));
+        assert_ne!(with_reply.signing_bytes(), other_target.signing_bytes(), "replying to a different target must change the signed bytes");
     }
 }

@@ -19,6 +19,48 @@ fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// One composite "does anything need my attention" number, built from
+/// `StateStore::network_health_summary` — no new signal, just surfacing
+/// what individual commands (`list-groups`'s succession warning,
+/// `explain-group-vote`'s age display) already show one at a time. See
+/// that method's own doc for why `trusted_peers_with_block_reports` is a
+/// lower bound, not a complete count — labeled as such below rather than
+/// presented as equally certain to the other two contributors.
+fn render_network_health_section(store: &StateStore) -> Result<String, StoreError> {
+    let summary = store.network_health_summary(now_unix())?;
+    let items = summary.attention_items();
+    let mut html = String::new();
+    html.push_str("<h2>Network Health</h2>");
+    if items == 0 {
+        html.push_str("<p class=\"empty\">all clear \u{2014} 0 items need attention</p>");
+    } else {
+        let _ = write!(html, "<p class=\"attention\">{items} item(s) need attention</p>");
+    }
+    html.push_str("<table>");
+    let _ = write!(
+        html,
+        "<tr><td>Groups you own with a single owner (succession risk)</td><td>{} of {}</td></tr>",
+        summary.owned_groups_single_owner, summary.owned_groups_total
+    );
+    let _ = write!(html, "<tr><td>Your own group votes that have expired</td><td>{} of {}</td></tr>", summary.own_votes_expired, summary.own_votes_total);
+    let _ = write!(
+        html,
+        "<tr><td>Followed peers with block reports <span class=\"note\">(known to this router only \u{2014} reports you haven't received aren't counted)</span></td><td>{}</td></tr>",
+        summary.trusted_peers_with_block_reports
+    );
+    let _ = write!(
+        html,
+        "<tr><td>Follows with a display name <span class=\"note\">(informational, not counted above)</span></td><td>{} of {}</td></tr>",
+        summary.follows_with_display_name, summary.follows_total
+    );
+    html.push_str("</table>");
+    Ok(html)
+}
+
 fn user_ref(u: &UserId) -> String {
     format!("{}/{}", u.federation.0, u.local_id)
 }
@@ -89,6 +131,28 @@ fn render_tunnels_section(store: &StateStore) -> Result<String, StoreError> {
         }
         html.push_str("</table>");
     }
+    Ok(html)
+}
+
+/// The tunnel-reciprocity signal — see
+/// `StateStore::list_tunnel_balances`'s own doc, including its documented
+/// limitation for a peer this router both provides to and consumes from
+/// at once (that peer's given/taken numbers will be identical, since
+/// WireGuard can't separate the two roles' traffic on one peer entry).
+fn render_tunnel_balance_section(store: &StateStore) -> Result<String, StoreError> {
+    let balances = store.list_tunnel_balances()?;
+    let mut html = String::new();
+    html.push_str("<h2>Tunnel Balance</h2>");
+    if balances.is_empty() {
+        html.push_str("<p class=\"empty\">no tunnel transfer data recorded yet</p>");
+        return Ok(html);
+    }
+    html.push_str("<table><tr><th>Peer</th><th>Given (bytes)</th><th>Taken (bytes)</th><th>Received/given ratio</th></tr>");
+    for b in &balances {
+        let ratio = if b.given_to > 0 { format!("{:.3}", b.taken_from as f64 / b.given_to as f64) } else { "n/a".to_string() };
+        let _ = write!(html, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", escape_html(&user_ref(&b.peer)), b.given_to, b.taken_from, escape_html(&ratio));
+    }
+    html.push_str("</table>");
     Ok(html)
 }
 
@@ -176,7 +240,7 @@ fn render_device_approval_row(html: &mut String, o: &DeviceApprovalOpinion) {
     );
 }
 
-const STYLE: &str = "body{font-family:sans-serif;margin:2em;color:#222}h1{margin-bottom:0}table{border-collapse:collapse;margin:0.5em 0 1.5em}th,td{border:1px solid #ccc;padding:0.3em 0.6em;text-align:left}th{background:#eee}.empty{color:#777;font-style:italic}.note{color:#555;font-size:0.9em}";
+const STYLE: &str = "body{font-family:sans-serif;margin:2em;color:#222}h1{margin-bottom:0}table{border-collapse:collapse;margin:0.5em 0 1.5em}th,td{border:1px solid #ccc;padding:0.3em 0.6em;text-align:left}th{background:#eee}.empty{color:#777;font-style:italic}.note{color:#555;font-size:0.9em}.attention{color:#a33;font-weight:bold}";
 
 /// Renders the full dashboard page — a pure function over the store's
 /// current contents, safe to call from a test with no server involved.
@@ -186,7 +250,9 @@ pub fn render_index(store: &StateStore) -> Result<String, StoreError> {
     let _ = write!(html, "<style>{STYLE}</style>");
     html.push_str("</head><body>");
     html.push_str("<h1>social-firewall</h1><p class=\"note\">read-only local dashboard</p>");
+    html.push_str(&render_network_health_section(store)?);
     html.push_str(&render_tunnels_section(store)?);
+    html.push_str(&render_tunnel_balance_section(store)?);
     html.push_str(&render_lists_section(store)?);
     html.push_str(&render_groups_section(store)?);
     html.push_str(&render_device_approvals_section(store)?);
@@ -238,6 +304,49 @@ mod tests {
         assert!(html.contains("no known shared rule lists"));
         assert!(html.contains("no known groups"));
         assert!(html.contains("no known device-approval opinions"));
+        assert!(html.contains("no tunnel transfer data recorded yet"));
+        assert!(html.contains("all clear"), "with no self identity and no data, network health must report zero attention items");
+    }
+
+    #[test]
+    fn render_index_shows_network_health_attention_items() {
+        let store = StateStore::open_in_memory().unwrap();
+        let owner = user(1, 1);
+        store.set_self_identity(owner, domain_types::PublicKeyBytes([1; 32]), &[1; 32], None).unwrap();
+        store
+            .ingest_group(&Group {
+                group_id: domain_types::GroupId(Hash32([5; 32])),
+                published_by: owner,
+                sequence: 0,
+                name: "solo group".into(),
+                description: "d".into(),
+                join_prompt: None,
+                party_line_moderated: false,
+                voiced_members: vec![],
+                owners: vec![owner],
+                admins: vec![],
+                voting_members: vec![owner],
+                non_voting_members: vec![],
+                issued_at: 0,
+                expires_at: None,
+                supersedes: None,
+                signature: domain_types::SignatureBytes([0; 64]),
+            })
+            .unwrap();
+
+        let html = render_index(&store).unwrap();
+        assert!(html.contains("Network Health"));
+        assert!(html.contains("1 item(s) need attention"), "a single-owner group should be flagged as succession risk, got:\n{html}");
+    }
+
+    #[test]
+    fn render_index_shows_a_recorded_tunnel_balance() {
+        let store = StateStore::open_in_memory().unwrap();
+        let peer = user(1, 1);
+        store.record_transfer_sample(&peer, state_store::TunnelDirection::Providing, 300, 100, 100).unwrap();
+        let html = render_index(&store).unwrap();
+        assert!(html.contains("Tunnel Balance"));
+        assert!(html.contains("400")); // given_to = rx+tx = 300+100
     }
 
     #[test]

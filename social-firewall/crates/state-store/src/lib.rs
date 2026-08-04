@@ -27,6 +27,7 @@ use domain_types::{
     TunnelTrustRule, UserId, Visibility, WgPublicKeyBytes,
 };
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 use std::path::Path;
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -44,6 +45,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (12, include_str!("../migrations/0012_group_join_features.sql")),
     (13, include_str!("../migrations/0013_group_block_reports.sql")),
     (14, include_str!("../migrations/0014_group_party_line_voice.sql")),
+    (15, include_str!("../migrations/0015_tunnel_ipv6.sql")),
+    (16, include_str!("../migrations/0016_group_membership_events.sql")),
+    (17, include_str!("../migrations/0017_tunnel_transfer_totals.sql")),
+    (18, include_str!("../migrations/0018_tunnel_reciprocity.sql")),
+    (19, include_str!("../migrations/0019_party_line_reply_target.sql")),
 ];
 
 #[derive(thiserror::Error, Debug)]
@@ -251,6 +257,19 @@ impl StateStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// `federations` today only ever has a row for this router's own home
+    /// federation (populated by `set_self_identity`) — a foreign
+    /// federation a followed peer belongs to has no known display name at
+    /// all yet, so `None` here is the common case, not an edge case.
+    /// Callers (see the IRC-style party-line formatting in `cli`) are
+    /// expected to fall back to the raw hex id when this returns `None`.
+    pub fn get_federation_display_name(&self, federation: &FederationId) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row("SELECT display_name FROM federations WHERE federation_id = ?1", params![federation.0 .0.as_slice()], |row| row.get(0))
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn get_follow(&self, user: &UserId) -> Result<Option<LocalTrustRule>, StoreError> {
@@ -1105,8 +1124,8 @@ impl StateStore {
 
     pub fn store_tunnel_connection_accept(&self, accept: &TunnelConnectionAccept) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO tunnel_connection_accepts (provider_federation_id, provider_local_id, request_requester_federation_id, request_requester_local_id, request_sequence, assigned_tunnel_ip, accepted_at, signature, ingested_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO tunnel_connection_accepts (provider_federation_id, provider_local_id, request_requester_federation_id, request_requester_local_id, request_sequence, assigned_tunnel_ip, assigned_tunnel_ip6, accepted_at, signature, ingested_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(request_requester_federation_id, request_requester_local_id, request_sequence) DO NOTHING",
             params![
                 accept.provider.federation.0 .0.as_slice(),
@@ -1115,6 +1134,7 @@ impl StateStore {
                 accept.request_ref.author.local_id.0.as_slice(),
                 accept.request_ref.sequence as i64,
                 accept.assigned_tunnel_ip,
+                accept.assigned_tunnel_ip6,
                 accept.accepted_at,
                 accept.signature.0.as_slice(),
                 now_unix(),
@@ -1126,19 +1146,20 @@ impl StateStore {
     pub fn get_tunnel_connection_accept_for(&self, requester: &UserId, sequence: u64) -> Result<Option<TunnelConnectionAccept>, StoreError> {
         self.conn
             .query_row(
-                "SELECT provider_federation_id, provider_local_id, assigned_tunnel_ip, accepted_at, signature FROM tunnel_connection_accepts
+                "SELECT provider_federation_id, provider_local_id, assigned_tunnel_ip, assigned_tunnel_ip6, accepted_at, signature FROM tunnel_connection_accepts
                  WHERE request_requester_federation_id = ?1 AND request_requester_local_id = ?2 AND request_sequence = ?3",
                 params![requester.federation.0 .0.as_slice(), requester.local_id.0.as_slice(), sequence as i64],
                 |row| {
-                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, Vec<u8>>(4)?))
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?, row.get::<_, Vec<u8>>(5)?))
                 },
             )
             .optional()?
-            .map(|(provider_fed, provider_local, assigned_tunnel_ip, accepted_at, signature)| -> Result<TunnelConnectionAccept, StoreError> {
+            .map(|(provider_fed, provider_local, assigned_tunnel_ip, assigned_tunnel_ip6, accepted_at, signature)| -> Result<TunnelConnectionAccept, StoreError> {
                 Ok(TunnelConnectionAccept {
                     provider: UserId { federation: FederationId(bytes_to_hash32(&provider_fed)?), local_id: bytes_to_hash32(&provider_local)? },
                     request_ref: StatementRef { author: *requester, sequence },
                     assigned_tunnel_ip,
+                    assigned_tunnel_ip6,
                     accepted_at,
                     signature: SignatureBytes(bytes_to_64(&signature)?),
                 })
@@ -1148,14 +1169,15 @@ impl StateStore {
 
     pub fn upsert_tunnel_trust_rule(&self, rule: &TunnelTrustRule) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO tunnel_trust_rules (federation_id, local_id, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded, tag_filter, expires_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO tunnel_trust_rules (federation_id, local_id, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded, tag_filter, min_reciprocity_ratio, expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(federation_id, local_id) DO UPDATE SET
                 auto_accept_requests = excluded.auto_accept_requests,
                 auto_consume_advertisements = excluded.auto_consume_advertisements,
                 auto_respond_to_service_requests = excluded.auto_respond_to_service_requests,
                 excluded = excluded.excluded,
                 tag_filter = excluded.tag_filter,
+                min_reciprocity_ratio = excluded.min_reciprocity_ratio,
                 expires_at = excluded.expires_at",
             params![
                 rule.user.federation.0 .0.as_slice(),
@@ -1165,6 +1187,7 @@ impl StateStore {
                 rule.auto_respond_to_service_requests,
                 rule.excluded,
                 rule.tag_filter,
+                rule.min_reciprocity_ratio,
                 rule.expires_at,
                 rule.created_at,
             ],
@@ -1175,7 +1198,7 @@ impl StateStore {
     pub fn get_tunnel_trust_rule(&self, user: &UserId) -> Result<Option<TunnelTrustRule>, StoreError> {
         self.conn
             .query_row(
-                "SELECT auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded, tag_filter, expires_at, created_at
+                "SELECT auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded, tag_filter, min_reciprocity_ratio, expires_at, created_at
                  FROM tunnel_trust_rules WHERE federation_id = ?1 AND local_id = ?2",
                 params![user.federation.0 .0.as_slice(), user.local_id.0.as_slice()],
                 |row| {
@@ -1186,8 +1209,9 @@ impl StateStore {
                         auto_respond_to_service_requests: row.get(2)?,
                         excluded: row.get(3)?,
                         tag_filter: row.get(4)?,
-                        expires_at: row.get(5)?,
-                        created_at: row.get(6)?,
+                        min_reciprocity_ratio: row.get(5)?,
+                        expires_at: row.get(6)?,
+                        created_at: row.get(7)?,
                     })
                 },
             )
@@ -1197,7 +1221,7 @@ impl StateStore {
 
     pub fn list_tunnel_trust_rules(&self) -> Result<Vec<TunnelTrustRule>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT federation_id, local_id, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded, tag_filter, expires_at, created_at FROM tunnel_trust_rules",
+            "SELECT federation_id, local_id, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded, tag_filter, min_reciprocity_ratio, expires_at, created_at FROM tunnel_trust_rules",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -1208,13 +1232,14 @@ impl StateStore {
                 row.get::<_, bool>(4)?,
                 row.get::<_, bool>(5)?,
                 row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, i64>(8)?,
+                row.get::<_, Option<f64>>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, i64>(9)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, auto_accept, auto_consume, auto_respond, excluded, tag_filter, expires_at, created_at) = r?;
+            let (fed, local, auto_accept, auto_consume, auto_respond, excluded, tag_filter, min_reciprocity_ratio, expires_at, created_at) = r?;
             out.push(TunnelTrustRule {
                 user: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
                 auto_accept_requests: auto_accept,
@@ -1222,6 +1247,7 @@ impl StateStore {
                 auto_respond_to_service_requests: auto_respond,
                 excluded,
                 tag_filter,
+                min_reciprocity_ratio,
                 expires_at,
                 created_at,
             });
@@ -1689,6 +1715,16 @@ impl TunnelDirection {
     }
 }
 
+/// See `StateStore::list_tunnel_balances`'s own doc, including its
+/// documented limitation for a peer this router both provides to and
+/// consumes from simultaneously.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TunnelBalance {
+    pub peer: UserId,
+    pub given_to: u64,
+    pub taken_from: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedTunnel {
     pub peer: UserId,
@@ -1700,6 +1736,10 @@ pub struct ProvisionedTunnel {
     pub fwmark: i64,
     pub route_table: i64,
     pub tunnel_ip: String,
+    /// Tunnel-internal IPv6 address, alongside `tunnel_ip` — see
+    /// `0015_tunnel_ipv6.sql`'s own doc on why this exists and why it's
+    /// nullable (pre-IPv6-support rows) rather than required.
+    pub tunnel_ip6: Option<String>,
     pub status: String,
     pub created_at: i64,
     /// Back-reference to the advertisement this tunnel was consumed
@@ -1713,11 +1753,11 @@ pub struct ProvisionedTunnel {
 impl StateStore {
     pub fn upsert_provisioned_tunnel(&self, t: &ProvisionedTunnel) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO provisioned_tunnels (peer_federation_id, peer_local_id, direction, peer_wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, status, created_at, advertisement_sequence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO provisioned_tunnels (peer_federation_id, peer_local_id, direction, peer_wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, tunnel_ip6, status, created_at, advertisement_sequence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(peer_federation_id, peer_local_id, direction) DO UPDATE SET
                 peer_wg_pubkey = excluded.peer_wg_pubkey, interface_name = excluded.interface_name, fwmark = excluded.fwmark, route_table = excluded.route_table,
-                tunnel_ip = excluded.tunnel_ip, status = excluded.status, advertisement_sequence = excluded.advertisement_sequence",
+                tunnel_ip = excluded.tunnel_ip, tunnel_ip6 = excluded.tunnel_ip6, status = excluded.status, advertisement_sequence = excluded.advertisement_sequence",
             params![
                 t.peer.federation.0 .0.as_slice(),
                 t.peer.local_id.0.as_slice(),
@@ -1727,6 +1767,7 @@ impl StateStore {
                 t.fwmark,
                 t.route_table,
                 t.tunnel_ip,
+                t.tunnel_ip6,
                 t.status,
                 t.created_at,
                 t.advertisement_sequence.map(|s| s as i64),
@@ -1738,7 +1779,7 @@ impl StateStore {
     pub fn get_provisioned_tunnel(&self, peer: &UserId, direction: TunnelDirection) -> Result<Option<ProvisionedTunnel>, StoreError> {
         self.conn
             .query_row(
-                "SELECT peer_wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, status, created_at, advertisement_sequence FROM provisioned_tunnels
+                "SELECT peer_wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, tunnel_ip6, status, created_at, advertisement_sequence FROM provisioned_tunnels
                  WHERE peer_federation_id = ?1 AND peer_local_id = ?2 AND direction = ?3",
                 params![peer.federation.0 .0.as_slice(), peer.local_id.0.as_slice(), direction.as_str()],
                 |row| {
@@ -1748,14 +1789,15 @@ impl StateStore {
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, Option<i64>>(8)?,
                     ))
                 },
             )
             .optional()?
-            .map(|(wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, status, created_at, advertisement_sequence)| {
+            .map(|(wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, tunnel_ip6, status, created_at, advertisement_sequence)| {
                 Ok(ProvisionedTunnel {
                     peer: *peer,
                     direction,
@@ -1764,6 +1806,7 @@ impl StateStore {
                     fwmark,
                     route_table,
                     tunnel_ip,
+                    tunnel_ip6,
                     status,
                     created_at,
                     advertisement_sequence: advertisement_sequence.map(|s| s as u64),
@@ -1782,7 +1825,7 @@ impl StateStore {
 
     pub fn list_provisioned_tunnels(&self) -> Result<Vec<ProvisionedTunnel>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer_federation_id, peer_local_id, direction, peer_wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, status, created_at, advertisement_sequence FROM provisioned_tunnels",
+            "SELECT peer_federation_id, peer_local_id, direction, peer_wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, tunnel_ip6, status, created_at, advertisement_sequence FROM provisioned_tunnels",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -1794,14 +1837,15 @@ impl StateStore {
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, i64>(9)?,
-                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, Option<i64>>(11)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, direction, wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, status, created_at, advertisement_sequence) = r?;
+            let (fed, local, direction, wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, tunnel_ip6, status, created_at, advertisement_sequence) = r?;
             out.push(ProvisionedTunnel {
                 peer: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
                 direction: TunnelDirection::from_str(&direction)?,
@@ -1810,12 +1854,85 @@ impl StateStore {
                 fwmark,
                 route_table,
                 tunnel_ip,
+                tunnel_ip6,
                 status,
                 created_at,
                 advertisement_sequence: advertisement_sequence.map(|s| s as u64),
             });
         }
         Ok(out)
+    }
+
+    /// Accumulates one WireGuard transfer sample for a (peer, direction)
+    /// pair — see `0017_tunnel_transfer_totals.sql`'s own doc. `raw_rx`/
+    /// `raw_tx` are the *current* cumulative-since-interface-creation
+    /// counters straight from `wg show <iface> dump`; this method turns
+    /// them into a delta against the last-seen sample and adds it to a
+    /// running total that survives the raw counter resetting (interface
+    /// recreated, router rebooted): if the new raw value is lower than
+    /// what was last seen, the whole new value is treated as a fresh
+    /// delta rather than going negative.
+    pub fn record_transfer_sample(&self, peer: &UserId, direction: TunnelDirection, raw_rx: u64, raw_tx: u64, now: i64) -> Result<(), StoreError> {
+        let existing: Option<(i64, i64, i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT last_raw_rx, last_raw_tx, cumulative_rx, cumulative_tx FROM tunnel_transfer_totals WHERE peer_federation_id = ?1 AND peer_local_id = ?2 AND direction = ?3",
+                params![peer.federation.0 .0.as_slice(), peer.local_id.0.as_slice(), direction.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let (last_raw_rx, last_raw_tx, cumulative_rx, cumulative_tx) = existing.unwrap_or((0, 0, 0, 0));
+        let raw_rx = raw_rx as i64;
+        let raw_tx = raw_tx as i64;
+        let delta_rx = if raw_rx >= last_raw_rx { raw_rx - last_raw_rx } else { raw_rx };
+        let delta_tx = if raw_tx >= last_raw_tx { raw_tx - last_raw_tx } else { raw_tx };
+        self.conn.execute(
+            "INSERT INTO tunnel_transfer_totals (peer_federation_id, peer_local_id, direction, last_raw_rx, last_raw_tx, cumulative_rx, cumulative_tx, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(peer_federation_id, peer_local_id, direction) DO UPDATE SET
+                last_raw_rx = excluded.last_raw_rx, last_raw_tx = excluded.last_raw_tx,
+                cumulative_rx = excluded.cumulative_rx, cumulative_tx = excluded.cumulative_tx, updated_at = excluded.updated_at",
+            params![peer.federation.0 .0.as_slice(), peer.local_id.0.as_slice(), direction.as_str(), raw_rx, raw_tx, cumulative_rx + delta_rx, cumulative_tx + delta_tx, now],
+        )?;
+        Ok(())
+    }
+
+    /// The tunnel-reciprocity signal: for each peer with at least one
+    /// transfer sample, `given_to` is the total bytes (rx+tx combined,
+    /// not just tx) recorded on this router's *providing*-direction row
+    /// for them, and `taken_from` is the same on the *consuming*-direction
+    /// row. Combined rx+tx, not tx-only/rx-only, because a provider's
+    /// real resource cost is relaying traffic in both directions (the
+    /// consumer's outbound bytes arriving as rx, the responses going back
+    /// out as tx), not just one leg of it.
+    ///
+    /// **Known limitation, stated rather than silently overclaimed**: if
+    /// this router simultaneously provides to *and* consumes from the
+    /// same peer, both directions share the exact same underlying
+    /// WireGuard peer entry (this router has exactly one persistent wg
+    /// keypair, and so does the peer — see `ensure_interface_and_keypair`
+    /// — so `wg show dump` reports one combined rx/tx pair for that
+    /// peer, not two). In that case `given_to` and `taken_from` are both
+    /// fed from the same combined counters and cannot be separated by
+    /// role; a caller comparing them for a mutual peer is comparing the
+    /// same number to itself, not a real distinction.
+    pub fn list_tunnel_balances(&self) -> Result<Vec<TunnelBalance>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT peer_federation_id, peer_local_id, direction, cumulative_rx, cumulative_tx FROM tunnel_transfer_totals")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?))
+        })?;
+        let mut by_peer: std::collections::HashMap<UserId, (u64, u64)> = std::collections::HashMap::new();
+        for r in rows {
+            let (fed, local, direction, cumulative_rx, cumulative_tx) = r?;
+            let peer = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let total = (cumulative_rx + cumulative_tx) as u64;
+            let entry = by_peer.entry(peer).or_insert((0, 0));
+            match TunnelDirection::from_str(&direction)? {
+                TunnelDirection::Providing => entry.0 = total,
+                TunnelDirection::Consuming => entry.1 = total,
+            }
+        }
+        Ok(by_peer.into_iter().map(|(peer, (given_to, taken_from))| TunnelBalance { peer, given_to, taken_from }).collect())
     }
 
     /// Wholesale-replaces the selected-target list for a consuming
@@ -1868,6 +1985,45 @@ pub struct GroupJoinTrackRecord {
     pub pending: u64,
 }
 
+/// See `StateStore::network_health_summary`'s own doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NetworkHealthSummary {
+    pub owned_groups_total: usize,
+    pub owned_groups_single_owner: usize,
+    pub own_votes_total: usize,
+    pub own_votes_expired: usize,
+    /// A lower bound, not a complete count — see
+    /// `network_health_summary`'s own doc on why. Unlike the other two
+    /// fields folded into `attention_items`, this one is never complete
+    /// local ground truth, only "what's reached this router so far."
+    pub trusted_peers_with_block_reports: usize,
+    pub follows_total: usize,
+    pub follows_with_display_name: usize,
+}
+
+impl NetworkHealthSummary {
+    /// One composite count, as requested — but every contributing number
+    /// is individually visible on the struct too, so nothing here is
+    /// opaque the way a weighted score would be. `trusted_peers_with_block_reports`
+    /// is included in the sum (the "one number" ask), but callers
+    /// displaying this should label that specific contribution as a
+    /// lower bound rather than presenting all three as equally certain.
+    pub fn attention_items(&self) -> usize {
+        self.owned_groups_single_owner + self.own_votes_expired + self.trusted_peers_with_block_reports
+    }
+}
+
+/// See `StateStore::list_group_membership_events`'s own doc. `Left` is
+/// deliberately one neutral event, not distinguished from a kick/removal —
+/// there's no live protocol here to tell a self-initiated departure apart
+/// from an owner dropping someone, and inventing that distinction would
+/// mean guessing at a motive the stored data doesn't actually carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipEventKind {
+    Joined,
+    Left,
+}
+
 impl StateStore {
     /// MAX-based counter, scoped to this *group* (not an author) — any
     /// current owner/admin can publish the next version, unlike every
@@ -1890,6 +2046,14 @@ impl StateStore {
     /// members via `ON DELETE CASCADE`).
     pub fn ingest_group(&self, group: &Group) -> Result<(), StoreError> {
         group.validate().map_err(StoreError::InvalidGroup)?;
+        // Populated only when this is an update to an existing group (a
+        // brand-new group's initial membership never synthesizes "joined"
+        // events — the same convention real IRC uses: you don't see
+        // backfilled joins for people already in the channel when you
+        // arrive). Computed here, before the previous version's row is
+        // deleted below, since this is the one moment the old membership
+        // list is still available to diff against.
+        let mut membership_events: Vec<(UserId, &'static str)> = Vec::new();
         match self.get_group(group.group_id)? {
             Some(current) => {
                 if !current.can_manage_membership(&group.published_by) {
@@ -1912,6 +2076,20 @@ impl StateStore {
                     if current_owners != new_owners {
                         return Err(StoreError::Unauthorized("only an owner may change the group's owners — an admin's update must leave the owners list untouched".to_string()));
                     }
+                }
+                // "Membership" here is the same union `Group::is_member`
+                // uses (owners ∪ admins ∪ voting ∪ non-voting) — a pure
+                // role change (e.g. voting -> non-voting, or gaining
+                // admin) within that union is not a join or a leave.
+                let previous_members: HashSet<UserId> =
+                    [&current.owners, &current.admins, &current.voting_members, &current.non_voting_members].into_iter().flatten().copied().collect();
+                let new_members: HashSet<UserId> =
+                    [&group.owners, &group.admins, &group.voting_members, &group.non_voting_members].into_iter().flatten().copied().collect();
+                for u in new_members.difference(&previous_members) {
+                    membership_events.push((*u, "joined"));
+                }
+                for u in previous_members.difference(&new_members) {
+                    membership_events.push((*u, "left"));
                 }
             }
             None => {
@@ -1957,7 +2135,36 @@ impl StateStore {
                 )?;
             }
         }
+        for (user, kind) in &membership_events {
+            self.conn.execute(
+                "INSERT INTO group_membership_events (group_id, user_federation_id, user_local_id, kind, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![group.group_id.0 .0.as_slice(), user.federation.0 .0.as_slice(), user.local_id.0.as_slice(), *kind, group.issued_at],
+            )?;
+        }
         Ok(())
+    }
+
+    /// The party-line's IRC-style join/leave log for a group — see
+    /// `ingest_group`'s own doc on where these are derived from. Ordered
+    /// chronologically so a caller can merge this with
+    /// `list_party_line_messages` into one timeline, same as a real IRC
+    /// client interleaves join/part notices with chat.
+    pub fn list_group_membership_events(&self, group_id: GroupId) -> Result<Vec<(UserId, MembershipEventKind, i64)>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT user_federation_id, user_local_id, kind, at FROM group_membership_events WHERE group_id = ?1 ORDER BY at ASC, id ASC")?;
+        let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (fed, local, kind, at) = r?;
+            let user = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let kind = match kind.as_str() {
+                "joined" => MembershipEventKind::Joined,
+                _ => MembershipEventKind::Left,
+            };
+            out.push((user, kind, at));
+        }
+        Ok(out)
     }
 
     pub fn get_group(&self, group_id: GroupId) -> Result<Option<Group>, StoreError> {
@@ -2282,6 +2489,46 @@ impl StateStore {
         Ok(out)
     }
 
+    /// The "browse everything" counterpart to `list_group_block_reports_for`
+    /// (which is scoped to one group + one blocked user) — used by
+    /// `network_health_summary` to check block reports against *any*
+    /// followed peer across *any* group, not just one specific pairing.
+    pub fn list_all_group_block_reports(&self) -> Result<Vec<GroupBlockReport>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT group_id, reporter_federation_id, reporter_local_id, sequence, blocked_user_federation_id, blocked_user_local_id, reason_code, reason_note, reason_evidence, issued_at, signature
+             FROM group_block_reports",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Vec<u8>>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, Vec<u8>>(10)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (group_id, reporter_fed, reporter_local, sequence, blocked_fed, blocked_local, reason_code, reason_note, reason_evidence, issued_at, signature) = r?;
+            out.push(GroupBlockReport {
+                group_id: GroupId(bytes_to_hash32(&group_id)?),
+                reporter: UserId { federation: FederationId(bytes_to_hash32(&reporter_fed)?), local_id: bytes_to_hash32(&reporter_local)? },
+                sequence: sequence as u64,
+                blocked_user: UserId { federation: FederationId(bytes_to_hash32(&blocked_fed)?), local_id: bytes_to_hash32(&blocked_local)? },
+                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                issued_at,
+                signature: SignatureBytes(bytes_to_64(&signature)?),
+            });
+        }
+        Ok(out)
+    }
+
     pub fn next_group_vote_sequence(&self, group_id: GroupId, voter: &UserId) -> Result<u64, StoreError> {
         let max: Option<i64> = self.conn.query_row(
             "SELECT MAX(sequence) FROM group_votes WHERE group_id = ?1 AND voter_federation_id = ?2 AND voter_local_id = ?3",
@@ -2319,6 +2566,56 @@ impl StateStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// This router's own latest vote per (group, target) — a superseded
+    /// re-affirmation of the same vote doesn't count as a second, separate
+    /// vote here, only the current one does. Used by
+    /// `network_health_summary` to report how many of *your own* votes
+    /// have gone stale, not how many votes you've ever cast.
+    pub fn list_latest_own_votes(&self, self_user: &UserId) -> Result<Vec<GroupVote>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT group_id, sequence, target_kind, target_value, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, signature
+             FROM group_votes gv1
+             WHERE voter_federation_id = ?1 AND voter_local_id = ?2
+               AND sequence = (
+                   SELECT MAX(sequence) FROM group_votes gv2
+                   WHERE gv2.group_id = gv1.group_id AND gv2.voter_federation_id = gv1.voter_federation_id
+                     AND gv2.voter_local_id = gv1.voter_local_id AND gv2.target_kind = gv1.target_kind AND gv2.target_value = gv1.target_value
+               )",
+        )?;
+        let rows = stmt.query_map(params![self_user.federation.0 .0.as_slice(), self_user.local_id.0.as_slice()], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Vec<u8>>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Vec<u8>>(10)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (group_id, sequence, target_kind, target_value, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, signature) = r?;
+            let Some(target) = kv_to_target(&target_kind, &target_value) else { continue };
+            out.push(GroupVote {
+                group_id: GroupId(bytes_to_hash32(&group_id)?),
+                voter: *self_user,
+                sequence: sequence as u64,
+                target,
+                stance: stance_from_i64(stance)?,
+                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                issued_at,
+                expires_at,
+                signature: SignatureBytes(bytes_to_64(&signature)?),
+            });
+        }
+        Ok(out)
     }
 
     /// The latest non-expired vote, if any, from each of a group's
@@ -2374,6 +2671,54 @@ impl StateStore {
     /// owner personally, informed by whether they've been admitting
     /// careless or bad-faith voters — no new trust dimension needed for
     /// that, just visibility into data already stored.
+    /// Every vote ever cast in this group, across every target, in
+    /// chronological order — the party-line's view of votes (see
+    /// `list-party-line`'s CLI doc), not a stance-aggregation input.
+    /// Unlike `group_vote_breakdown_for` this is never deduped to "only
+    /// the latest per voter" — a vote being re-cast is a real, distinct
+    /// event worth showing in an activity timeline, the same way IRC
+    /// shows every message ever sent rather than collapsing to the
+    /// latest one per person.
+    pub fn list_group_votes(&self, group_id: GroupId) -> Result<Vec<GroupVote>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT voter_federation_id, voter_local_id, sequence, target_kind, target_value, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, signature
+             FROM group_votes WHERE group_id = ?1 ORDER BY issued_at ASC",
+        )?;
+        let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Vec<u8>>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Vec<u8>>(11)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (fed, local, sequence, target_kind, target_value, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, signature) = r?;
+            let Some(target) = kv_to_target(&target_kind, &target_value) else { continue };
+            out.push(GroupVote {
+                group_id,
+                voter: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
+                sequence: sequence as u64,
+                target,
+                stance: stance_from_i64(stance)?,
+                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                issued_at,
+                expires_at,
+                signature: SignatureBytes(bytes_to_64(&signature)?),
+            });
+        }
+        Ok(out)
+    }
+
     pub fn group_vote_breakdown_for(&self, group_id: GroupId, target: &TargetSelector, now: i64) -> Result<Vec<(UserId, Option<GroupVote>, bool)>, StoreError> {
         let Some(group) = self.get_group(group_id)? else { return Ok(vec![]) };
         let (kind, value) = target_to_kv(target)?;
@@ -2484,9 +2829,10 @@ impl StateStore {
     }
 
     pub fn store_party_line_message(&self, msg: &PartyLineMessage) -> Result<(), StoreError> {
+        let reply_target = msg.in_reply_to.as_ref().map(target_to_kv).transpose()?;
         self.conn.execute(
-            "INSERT INTO party_line_messages (group_id, author_federation_id, author_local_id, sequence, body, issued_at, signature, ingested_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO party_line_messages (group_id, author_federation_id, author_local_id, sequence, body, in_reply_to_target_kind, in_reply_to_target_value, issued_at, signature, ingested_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(group_id, author_federation_id, author_local_id, sequence) DO NOTHING",
             params![
                 msg.group_id.0 .0.as_slice(),
@@ -2494,6 +2840,8 @@ impl StateStore {
                 msg.author.local_id.0.as_slice(),
                 msg.sequence as i64,
                 msg.body,
+                reply_target.as_ref().map(|(k, _)| k.as_str()),
+                reply_target.as_ref().map(|(_, v)| v.as_str()),
                 msg.issued_at,
                 msg.signature.0.as_slice(),
                 now_unix(),
@@ -2515,21 +2863,82 @@ impl StateStore {
     pub fn list_party_line_messages(&self, group_id: GroupId) -> Result<Vec<PartyLineMessage>, StoreError> {
         let Some(group) = self.get_group(group_id)? else { return Ok(vec![]) };
         let mut stmt = self.conn.prepare(
-            "SELECT author_federation_id, author_local_id, sequence, body, issued_at, signature FROM party_line_messages WHERE group_id = ?1 ORDER BY issued_at ASC",
+            "SELECT author_federation_id, author_local_id, sequence, body, in_reply_to_target_kind, in_reply_to_target_value, issued_at, signature FROM party_line_messages WHERE group_id = ?1 ORDER BY issued_at ASC",
         )?;
         let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?, row.get::<_, Vec<u8>>(5)?))
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Vec<u8>>(7)?,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, sequence, body, issued_at, signature) = r?;
+            let (fed, local, sequence, body, reply_kind, reply_value, issued_at, signature) = r?;
             let author = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
             if !group.can_post_party_line(&author) {
                 continue;
             }
-            out.push(PartyLineMessage { group_id, author, sequence: sequence as u64, body, issued_at, signature: SignatureBytes(bytes_to_64(&signature)?) });
+            let in_reply_to = match (reply_kind, reply_value) {
+                (Some(k), Some(v)) => kv_to_target(&k, &v),
+                _ => None,
+            };
+            out.push(PartyLineMessage { group_id, author, sequence: sequence as u64, body, in_reply_to, issued_at, signature: SignatureBytes(bytes_to_64(&signature)?) });
         }
         Ok(out)
+    }
+
+    /// A composite "is anything worth my attention" summary, built
+    /// entirely from data already stored — no new signal, just
+    /// aggregating what "make invisible information visible" work has
+    /// already surfaced individually (succession risk on `list-groups`,
+    /// vote age on `explain-group-vote`, block reports on the same). See
+    /// `NetworkHealthSummary::attention_items`'s own doc for why
+    /// `trusted_peers_with_block_reports` is deliberately kept out of a
+    /// simple sum with the other two.
+    pub fn network_health_summary(&self, now: i64) -> Result<NetworkHealthSummary, StoreError> {
+        let self_user = self.get_self_identity()?.map(|(u, _)| u);
+
+        let (owned_groups_total, owned_groups_single_owner) = match self_user {
+            Some(u) => {
+                let owned: Vec<Group> = self.list_groups()?.into_iter().filter(|g| g.owners.contains(&u)).collect();
+                (owned.len(), owned.iter().filter(|g| g.owners.len() == 1).count())
+            }
+            None => (0, 0),
+        };
+
+        let own_votes = match self_user {
+            Some(u) => self.list_latest_own_votes(&u)?,
+            None => Vec::new(),
+        };
+        let own_votes_total = own_votes.len();
+        let own_votes_expired = own_votes.iter().filter(|v| v.is_expired(now)).count();
+
+        let follows = self.list_follows()?;
+        let follows_total = follows.len();
+        let follows_with_display_name = follows.iter().filter(|f| f.display_name.is_some()).count();
+
+        // A lower bound, not a count: only reports this router has
+        // actually been handed (no live sync — see this crate's own
+        // "no P2P in this pass" scoping). A follow with zero reports here
+        // means "none reached this router," not "none exist."
+        let all_reports = self.list_all_group_block_reports()?;
+        let trusted_peers_with_block_reports = follows.iter().filter(|f| all_reports.iter().any(|r| r.blocked_user == f.user)).count();
+
+        Ok(NetworkHealthSummary {
+            owned_groups_total,
+            owned_groups_single_owner,
+            own_votes_total,
+            own_votes_expired,
+            trusted_peers_with_block_reports,
+            follows_total,
+            follows_with_display_name,
+        })
     }
 
     // ── Device-approval opinions ─────────────────────────────────────────
@@ -2911,6 +3320,23 @@ mod tests {
         let (got_user, got_pk) = store.get_self_identity().unwrap().unwrap();
         assert_eq!(got_user, u);
         assert_eq!(got_pk, PublicKeyBytes([9; 32]));
+    }
+
+    #[test]
+    fn get_federation_display_name_resolves_the_home_federation_set_at_self_identity_time() {
+        let store = StateStore::open_in_memory().unwrap();
+        let u = user(1, 2);
+        store.set_self_identity(u, PublicKeyBytes([9; 32]), &[3; 32], None).unwrap();
+        // set_self_identity defaults a federation's display_name to its
+        // own hex id when no explicit federation name was chosen.
+        assert_eq!(store.get_federation_display_name(&u.federation).unwrap().as_deref(), Some(u.federation.0.to_string().as_str()));
+    }
+
+    #[test]
+    fn get_federation_display_name_is_none_for_an_unknown_federation() {
+        let store = StateStore::open_in_memory().unwrap();
+        let stranger_federation = FederationId(Hash32([7; 32]));
+        assert_eq!(store.get_federation_display_name(&stranger_federation).unwrap(), None);
     }
 
     #[test]
@@ -3361,12 +3787,14 @@ mod tests {
             provider,
             request_ref: StatementRef { author: requester, sequence: 0 },
             assigned_tunnel_ip: "10.99.0.4".into(),
+            assigned_tunnel_ip6: Some("fd99::c8:4".into()),
             accepted_at: 300,
             signature: SignatureBytes([0; 64]),
         };
         store.store_tunnel_connection_accept(&accept).unwrap();
         let got = store.get_tunnel_connection_accept_for(&requester, 0).unwrap().unwrap();
         assert_eq!(got.assigned_tunnel_ip, "10.99.0.4");
+        assert_eq!(got.assigned_tunnel_ip6.as_deref(), Some("fd99::c8:4"));
         // Full UserId equality, not just `.federation` — a real bug (this
         // reconstructing the *requester's* local_id instead of the
         // provider's own, since the table was originally missing a
@@ -3388,7 +3816,7 @@ mod tests {
         let alice = user(1, 1);
         store.upsert_tunnel_trust_rule(&TunnelTrustRule {
             user: alice, auto_accept_requests: true, auto_consume_advertisements: false,
-            auto_respond_to_service_requests: false, excluded: false, tag_filter: None, expires_at: None, created_at: 0,
+            auto_respond_to_service_requests: false, excluded: false, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0,
         }).unwrap();
         let got = store.get_tunnel_trust_rule(&alice).unwrap().unwrap();
         assert!(got.auto_accept_requests);
@@ -3396,7 +3824,7 @@ mod tests {
 
         store.upsert_tunnel_trust_rule(&TunnelTrustRule {
             user: alice, auto_accept_requests: false, auto_consume_advertisements: true,
-            auto_respond_to_service_requests: true, excluded: false, tag_filter: None, expires_at: None, created_at: 0,
+            auto_respond_to_service_requests: true, excluded: false, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0,
         }).unwrap();
         let got = store.get_tunnel_trust_rule(&alice).unwrap().unwrap();
         assert!(!got.auto_accept_requests);
@@ -3417,6 +3845,7 @@ mod tests {
                 auto_respond_to_service_requests: false,
                 excluded: false,
                 tag_filter: Some("streaming".into()),
+                min_reciprocity_ratio: None,
                 expires_at: None,
                 created_at: 0,
             })
@@ -3430,7 +3859,7 @@ mod tests {
         let bob = user(1, 2);
         store.upsert_tunnel_trust_rule(&TunnelTrustRule {
             user: bob, auto_accept_requests: false, auto_consume_advertisements: false,
-            auto_respond_to_service_requests: false, excluded: true, tag_filter: None, expires_at: None, created_at: 0,
+            auto_respond_to_service_requests: false, excluded: true, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0,
         }).unwrap();
         assert!(store.get_tunnel_trust_rule(&bob).unwrap().unwrap().excluded);
     }
@@ -3490,6 +3919,7 @@ mod tests {
             fwmark: 0x1000,
             route_table: 200,
             tunnel_ip: "10.99.0.4".into(),
+            tunnel_ip6: Some("fd99::c8:4".into()),
             status: "active".into(),
             created_at: 100,
             advertisement_sequence: Some(0),
@@ -3508,17 +3938,55 @@ mod tests {
     }
 
     #[test]
+    fn record_transfer_sample_accumulates_deltas_across_samples() {
+        let store = StateStore::open_in_memory().unwrap();
+        let peer = user(1, 1);
+        store.record_transfer_sample(&peer, TunnelDirection::Providing, 1000, 500, 100).unwrap();
+        store.record_transfer_sample(&peer, TunnelDirection::Providing, 1500, 900, 200).unwrap();
+        let balances = store.list_tunnel_balances().unwrap();
+        assert_eq!(balances, vec![TunnelBalance { peer, given_to: (1500 - 1000) + (900 - 500) + 1000 + 500, taken_from: 0 }]);
+    }
+
+    #[test]
+    fn record_transfer_sample_treats_a_lower_raw_counter_as_a_fresh_delta_not_negative() {
+        let store = StateStore::open_in_memory().unwrap();
+        let peer = user(1, 1);
+        store.record_transfer_sample(&peer, TunnelDirection::Consuming, 5000, 2000, 100).unwrap();
+        // Interface recreated (reboot) — wg's own raw counters reset to 0
+        // then climb again; this must never be interpreted as negative
+        // traffic, the whole new value is a fresh delta.
+        store.record_transfer_sample(&peer, TunnelDirection::Consuming, 300, 100, 200).unwrap();
+        let balances = store.list_tunnel_balances().unwrap();
+        assert_eq!(balances, vec![TunnelBalance { peer, given_to: 0, taken_from: 5000 + 2000 + 300 + 100 }]);
+    }
+
+    #[test]
+    fn list_tunnel_balances_reports_given_and_taken_independently_per_direction() {
+        let store = StateStore::open_in_memory().unwrap();
+        let provider_peer = user(1, 1);
+        let consumer_peer = user(1, 2);
+        store.record_transfer_sample(&provider_peer, TunnelDirection::Providing, 10_000, 20_000, 100).unwrap();
+        store.record_transfer_sample(&consumer_peer, TunnelDirection::Consuming, 3_000, 1_000, 100).unwrap();
+        let mut balances = store.list_tunnel_balances().unwrap();
+        balances.sort_by_key(|b| b.peer.local_id.0[0]);
+        assert_eq!(balances, vec![
+            TunnelBalance { peer: provider_peer, given_to: 30_000, taken_from: 0 },
+            TunnelBalance { peer: consumer_peer, given_to: 0, taken_from: 4_000 },
+        ]);
+    }
+
+    #[test]
     fn providing_and_consuming_directions_for_the_same_peer_are_independent_rows() {
         let store = StateStore::open_in_memory().unwrap();
         let peer = user(1, 1);
         store.upsert_provisioned_tunnel(&ProvisionedTunnel {
             peer, direction: TunnelDirection::Providing, peer_wg_pubkey: WgPublicKeyBytes([1; 32]),
-            interface_name: "sf_tun0".into(), fwmark: 0x1000, route_table: 200, tunnel_ip: "10.99.0.1".into(),
+            interface_name: "sf_tun0".into(), fwmark: 0x1000, route_table: 200, tunnel_ip: "10.99.0.1".into(), tunnel_ip6: None,
             status: "active".into(), created_at: 0, advertisement_sequence: None,
         }).unwrap();
         store.upsert_provisioned_tunnel(&ProvisionedTunnel {
             peer, direction: TunnelDirection::Consuming, peer_wg_pubkey: WgPublicKeyBytes([2; 32]),
-            interface_name: "sf_tun0".into(), fwmark: 0x1001, route_table: 201, tunnel_ip: "10.99.0.2".into(),
+            interface_name: "sf_tun0".into(), fwmark: 0x1001, route_table: 201, tunnel_ip: "10.99.0.2".into(), tunnel_ip6: Some("fd99::c9:2".into()),
             status: "active".into(), created_at: 0, advertisement_sequence: Some(0),
         }).unwrap();
         assert_eq!(store.list_provisioned_tunnels().unwrap().len(), 2);
@@ -3801,6 +4269,67 @@ mod tests {
     }
 
     #[test]
+    fn ingest_group_synthesizes_no_join_events_for_a_brand_new_groups_initial_members() {
+        let store = StateStore::open_in_memory().unwrap();
+        let owner = user(1, 1);
+        let member = user(1, 2);
+        store.ingest_group(&new_group(owner, vec![owner, member])).unwrap();
+        assert!(store.list_group_membership_events(group_id()).unwrap().is_empty(), "arriving to find people already in the channel is not a join, same as real IRC");
+    }
+
+    #[test]
+    fn ingest_group_synthesizes_a_joined_event_when_a_member_is_added() {
+        let store = StateStore::open_in_memory().unwrap();
+        let owner = user(1, 1);
+        let newcomer = user(1, 2);
+        store.ingest_group(&new_group(owner, vec![owner])).unwrap();
+
+        let mut v2 = new_group(owner, vec![owner, newcomer]);
+        v2.sequence = 1;
+        v2.supersedes = Some(0);
+        v2.issued_at = 500;
+        store.ingest_group(&v2).unwrap();
+
+        let events = store.list_group_membership_events(group_id()).unwrap();
+        assert_eq!(events, vec![(newcomer, MembershipEventKind::Joined, 500)]);
+    }
+
+    #[test]
+    fn ingest_group_synthesizes_a_left_event_when_a_member_is_removed() {
+        let store = StateStore::open_in_memory().unwrap();
+        let owner = user(1, 1);
+        let member = user(1, 2);
+        store.ingest_group(&new_group(owner, vec![owner, member])).unwrap();
+
+        let mut v2 = new_group(owner, vec![owner]);
+        v2.sequence = 1;
+        v2.supersedes = Some(0);
+        v2.issued_at = 500;
+        store.ingest_group(&v2).unwrap();
+
+        let events = store.list_group_membership_events(group_id()).unwrap();
+        assert_eq!(events, vec![(member, MembershipEventKind::Left, 500)]);
+    }
+
+    #[test]
+    fn ingest_group_role_change_within_membership_is_not_a_join_or_a_leave() {
+        let store = StateStore::open_in_memory().unwrap();
+        let owner = user(1, 1);
+        let member = user(1, 2);
+        store.ingest_group(&new_group(owner, vec![owner, member])).unwrap();
+
+        // member moves from voting to non-voting — still a member throughout.
+        let mut v2 = new_group(owner, vec![owner]);
+        v2.non_voting_members = vec![member];
+        v2.sequence = 1;
+        v2.supersedes = Some(0);
+        v2.issued_at = 500;
+        store.ingest_group(&v2).unwrap();
+
+        assert!(store.list_group_membership_events(group_id()).unwrap().is_empty());
+    }
+
+    #[test]
     fn ingest_group_accepts_an_update_from_a_current_owner_and_replaces_the_old_version() {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
@@ -4073,6 +4602,115 @@ mod tests {
         assert_eq!(store.next_group_block_report_sequence(group_id(), &reporter).unwrap(), 1);
     }
 
+    #[test]
+    fn list_group_votes_returns_every_vote_chronologically_not_deduped() {
+        let store = StateStore::open_in_memory().unwrap();
+        let owner = user(1, 1);
+        let bob = user(1, 2);
+        store.ingest_group(&new_group(owner, vec![owner, bob])).unwrap();
+        store
+            .store_group_vote(&GroupVote { group_id: group_id(), voter: owner, sequence: 0, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, signature: SignatureBytes([0; 64]) })
+            .unwrap();
+        store
+            .store_group_vote(&GroupVote { group_id: group_id(), voter: bob, sequence: 0, target: target(), stance: Stance::Allow, reason: Reason { code: ReasonCode::KnownGoodCdn, note: None, evidence: vec![] }, issued_at: 200, expires_at: None, signature: SignatureBytes([0; 64]) })
+            .unwrap();
+        // owner re-casts — a real, distinct event, must not be collapsed.
+        store
+            .store_group_vote(&GroupVote { group_id: group_id(), voter: owner, sequence: 1, target: target(), stance: Stance::Allow, reason: Reason { code: ReasonCode::PersonalPreference, note: None, evidence: vec![] }, issued_at: 300, expires_at: None, signature: SignatureBytes([0; 64]) })
+            .unwrap();
+
+        let votes = store.list_group_votes(group_id()).unwrap();
+        assert_eq!(votes.len(), 3, "a re-cast vote is a distinct event, not a dedup target");
+        assert_eq!(votes.iter().map(|v| v.issued_at).collect::<Vec<_>>(), vec![100, 200, 300], "must be chronological");
+        assert_eq!(votes[2].stance, Stance::Allow);
+    }
+
+    fn store_with_self(seed: u8) -> (StateStore, UserId) {
+        let store = StateStore::open_in_memory().unwrap();
+        let me = user(seed, seed);
+        store.set_self_identity(me, PublicKeyBytes([seed; 32]), &[seed; 32], None).unwrap();
+        (store, me)
+    }
+
+    #[test]
+    fn network_health_summary_is_all_zero_with_no_data() {
+        let (store, _me) = store_with_self(1);
+        let summary = store.network_health_summary(1000).unwrap();
+        assert_eq!(summary, NetworkHealthSummary::default());
+        assert_eq!(summary.attention_items(), 0);
+    }
+
+    #[test]
+    fn network_health_summary_flags_a_single_owner_group_but_not_a_co_owned_one() {
+        let (store, me) = store_with_self(1);
+        let co_owner = user(9, 9);
+        store.ingest_group(&new_group(me, vec![me])).unwrap();
+        let mut co_owned = new_group(me, vec![me]);
+        co_owned.group_id = GroupId(Hash32([99; 32]));
+        co_owned.owners.push(co_owner);
+        store.ingest_group(&co_owned).unwrap();
+
+        let summary = store.network_health_summary(1000).unwrap();
+        assert_eq!(summary.owned_groups_total, 2);
+        assert_eq!(summary.owned_groups_single_owner, 1, "only the sole-owner group should count as succession risk");
+        assert_eq!(summary.attention_items(), 1);
+    }
+
+    #[test]
+    fn network_health_summary_counts_only_the_latest_vote_per_target_and_flags_expiry() {
+        let (store, me) = store_with_self(1);
+        store.ingest_group(&new_group(me, vec![me])).unwrap();
+        // A superseded re-affirmation of the same vote — only the later,
+        // still-valid one should count, not two separate votes.
+        store.store_group_vote(&GroupVote { group_id: group_id(), voter: me, sequence: 0, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] }, issued_at: 0, expires_at: Some(50), signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_group_vote(&GroupVote { group_id: group_id(), voter: me, sequence: 1, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] }, issued_at: 0, expires_at: Some(100), signature: SignatureBytes([0; 64]) }).unwrap();
+
+        let summary = store.network_health_summary(75).unwrap();
+        assert_eq!(summary.own_votes_total, 1, "a superseded vote on the same target must not be double-counted");
+        assert_eq!(summary.own_votes_expired, 0, "the latest vote (expires at 100) has not expired yet at t=75");
+
+        let summary_later = store.network_health_summary(150).unwrap();
+        assert_eq!(summary_later.own_votes_expired, 1);
+        // attention_items is 2 here, not 1 — `new_group` makes `me` the
+        // sole owner, so this also legitimately trips succession risk;
+        // that combination is exactly the point (independent signals sum
+        // correctly), not a bug in either one.
+        assert_eq!(summary_later.attention_items(), 2);
+    }
+
+    #[test]
+    fn network_health_summary_flags_a_block_report_against_a_trusted_peer_as_a_lower_bound() {
+        let (store, me) = store_with_self(1);
+        let trusted = user(2, 2);
+        let stranger = user(3, 3);
+        store.upsert_follow(&follow(trusted, 1.0, 1.0)).unwrap();
+        // A report against someone this router does NOT follow must not count.
+        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter: user(9, 1), sequence: 0, blocked_user: stranger, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        let summary = store.network_health_summary(1000).unwrap();
+        assert_eq!(summary.trusted_peers_with_block_reports, 0);
+
+        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter: user(9, 1), sequence: 1, blocked_user: trusted, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        // A second, independent report against the same trusted peer must
+        // not inflate the count — this counts *peers*, not *reports*.
+        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter: user(9, 2), sequence: 0, blocked_user: trusted, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        let summary = store.network_health_summary(1000).unwrap();
+        assert_eq!(summary.trusted_peers_with_block_reports, 1);
+        assert_eq!(summary.attention_items(), 1);
+        let _ = me;
+    }
+
+    #[test]
+    fn network_health_summary_reports_follow_coverage() {
+        let (store, _me) = store_with_self(1);
+        store.upsert_follow(&follow(user(2, 2), 1.0, 1.0)).unwrap();
+        store.upsert_follow(&LocalTrustRule { display_name: Some("alice".into()), ..follow(user(3, 3), 1.0, 1.0) }).unwrap();
+
+        let summary = store.network_health_summary(1000).unwrap();
+        assert_eq!(summary.follows_total, 2);
+        assert_eq!(summary.follows_with_display_name, 1, "coverage is informational only, never folded into attention_items");
+        assert_eq!(summary.attention_items(), 0);
+    }
+
     fn cast_vote(store: &StateStore, voter: UserId, sequence: u64, stance: Stance) {
         store
             .store_group_vote(&GroupVote {
@@ -4240,8 +4878,8 @@ mod tests {
         let alice = user(1, 1);
         let bob = user(1, 2);
         store.ingest_group(&new_group(alice, vec![alice, bob])).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: alice, sequence: 0, body: "hello".into(), issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: bob, sequence: 0, body: "hi back".into(), issued_at: 200, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: alice, sequence: 0, body: "hello".into(), in_reply_to: None, issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: bob, sequence: 0, body: "hi back".into(), in_reply_to: None, issued_at: 200, signature: SignatureBytes([0; 64]) }).unwrap();
 
         let got = store.list_party_line_messages(group_id()).unwrap();
         assert_eq!(got.len(), 2);
@@ -4250,13 +4888,37 @@ mod tests {
     }
 
     #[test]
+    fn party_line_message_in_reply_to_round_trips() {
+        let store = StateStore::open_in_memory().unwrap();
+        let owner = user(1, 1);
+        store.ingest_group(&new_group(owner, vec![owner])).unwrap();
+        store
+            .store_party_line_message(&PartyLineMessage {
+                group_id: group_id(),
+                author: owner,
+                sequence: 0,
+                body: "this is our CDN, not malware".into(),
+                in_reply_to: Some(target()),
+                issued_at: 100,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: owner, sequence: 1, body: "plain message".into(), in_reply_to: None, issued_at: 200, signature: SignatureBytes([0; 64]) }).unwrap();
+
+        let got = store.list_party_line_messages(group_id()).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].in_reply_to, Some(target()), "a reply target must round-trip exactly");
+        assert_eq!(got[1].in_reply_to, None, "a plain message must round-trip with no reply target");
+    }
+
+    #[test]
     fn list_party_line_messages_filters_out_a_non_member() {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         let stranger = user(1, 9);
         store.ingest_group(&new_group(owner, vec![owner])).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: owner, sequence: 0, body: "welcome".into(), issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: stranger, sequence: 0, body: "spam".into(), issued_at: 200, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: owner, sequence: 0, body: "welcome".into(), in_reply_to: None, issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: stranger, sequence: 0, body: "spam".into(), in_reply_to: None, issued_at: 200, signature: SignatureBytes([0; 64]) }).unwrap();
 
         let got = store.list_party_line_messages(group_id()).unwrap();
         assert_eq!(got.len(), 1, "a non-member's message must never surface, even though storage itself is ungated");
@@ -4269,7 +4931,7 @@ mod tests {
         let owner = user(1, 1);
         let member = user(1, 2);
         store.ingest_group(&new_group(owner, vec![owner, member])).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: member, sequence: 0, body: "hi".into(), issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: member, sequence: 0, body: "hi".into(), in_reply_to: None, issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
         assert_eq!(store.list_party_line_messages(group_id()).unwrap().len(), 1, "unmoderated: any current member may post");
 
         let mut moderated = new_group(owner, vec![owner, member]);
@@ -4290,7 +4952,7 @@ mod tests {
         moderated.party_line_moderated = true;
         moderated.voiced_members = vec![member];
         store.ingest_group(&moderated).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: member, sequence: 0, body: "hi".into(), issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
+        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: member, sequence: 0, body: "hi".into(), in_reply_to: None, issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
 
         assert_eq!(store.list_party_line_messages(group_id()).unwrap().len(), 1, "an explicitly voiced member must be able to post while moderated");
     }

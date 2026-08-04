@@ -185,6 +185,14 @@ pub struct TunnelConnectionAccept {
     pub provider: UserId,
     pub request_ref: StatementRef,
     pub assigned_tunnel_ip: String,
+    /// A tunnel-internal IPv6 address, alongside the (required) IPv4 one
+    /// — every social-firewall-provisioned WireGuard tunnel is dual-stack
+    /// capable, so this is assigned unconditionally by
+    /// `accept-tunnel-request`, never left unset for a new tunnel.
+    /// `Option` only to let a pre-IPv6-support `TunnelConnectionAccept`
+    /// (signed before this field existed) still deserialize; there's no
+    /// case where a *newly* accepted tunnel should omit it.
+    pub assigned_tunnel_ip6: Option<String>,
     pub accepted_at: Timestamp,
     pub signature: SignatureBytes,
 }
@@ -195,6 +203,7 @@ impl TunnelConnectionAccept {
         self.provider.canonical_encode(&mut out);
         self.request_ref.canonical_encode(&mut out);
         self.assigned_tunnel_ip.canonical_encode(&mut out);
+        self.assigned_tunnel_ip6.canonical_encode(&mut out);
         self.accepted_at.canonical_encode(&mut out);
         out
     }
@@ -354,9 +363,29 @@ mod tests {
             provider: user(1),
             request_ref: StatementRef { author: user(2), sequence: 0 },
             assigned_tunnel_ip: "10.99.0.4".into(),
+            assigned_tunnel_ip6: Some("fd99::c8:4".into()),
             accepted_at: 300,
             signature: SignatureBytes([9; 64]),
         };
         assert!(!accept.signing_bytes().windows(64).any(|w| w == [9u8; 64]));
+    }
+
+    #[test]
+    fn connection_accept_signing_bytes_change_with_ipv6_assignment() {
+        fn sample(ip6: Option<&str>) -> TunnelConnectionAccept {
+            TunnelConnectionAccept {
+                provider: user(1),
+                request_ref: StatementRef { author: user(2), sequence: 0 },
+                assigned_tunnel_ip: "10.99.0.4".into(),
+                assigned_tunnel_ip6: ip6.map(String::from),
+                accepted_at: 300,
+                signature: SignatureBytes([0; 64]),
+            }
+        }
+        let no_v6 = sample(None);
+        let with_v6 = sample(Some("fd99::c8:4"));
+        let different_v6 = sample(Some("fd99::c8:5"));
+        assert_ne!(no_v6.signing_bytes(), with_v6.signing_bytes());
+        assert_ne!(with_v6.signing_bytes(), different_v6.signing_bytes());
     }
 }
