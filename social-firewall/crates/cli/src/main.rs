@@ -975,6 +975,7 @@ fn add_follow(
         excluded: exclude,
         category_filter: None,
         display_name: name,
+        iroh_node_id: None,
         expires_at: None,
         created_at: now_unix(),
     };
@@ -1378,7 +1379,7 @@ mod apply_all_tests {
     fn apply_records_contributors_for_a_trust_weighted_enforced_target() {
         let store = store();
         let alice = UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([2; 32]) };
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         store
             .ingest_opinion(&PolicyOpinion {
                 author: alice,
@@ -1423,7 +1424,7 @@ mod apply_all_tests {
     fn apply_dry_run_never_touches_the_contributor_snapshot() {
         let store = store();
         let alice = UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([2; 32]) };
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         store
             .ingest_opinion(&PolicyOpinion {
                 author: alice,
@@ -1450,7 +1451,7 @@ mod apply_all_tests {
         let store = store();
         let alice = UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([2; 32]) };
         let bob = UserId { federation: FederationId(Hash32([3; 32])), local_id: Hash32([4; 32]) };
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         store
             .ingest_opinion(&PolicyOpinion {
                 author: alice,
@@ -1473,7 +1474,7 @@ mod apply_all_tests {
         // compiled nft digest is unchanged and `apply` reports `NoChange`
         // — but the set of *who* justified it has grown, and that must
         // still be reflected.
-        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         store
             .ingest_opinion(&PolicyOpinion {
                 author: bob,

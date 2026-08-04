@@ -370,6 +370,7 @@ mod tests {
             excluded: false,
             category_filter: None,
             display_name: None,
+            iroh_node_id: None,
             expires_at: None,
             created_at: 0,
         }

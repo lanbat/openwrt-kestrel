@@ -35,6 +35,12 @@ pub struct LocalTrustRule {
     /// view* by a partial unique index in `state-store` — see
     /// `0006_follow_display_names.sql`.
     pub display_name: Option<String>,
+    /// This peer's Iroh node id (see `p2p-transport::IrohTransport::node_id`),
+    /// if known — set only via an explicit operator action, same
+    /// trust-on-first-use posture as `display_name`. `None` means
+    /// automated delivery to this peer isn't possible yet; the existing
+    /// manual export/ingest path is unaffected either way.
+    pub iroh_node_id: Option<String>,
     pub expires_at: Option<Timestamp>,
     pub created_at: Timestamp,
 }
@@ -163,6 +169,7 @@ mod tests {
             excluded: true,
             category_filter: None,
             display_name: None,
+            iroh_node_id: None,
             expires_at: None,
             created_at: 0,
         };
@@ -179,6 +186,7 @@ mod tests {
             excluded: false,
             category_filter: None,
             display_name: None,
+            iroh_node_id: None,
             expires_at: None,
             created_at: 0,
         };

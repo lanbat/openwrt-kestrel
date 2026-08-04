@@ -50,6 +50,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (17, include_str!("../migrations/0017_tunnel_transfer_totals.sql")),
     (18, include_str!("../migrations/0018_tunnel_reciprocity.sql")),
     (19, include_str!("../migrations/0019_party_line_reply_target.sql")),
+    (20, include_str!("../migrations/0020_iroh_addressing.sql")),
 ];
 
 #[derive(thiserror::Error, Debug)]
@@ -233,8 +234,8 @@ impl StateStore {
 
     pub fn upsert_follow(&self, rule: &LocalTrustRule) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO follows (federation_id, local_id, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, expires_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO follows (federation_id, local_id, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, iroh_node_id, expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(federation_id, local_id) DO UPDATE SET
                 allow_weight = excluded.allow_weight,
                 deny_weight = excluded.deny_weight,
@@ -242,6 +243,7 @@ impl StateStore {
                 excluded = excluded.excluded,
                 category_filter = excluded.category_filter,
                 display_name = excluded.display_name,
+                iroh_node_id = excluded.iroh_node_id,
                 expires_at = excluded.expires_at",
             params![
                 rule.user.federation.0 .0.as_slice(),
@@ -252,6 +254,7 @@ impl StateStore {
                 rule.excluded,
                 rule.category_filter,
                 rule.display_name,
+                rule.iroh_node_id,
                 rule.expires_at,
                 rule.created_at,
             ],
@@ -275,7 +278,7 @@ impl StateStore {
     pub fn get_follow(&self, user: &UserId) -> Result<Option<LocalTrustRule>, StoreError> {
         self.conn
             .query_row(
-                "SELECT allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, expires_at, created_at
+                "SELECT allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, iroh_node_id, expires_at, created_at
                  FROM follows WHERE federation_id = ?1 AND local_id = ?2",
                 params![user.federation.0 .0.as_slice(), user.local_id.0.as_slice()],
                 |row| row_to_trust_rule(row, *user),
@@ -286,7 +289,7 @@ impl StateStore {
 
     pub fn list_follows(&self) -> Result<Vec<LocalTrustRule>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT federation_id, local_id, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, expires_at, created_at FROM follows",
+            "SELECT federation_id, local_id, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, iroh_node_id, expires_at, created_at FROM follows",
         )?;
         let rows = stmt.query_map([], |row| {
             let fed: Vec<u8> = row.get(0)?;
@@ -300,15 +303,16 @@ impl StateStore {
                 row.get::<_, bool>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<i64>>(8)?,
-                row.get::<_, i64>(9)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, i64>(10)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, expires_at, created_at) = r?;
+            let (fed, local, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, iroh_node_id, expires_at, created_at) = r?;
             let user = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
-            out.push(LocalTrustRule { user, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, expires_at, created_at });
+            out.push(LocalTrustRule { user, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, iroh_node_id, expires_at, created_at });
         }
         Ok(out)
     }
@@ -709,6 +713,26 @@ impl StateStore {
     pub fn get_wg_keypair_seed(&self) -> Result<Option<[u8; 32]>, StoreError> {
         self.conn
             .query_row("SELECT wg_secret_seed FROM users WHERE is_self = 1", [], |row| row.get::<_, Option<Vec<u8>>>(0))
+            .optional()?
+            .flatten()
+            .map(|v| bytes_to_32(&v))
+            .transpose()
+    }
+
+    /// This router's own Iroh keypair seed — see
+    /// `0020_iroh_addressing.sql`'s own doc on why this is a fourth,
+    /// dedicated key rather than reusing an existing one.
+    pub fn set_iroh_keypair_seed(&self, seed: &[u8; 32]) -> Result<(), StoreError> {
+        let rows = self.conn.execute("UPDATE users SET iroh_secret_seed = ?1 WHERE is_self = 1", params![seed.as_slice()])?;
+        if rows == 0 {
+            return Err(StoreError::NoSelfIdentity);
+        }
+        Ok(())
+    }
+
+    pub fn get_iroh_keypair_seed(&self) -> Result<Option<[u8; 32]>, StoreError> {
+        self.conn
+            .query_row("SELECT iroh_secret_seed FROM users WHERE is_self = 1", [], |row| row.get::<_, Option<Vec<u8>>>(0))
             .optional()?
             .flatten()
             .map(|v| bytes_to_32(&v))
@@ -3138,8 +3162,9 @@ fn row_to_trust_rule(row: &rusqlite::Row, user: UserId) -> rusqlite::Result<Loca
         excluded: row.get(3)?,
         category_filter: row.get(4)?,
         display_name: row.get(5)?,
-        expires_at: row.get(6)?,
-        created_at: row.get(7)?,
+        iroh_node_id: row.get(6)?,
+        expires_at: row.get(7)?,
+        created_at: row.get(8)?,
     })
 }
 
@@ -3355,15 +3380,15 @@ mod tests {
     fn follow_upsert_updates_weights_in_place() {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.5, deny_weight: 0.5, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.9, deny_weight: 0.1, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.5, deny_weight: 0.5, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.9, deny_weight: 0.1, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         let got = store.get_follow(&alice).unwrap().unwrap();
         assert_eq!(got.allow_weight, 0.9);
         assert_eq!(store.list_follows().unwrap().len(), 1);
     }
 
     fn named_follow(u: UserId, name: &str) -> LocalTrustRule {
-        LocalTrustRule { user: u, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: Some(name.to_string()), expires_at: None, created_at: 0 }
+        LocalTrustRule { user: u, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: Some(name.to_string()), iroh_node_id: None, expires_at: None, created_at: 0 }
     }
 
     #[test]
@@ -3441,8 +3466,8 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         let bob = user(1, 2);
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
-        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         assert_eq!(store.list_follows().unwrap().len(), 2);
     }
 
@@ -3497,7 +3522,7 @@ mod tests {
     fn followed_opinion_carries_trust_rule_when_present() {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.2, deny_weight: 0.8, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.2, deny_weight: 0.8, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         let opinion = PolicyOpinion { author: alice, sequence: 1, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, supersedes: None, signature: SignatureBytes([1; 64]) };
         store.ingest_opinion(&opinion).unwrap();
         let got = store.list_followed_opinions_for(&target()).unwrap();
@@ -3549,7 +3574,7 @@ mod tests {
 
         let list_target = TargetSelector::Domain("list-only.example".into());
         let bob = user(1, 3);
-        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         store
             .ingest_shared_rule_list(&SharedRuleList {
                 author: bob,
@@ -3645,7 +3670,7 @@ mod tests {
     fn ingest_tunnel_advertisement_round_trips_including_route_scope() {
         let store = StateStore::open_in_memory().unwrap();
         let provider = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: provider, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: provider, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
 
         let ad = advertisement(provider);
         store.ingest_tunnel_advertisement(&ad).unwrap();
@@ -3671,7 +3696,7 @@ mod tests {
     fn ingest_tunnel_advertisement_is_idempotent_on_the_same_sequence() {
         let store = StateStore::open_in_memory().unwrap();
         let provider = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: provider, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: provider, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         let ad = advertisement(provider);
         store.ingest_tunnel_advertisement(&ad).unwrap();
         store.ingest_tunnel_advertisement(&ad).unwrap();
@@ -3684,7 +3709,7 @@ mod tests {
         let alice = user(1, 1);
         let bob = user(1, 2);
         for u in [alice, bob] {
-            store.upsert_follow(&LocalTrustRule { user: u, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+            store.upsert_follow(&LocalTrustRule { user: u, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
             store.ingest_tunnel_advertisement(&advertisement(u)).unwrap();
         }
         assert_eq!(store.list_tunnel_advertisements().unwrap().len(), 2);
@@ -3711,7 +3736,7 @@ mod tests {
     fn ingest_tunnel_service_request_round_trips() {
         let store = StateStore::open_in_memory().unwrap();
         let requester = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: requester, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: requester, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         let req = TunnelServiceRequest {
             requester,
             sequence: 0,
@@ -3908,6 +3933,31 @@ mod tests {
     }
 
     #[test]
+    fn iroh_keypair_seed_round_trips() {
+        let store = StateStore::open_in_memory().unwrap();
+        store.set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None).unwrap();
+        assert_eq!(store.get_iroh_keypair_seed().unwrap(), None);
+        store.set_iroh_keypair_seed(&[8; 32]).unwrap();
+        assert_eq!(store.get_iroh_keypair_seed().unwrap(), Some([8; 32]));
+    }
+
+    #[test]
+    fn set_iroh_keypair_seed_fails_loudly_with_no_self_identity_yet() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert!(matches!(store.set_iroh_keypair_seed(&[8; 32]), Err(StoreError::NoSelfIdentity)));
+    }
+
+    #[test]
+    fn follow_iroh_node_id_round_trips() {
+        let store = StateStore::open_in_memory().unwrap();
+        let alice = user(1, 1);
+        let mut rule = follow(alice, 1.0, 1.0);
+        rule.iroh_node_id = Some("deadbeef".repeat(8));
+        store.upsert_follow(&rule).unwrap();
+        assert_eq!(store.get_follow(&alice).unwrap().unwrap().iroh_node_id.as_deref(), Some(rule.iroh_node_id.unwrap().as_str()));
+    }
+
+    #[test]
     fn provisioned_tunnel_round_trips_including_selected_targets() {
         let store = StateStore::open_in_memory().unwrap();
         let peer = user(1, 1);
@@ -3996,7 +4046,7 @@ mod tests {
     fn tunnel_sequence_counters_start_at_zero_and_increment_after_ingest() {
         let store = StateStore::open_in_memory().unwrap();
         let me = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: me, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: me, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
 
         assert_eq!(store.next_tunnel_advertisement_sequence(&me).unwrap(), 0);
         store.ingest_tunnel_advertisement(&advertisement(me)).unwrap();
@@ -4050,7 +4100,7 @@ mod tests {
     fn shared_rule_list_round_trips_including_entries_and_categories() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
 
         let list = shared_list(author, 0, vec!["privacy", "ads"], vec![sample_entry()]);
         store.ingest_shared_rule_list(&list).unwrap();
@@ -4067,7 +4117,7 @@ mod tests {
     fn list_shared_rule_lists_returns_every_known_one() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![sample_entry()])).unwrap();
         assert_eq!(store.list_shared_rule_lists().unwrap().len(), 1);
     }
@@ -4076,7 +4126,7 @@ mod tests {
     fn list_entries_for_finds_entries_and_pairs_with_categories_and_trust() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 2.0, deny_weight: 3.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 2.0, deny_weight: 3.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy", "ads"], vec![sample_entry()])).unwrap();
 
         let got = store.list_entries_for(&target(), 0).unwrap();
@@ -4094,7 +4144,7 @@ mod tests {
     fn list_entries_for_is_empty_for_an_unrelated_target() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![sample_entry()])).unwrap();
 
         assert!(store.list_entries_for(&TargetSelector::Domain("unrelated.example".into()), 0).unwrap().is_empty());
@@ -4104,7 +4154,7 @@ mod tests {
     fn list_entries_for_excludes_entries_from_an_expired_list() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
         let mut list = shared_list(author, 0, vec!["privacy"], vec![sample_entry()]);
         list.expires_at = Some(100);
         store.ingest_shared_rule_list(&list).unwrap();
@@ -4118,7 +4168,7 @@ mod tests {
     fn ingesting_a_new_version_replaces_the_old_versions_entries_not_merges_with_them() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
 
         let v1_entry = SharedRuleEntry { target: TargetSelector::Domain("v1-only.example".into()), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] } };
         store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![v1_entry.clone()])).unwrap();
@@ -4140,7 +4190,7 @@ mod tests {
     fn shared_rule_list_sequence_starts_at_zero_and_increments_after_ingest() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }).unwrap();
+        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
 
         assert_eq!(store.next_shared_rule_list_sequence(&author).unwrap(), 0);
         store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![sample_entry()])).unwrap();
@@ -4972,7 +5022,7 @@ mod tests {
         }
     }
     fn follow(user: UserId, allow_weight: f64, deny_weight: f64) -> LocalTrustRule {
-        LocalTrustRule { user, allow_weight, deny_weight, advisory_only: false, excluded: false, category_filter: None, display_name: None, expires_at: None, created_at: 0 }
+        LocalTrustRule { user, allow_weight, deny_weight, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }
     }
 
     #[test]
