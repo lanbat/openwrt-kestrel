@@ -7,8 +7,10 @@
 
 mod envelope;
 mod fake_transport;
+mod iroh_transport;
 mod transport;
 
 pub use envelope::{Envelope, EnvelopeError, StatementKind};
 pub use fake_transport::FakeTransport;
+pub use iroh_transport::IrohTransport;
 pub use transport::{PeerTransport, TransportError};
