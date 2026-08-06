@@ -21,8 +21,8 @@ use crate::{now_unix, parse_hash32, parse_target, target_value_str};
 use anyhow::{bail, Context, Result};
 use domain_types::{
     MessagingPublicKeyBytes, PublicKeyBytes, StatementRef, TargetSelector, TunnelAdvertisement,
-    TunnelConnectionAccept, TunnelConnectionRequest, TunnelServiceRequest, TunnelTrustRule,
-    UserId, Visibility, WgPublicKeyBytes,
+    TunnelConnectionAccept, TunnelConnectionRequest, TunnelServiceRequest, TunnelTrustRule, UserId,
+    Visibility, WgPublicKeyBytes,
 };
 use p2p_transport::PeerTransport;
 use state_store::StateStore;
@@ -54,27 +54,49 @@ pub(crate) fn own_messaging_keypair(store: &StateStore) -> Result<crypto::Messag
 
 /// Writes `plaintext` (already-serialized JSON bytes) to `path` — sealed
 /// to `recipient` if given, plain otherwise.
-pub(crate) fn write_maybe_sealed(plaintext: &[u8], recipient: Option<&MessagingPublicKeyBytes>, path: &Path) -> Result<()> {
-    match recipient {
-        None => {
-            std::fs::write(path, plaintext).with_context(|| format!("writing {}", path.display()))?;
-        }
-        Some(pk) => {
-            let sealed = crypto::seal(pk, plaintext).map_err(|e| anyhow::anyhow!("sealing failed: {e}"))?;
-            let envelope = serde_json::json!({ "sealed": true, "ciphertext_hex": hex::encode(sealed) });
-            std::fs::write(path, serde_json::to_string_pretty(&envelope)?).with_context(|| format!("writing {}", path.display()))?;
-        }
-    }
+pub(crate) fn write_maybe_sealed(
+    plaintext: &[u8],
+    recipient: Option<&MessagingPublicKeyBytes>,
+    path: &Path,
+) -> Result<()> {
+    std::fs::write(path, maybe_sealed_bytes(plaintext, recipient)?)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
-pub(crate) fn parse_maybe_sealed_bytes(store: &StateStore, bytes: &[u8]) -> Result<serde_json::Value> {
+pub(crate) fn maybe_sealed_bytes(
+    plaintext: &[u8],
+    recipient: Option<&MessagingPublicKeyBytes>,
+) -> Result<Vec<u8>> {
+    match recipient {
+        None => Ok(plaintext.to_vec()),
+        Some(pk) => {
+            let sealed =
+                crypto::seal(pk, plaintext).map_err(|e| anyhow::anyhow!("sealing failed: {e}"))?;
+            let envelope =
+                serde_json::json!({ "sealed": true, "ciphertext_hex": hex::encode(sealed) });
+            Ok(serde_json::to_vec_pretty(&envelope)?)
+        }
+    }
+}
+
+pub(crate) fn parse_maybe_sealed_bytes(
+    store: &StateStore,
+    bytes: &[u8],
+) -> Result<serde_json::Value> {
     let json: serde_json::Value = serde_json::from_slice(bytes)?;
     if json.get("sealed").and_then(|v| v.as_bool()) == Some(true) {
-        let ciphertext_hex = json.get("ciphertext_hex").and_then(|v| v.as_str()).context("missing `ciphertext_hex`")?;
+        let ciphertext_hex = json
+            .get("ciphertext_hex")
+            .and_then(|v| v.as_str())
+            .context("missing `ciphertext_hex`")?;
         let ciphertext = hex::decode(ciphertext_hex)?;
         let kp = own_messaging_keypair(store)?;
-        let plaintext = kp.unseal(&ciphertext).map_err(|_| anyhow::anyhow!("unsealing failed — not addressed to this router, or the file was tampered with"))?;
+        let plaintext = kp.unseal(&ciphertext).map_err(|_| {
+            anyhow::anyhow!(
+                "unsealing failed — not addressed to this router, or the file was tampered with"
+            )
+        })?;
         Ok(serde_json::from_slice(&plaintext)?)
     } else {
         Ok(json)
@@ -108,27 +130,69 @@ pub(crate) enum DeliveryOutcome {
 /// run, not a hot path); reusing a single long-lived endpoint across
 /// sends is a reasonable future optimization once this is proven, not
 /// built now.
-pub(crate) fn try_deliver(store: &StateStore, recipient: &UserId, kind: p2p_transport::StatementKind, payload: &[u8]) -> DeliveryOutcome {
-    let Ok(Some(rule)) = store.get_follow(recipient) else { return DeliveryOutcome::NoKnownAddress };
-    let Some(node_id) = rule.iroh_node_id else { return DeliveryOutcome::NoKnownAddress };
+pub(crate) fn try_deliver(
+    store: &StateStore,
+    recipient: &UserId,
+    kind: p2p_transport::StatementKind,
+    payload: &[u8],
+) -> DeliveryOutcome {
+    let Ok(Some(rule)) = store.get_follow(recipient) else {
+        return DeliveryOutcome::NoKnownAddress;
+    };
+    let Some(node_id) = rule.iroh_node_id else {
+        return DeliveryOutcome::NoKnownAddress;
+    };
     let seed = match store.get_iroh_keypair_seed() {
         Ok(Some(seed)) => seed,
         // Distinct from the error case below: this one is a normal
         // "you haven't set this up yet" with an obvious fix, not a
         // malfunction. Collapsing the two would have reported a corrupt
         // or unreadable database as a missing keypair.
-        Ok(None) => return DeliveryOutcome::Failed("no local Iroh keypair yet — run `sf listen` once to generate one".to_string()),
-        Err(e) => return DeliveryOutcome::Failed(format!("could not read the local Iroh keypair from the store: {e}")),
+        Ok(None) => {
+            return DeliveryOutcome::Failed(
+                "no local Iroh keypair yet — run `sf listen` once to generate one".to_string(),
+            )
+        }
+        Err(e) => {
+            return DeliveryOutcome::Failed(format!(
+                "could not read the local Iroh keypair from the store: {e}"
+            ))
+        }
     };
     let transport = match p2p_transport::IrohTransport::new(seed, b"social-firewall/1") {
         Ok(t) => t,
         Err(e) => return DeliveryOutcome::Failed(e.to_string()),
     };
-    let envelope = p2p_transport::Envelope { kind, payload: payload.to_vec() };
+    let envelope = p2p_transport::Envelope {
+        kind,
+        payload: payload.to_vec(),
+    };
     match transport.send(&node_id, &envelope) {
         Ok(()) => DeliveryOutcome::Delivered,
         Err(e) => DeliveryOutcome::Failed(e.to_string()),
     }
+}
+
+pub(crate) fn deliver_to_node(
+    store: &StateStore,
+    node_id: &str,
+    kind: p2p_transport::StatementKind,
+    payload: &[u8],
+) -> Result<()> {
+    let seed = store
+        .get_iroh_keypair_seed()?
+        .context("no local Iroh keypair yet — run `sf listen` once")?;
+    let transport = p2p_transport::IrohTransport::new(seed, b"social-firewall/1")
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    transport
+        .send(
+            node_id,
+            &p2p_transport::Envelope {
+                kind,
+                payload: payload.to_vec(),
+            },
+        )
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 /// Reports a `try_deliver` outcome to the operator and answers the one
@@ -154,11 +218,17 @@ pub(crate) fn needs_file_fallback(outcome: DeliveryOutcome, peer: &UserId) -> bo
             false
         }
         DeliveryOutcome::NoKnownAddress => {
-            println!("no Iroh node_id on record for {} — falling back to file export", user_id_str(peer));
+            println!(
+                "no Iroh node_id on record for {} — falling back to file export",
+                user_id_str(peer)
+            );
             true
         }
         DeliveryOutcome::Failed(msg) => {
-            eprintln!("delivery to {}'s node failed: {msg} — falling back to file export", user_id_str(peer));
+            eprintln!(
+                "delivery to {}'s node failed: {msg} — falling back to file export",
+                user_id_str(peer)
+            );
             true
         }
     }
@@ -169,21 +239,38 @@ pub(crate) fn user_id_str(u: &UserId) -> String {
 }
 
 pub(crate) fn parse_user_ref(s: &str) -> Result<UserId> {
-    let (fed, local) = s.split_once('/').with_context(|| format!("expected <federation>/<local-id>, got `{s}`"))?;
-    Ok(UserId { federation: domain_types::FederationId(parse_hash32(fed)?), local_id: parse_hash32(local)? })
+    let (fed, local) = s
+        .split_once('/')
+        .with_context(|| format!("expected <federation>/<local-id>, got `{s}`"))?;
+    Ok(UserId {
+        federation: domain_types::FederationId(parse_hash32(fed)?),
+        local_id: parse_hash32(local)?,
+    })
 }
 
 fn parse_statement_ref(s: &str) -> Result<StatementRef> {
     let parts: Vec<&str> = s.splitn(3, '/').collect();
-    let [fed, local, seq] = parts.as_slice() else { bail!("expected <federation>/<local-id>/<sequence>, got `{s}`") };
+    let [fed, local, seq] = parts.as_slice() else {
+        bail!("expected <federation>/<local-id>/<sequence>, got `{s}`")
+    };
     Ok(StatementRef {
-        author: UserId { federation: domain_types::FederationId(parse_hash32(fed)?), local_id: parse_hash32(local)? },
-        sequence: seq.parse().with_context(|| format!("`{seq}` is not a valid sequence number"))?,
+        author: UserId {
+            federation: domain_types::FederationId(parse_hash32(fed)?),
+            local_id: parse_hash32(local)?,
+        },
+        sequence: seq
+            .parse()
+            .with_context(|| format!("`{seq}` is not a valid sequence number"))?,
     })
 }
 
 fn targets_to_json(targets: &[TargetSelector]) -> serde_json::Value {
-    serde_json::Value::Array(targets.iter().map(|t| serde_json::json!({ "kind": t.kind_str(), "value": target_value_str(t) })).collect())
+    serde_json::Value::Array(
+        targets
+            .iter()
+            .map(|t| serde_json::json!({ "kind": t.kind_str(), "value": target_value_str(t) }))
+            .collect(),
+    )
 }
 
 fn targets_from_json(json: &serde_json::Value) -> Result<Vec<TargetSelector>> {
@@ -191,8 +278,14 @@ fn targets_from_json(json: &serde_json::Value) -> Result<Vec<TargetSelector>> {
         .context("expected an array of targets")?
         .iter()
         .map(|t| {
-            let kind = t.get("kind").and_then(|v| v.as_str()).context("missing target `kind`")?;
-            let value = t.get("value").and_then(|v| v.as_str()).context("missing target `value`")?;
+            let kind = t
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .context("missing target `kind`")?;
+            let value = t
+                .get("value")
+                .and_then(|v| v.as_str())
+                .context("missing target `value`")?;
             parse_target(kind, value)
         })
         .collect()
@@ -200,7 +293,10 @@ fn targets_from_json(json: &serde_json::Value) -> Result<Vec<TargetSelector>> {
 
 // ── TunnelAdvertisement ──────────────────────────────────────────────────
 
-fn advertisement_to_json(ad: &TunnelAdvertisement, identity_pubkey: &PublicKeyBytes) -> serde_json::Value {
+fn advertisement_to_json(
+    ad: &TunnelAdvertisement,
+    identity_pubkey: &PublicKeyBytes,
+) -> serde_json::Value {
     serde_json::json!({
         "provider": user_id_str(&ad.provider),
         "sequence": ad.sequence,
@@ -223,8 +319,14 @@ fn advertisement_to_json(ad: &TunnelAdvertisement, identity_pubkey: &PublicKeyBy
     })
 }
 
-fn advertisement_from_json(json: &serde_json::Value) -> Result<(TunnelAdvertisement, PublicKeyBytes)> {
-    let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
+fn advertisement_from_json(
+    json: &serde_json::Value,
+) -> Result<(TunnelAdvertisement, PublicKeyBytes)> {
+    let get_str = |key: &str| -> Result<&str> {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("missing `{key}`"))
+    };
     let provider = parse_user_ref(get_str("provider")?)?;
     let in_response_to = match json.get("in_response_to").and_then(|v| v.as_str()) {
         Some(s) => Some(parse_statement_ref(s)?),
@@ -233,19 +335,39 @@ fn advertisement_from_json(json: &serde_json::Value) -> Result<(TunnelAdvertisem
     let identity_pubkey = PublicKeyBytes(bytes32(get_str("identity_pubkey")?)?);
     let ad = TunnelAdvertisement {
         provider,
-        sequence: json.get("sequence").and_then(|v| v.as_u64()).context("missing `sequence`")?,
+        sequence: json
+            .get("sequence")
+            .and_then(|v| v.as_u64())
+            .context("missing `sequence`")?,
         description: get_str("description")?.to_string(),
-        limitations: json.get("limitations").and_then(|v| v.as_str()).map(String::from),
+        limitations: json
+            .get("limitations")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         visibility: parse_visibility(get_str("visibility")?)?,
         in_response_to,
         messaging_pubkey: MessagingPublicKeyBytes(bytes32(get_str("messaging_pubkey")?)?),
         wg_pubkey: WgPublicKeyBytes(bytes32(get_str("wg_pubkey")?)?),
         endpoint_hint: get_str("endpoint_hint")?.to_string(),
         route_scope: targets_from_json(json.get("route_scope").context("missing `route_scope`")?)?,
-        tags: json.get("tags").and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default(),
-        max_connections: json.get("max_connections").and_then(|v| v.as_u64()).map(|v| v as u32),
+        tags: json
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        max_connections: json
+            .get("max_connections")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
         max_bandwidth_kbps: json.get("max_bandwidth_kbps").and_then(|v| v.as_u64()),
-        issued_at: json.get("issued_at").and_then(|v| v.as_i64()).context("missing `issued_at`")?,
+        issued_at: json
+            .get("issued_at")
+            .and_then(|v| v.as_i64())
+            .context("missing `issued_at`")?,
         expires_at: json.get("expires_at").and_then(|v| v.as_i64()),
         supersedes: json.get("supersedes").and_then(|v| v.as_u64()),
         signature: domain_types::SignatureBytes(bytes64(get_str("signature")?)?),
@@ -255,10 +377,14 @@ fn advertisement_from_json(json: &serde_json::Value) -> Result<(TunnelAdvertisem
 }
 
 pub(crate) fn bytes32(hex_str: &str) -> Result<[u8; 32]> {
-    hex::decode(hex_str)?.try_into().map_err(|_| anyhow::anyhow!("expected 32 bytes"))
+    hex::decode(hex_str)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("expected 32 bytes"))
 }
 pub(crate) fn bytes64(hex_str: &str) -> Result<[u8; 64]> {
-    hex::decode(hex_str)?.try_into().map_err(|_| anyhow::anyhow!("expected 64 bytes"))
+    hex::decode(hex_str)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("expected 64 bytes"))
 }
 
 // ── subcommands ──────────────────────────────────────────────────────────
@@ -286,9 +412,24 @@ pub fn offer_tunnel(
         bail!("--recipient has no effect with --visibility public — it would be silently ignored");
     }
 
-    let route_scope: Vec<TargetSelector> = targets.iter().map(|(k, v)| parse_target(k, v)).collect::<Result<_>>()?;
-    let in_response_to = in_response_to.map(|s| parse_statement_ref(&s)).transpose()?;
-    let (ad, identity_pubkey) = build_and_store_own_advertisement(store, description, limitation, route_scope, tags, max_connections, max_bandwidth_kbps, visibility, in_response_to)?;
+    let route_scope: Vec<TargetSelector> = targets
+        .iter()
+        .map(|(k, v)| parse_target(k, v))
+        .collect::<Result<_>>()?;
+    let in_response_to = in_response_to
+        .map(|s| parse_statement_ref(&s))
+        .transpose()?;
+    let (ad, identity_pubkey) = build_and_store_own_advertisement(
+        store,
+        description,
+        limitation,
+        route_scope,
+        tags,
+        max_connections,
+        max_bandwidth_kbps,
+        visibility,
+        in_response_to,
+    )?;
     let sequence = ad.sequence;
     println!("published tunnel advertisement #{sequence}: {description}");
 
@@ -314,8 +455,19 @@ pub fn offer_tunnel(
                 bail_if_recipient_pubkey_unknown(store, &recipient_user)?;
                 let recipient_pubkey = recipient_messaging_pubkey(store, &recipient_user)?;
                 let path = dir.join(format!("{}.json", r.replace('/', "_")));
-                write_maybe_sealed(&plaintext, Some(&recipient_pubkey), &path)?;
-                println!("exported (sealed) to {}", path.display());
+                let payload = maybe_sealed_bytes(&plaintext, Some(&recipient_pubkey))?;
+                if needs_file_fallback(
+                    try_deliver(
+                        store,
+                        &recipient_user,
+                        p2p_transport::StatementKind::RestrictedTunnelAdvertisement,
+                        &payload,
+                    ),
+                    &recipient_user,
+                ) {
+                    write_maybe_sealed(&plaintext, Some(&recipient_pubkey), &path)?;
+                    println!("exported (sealed) to {}", path.display());
+                }
             }
         }
     }
@@ -331,7 +483,10 @@ fn bail_if_recipient_pubkey_unknown(store: &StateStore, recipient: &UserId) -> R
     recipient_messaging_pubkey(store, recipient).map(|_| ())
 }
 
-pub(crate) fn recipient_messaging_pubkey(store: &StateStore, recipient: &UserId) -> Result<MessagingPublicKeyBytes> {
+pub(crate) fn recipient_messaging_pubkey(
+    store: &StateStore,
+    recipient: &UserId,
+) -> Result<MessagingPublicKeyBytes> {
     for ad in store.list_tunnel_advertisements()? {
         if ad.provider == *recipient {
             return Ok(ad.messaging_pubkey);
@@ -347,7 +502,10 @@ pub(crate) fn recipient_messaging_pubkey(store: &StateStore, recipient: &UserId)
             continue;
         }
     }
-    bail!("no known messaging pubkey for {} — ingest something signed by them first", user_id_str(recipient))
+    bail!(
+        "no known messaging pubkey for {} — ingest something signed by them first",
+        user_id_str(recipient)
+    )
 }
 
 pub(crate) fn self_identity(store: &StateStore) -> Result<(UserId, [u8; 32])> {
@@ -416,12 +574,29 @@ fn build_and_store_own_advertisement(
 }
 
 pub fn ingest_tunnel_advertisement(store: &StateStore, file: &Path) -> Result<()> {
-    let json = read_maybe_sealed(store, file)?;
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    ingest_tunnel_advertisement_bytes(store, &bytes)
+}
+
+pub(crate) fn ingest_tunnel_advertisement_bytes(store: &StateStore, bytes: &[u8]) -> Result<()> {
+    let json = parse_maybe_sealed_bytes(store, bytes)?;
     let (ad, identity_pubkey) = advertisement_from_json(&json)?;
-    crypto::verify(&identity_pubkey, crypto::contexts::TUNNEL_ADVERTISEMENT, &ad.signing_bytes(), &ad.signature)
-        .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
-    store.ingest_tunnel_advertisement(&ad).map_err(anyhow::Error::from)?;
-    println!("ingested tunnel advertisement #{} from {}: {}", ad.sequence, user_id_str(&ad.provider), ad.description);
+    crypto::verify(
+        &identity_pubkey,
+        crypto::contexts::TUNNEL_ADVERTISEMENT,
+        &ad.signing_bytes(),
+        &ad.signature,
+    )
+    .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
+    store
+        .ingest_tunnel_advertisement(&ad)
+        .map_err(anyhow::Error::from)?;
+    println!(
+        "ingested tunnel advertisement #{} from {}: {}",
+        ad.sequence,
+        user_id_str(&ad.provider),
+        ad.description
+    );
     Ok(())
 }
 
@@ -437,7 +612,13 @@ pub fn list_tunnels(store: &StateStore) -> Result<()> {
         if let Some(l) = &ad.limitations {
             println!("  limitations : {l}");
         }
-        println!("  route scope : {:?}", ad.route_scope.iter().map(target_value_str).collect::<Vec<_>>());
+        println!(
+            "  route scope : {:?}",
+            ad.route_scope
+                .iter()
+                .map(target_value_str)
+                .collect::<Vec<_>>()
+        );
         println!("  endpoint    : {}", ad.endpoint_hint);
     }
     Ok(())
@@ -458,7 +639,10 @@ pub fn request_service(
     }
     let (author, seed) = self_identity(store)?;
     let kp = crypto::Keypair::from_seed(&seed);
-    let desired_route_scope: Vec<TargetSelector> = targets.iter().map(|(k, v)| parse_target(k, v)).collect::<Result<_>>()?;
+    let desired_route_scope: Vec<TargetSelector> = targets
+        .iter()
+        .map(|(k, v)| parse_target(k, v))
+        .collect::<Result<_>>()?;
     let sequence = store.next_tunnel_service_request_sequence(&author)?;
 
     let mut req = TunnelServiceRequest {
@@ -506,8 +690,19 @@ pub fn request_service(
                 let recipient_user = parse_user_ref(r)?;
                 let recipient_pubkey = recipient_messaging_pubkey(store, &recipient_user)?;
                 let path = dir.join(format!("{}.json", r.replace('/', "_")));
-                write_maybe_sealed(&plaintext, Some(&recipient_pubkey), &path)?;
-                println!("exported (sealed) to {}", path.display());
+                let payload = maybe_sealed_bytes(&plaintext, Some(&recipient_pubkey))?;
+                if needs_file_fallback(
+                    try_deliver(
+                        store,
+                        &recipient_user,
+                        p2p_transport::StatementKind::RestrictedTunnelServiceRequest,
+                        &payload,
+                    ),
+                    &recipient_user,
+                ) {
+                    write_maybe_sealed(&plaintext, Some(&recipient_pubkey), &path)?;
+                    println!("exported (sealed) to {}", path.display());
+                }
             }
         }
     }
@@ -515,25 +710,53 @@ pub fn request_service(
 }
 
 pub fn ingest_tunnel_service_request(store: &StateStore, file: &Path) -> Result<()> {
-    let json = read_maybe_sealed(store, file)?;
-    let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    ingest_tunnel_service_request_bytes(store, &bytes)
+}
+
+pub(crate) fn ingest_tunnel_service_request_bytes(store: &StateStore, bytes: &[u8]) -> Result<()> {
+    let json = parse_maybe_sealed_bytes(store, bytes)?;
+    let get_str = |key: &str| -> Result<&str> {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("missing `{key}`"))
+    };
     let requester = parse_user_ref(get_str("requester")?)?;
     let identity_pubkey = PublicKeyBytes(bytes32(get_str("identity_pubkey")?)?);
     let req = TunnelServiceRequest {
         requester,
-        sequence: json.get("sequence").and_then(|v| v.as_u64()).context("missing `sequence`")?,
+        sequence: json
+            .get("sequence")
+            .and_then(|v| v.as_u64())
+            .context("missing `sequence`")?,
         description: get_str("description")?.to_string(),
-        desired_route_scope: targets_from_json(json.get("desired_route_scope").context("missing `desired_route_scope`")?)?,
+        desired_route_scope: targets_from_json(
+            json.get("desired_route_scope")
+                .context("missing `desired_route_scope`")?,
+        )?,
         visibility: parse_visibility(get_str("visibility")?)?,
-        issued_at: json.get("issued_at").and_then(|v| v.as_i64()).context("missing `issued_at`")?,
+        issued_at: json
+            .get("issued_at")
+            .and_then(|v| v.as_i64())
+            .context("missing `issued_at`")?,
         expires_at: json.get("expires_at").and_then(|v| v.as_i64()),
         supersedes: json.get("supersedes").and_then(|v| v.as_u64()),
         signature: domain_types::SignatureBytes(bytes64(get_str("signature")?)?),
     };
-    crypto::verify(&identity_pubkey, crypto::contexts::TUNNEL_SERVICE_REQUEST, &req.signing_bytes(), &req.signature)
-        .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
+    crypto::verify(
+        &identity_pubkey,
+        crypto::contexts::TUNNEL_SERVICE_REQUEST,
+        &req.signing_bytes(),
+        &req.signature,
+    )
+    .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
     store.ingest_tunnel_service_request(&req)?;
-    println!("ingested tunnel service request #{} from {}: {}", req.sequence, user_id_str(&req.requester), req.description);
+    println!(
+        "ingested tunnel service request #{} from {}: {}",
+        req.sequence,
+        user_id_str(&req.requester),
+        req.description
+    );
     Ok(())
 }
 
@@ -544,12 +767,20 @@ pub fn list_pending_service_requests(store: &StateStore) -> Result<()> {
         return Ok(());
     }
     for r in reqs {
-        println!("#{} from {}: {}", r.sequence, user_id_str(&r.requester), r.description);
+        println!(
+            "#{} from {}: {}",
+            r.sequence,
+            user_id_str(&r.requester),
+            r.description
+        );
     }
     Ok(())
 }
 
-fn connection_request_to_json(req: &TunnelConnectionRequest, identity_pubkey: &PublicKeyBytes) -> serde_json::Value {
+fn connection_request_to_json(
+    req: &TunnelConnectionRequest,
+    identity_pubkey: &PublicKeyBytes,
+) -> serde_json::Value {
     serde_json::json!({
         "requester": user_id_str(&req.requester),
         "sequence": req.sequence,
@@ -566,7 +797,10 @@ fn connection_request_to_json(req: &TunnelConnectionRequest, identity_pubkey: &P
 /// known advertisement — shared by the manual `request-tunnel` CLI
 /// command and Phase E's auto-consume loop (`sync-tunnels`), the same
 /// split `build_and_store_own_advertisement` uses for `offer-tunnel`.
-fn build_and_store_connection_request(store: &StateStore, advertisement_ref: StatementRef) -> Result<(TunnelConnectionRequest, PublicKeyBytes)> {
+fn build_and_store_connection_request(
+    store: &StateStore,
+    advertisement_ref: StatementRef,
+) -> Result<(TunnelConnectionRequest, PublicKeyBytes)> {
     let (author, seed) = self_identity(store)?;
     let kp = crypto::Keypair::from_seed(&seed);
     let messaging_kp = own_messaging_keypair(store)?;
@@ -602,7 +836,12 @@ pub fn request_tunnel(store: &StateStore, advertisement: &str, out: Option<PathB
         .context("unknown advertisement — ingest it first")?;
 
     let (req, identity_pubkey) = build_and_store_connection_request(store, advertisement_ref)?;
-    println!("requested tunnel #{} against {}/{}", req.sequence, user_id_str(&ad.provider), ad.sequence);
+    println!(
+        "requested tunnel #{} against {}/{}",
+        req.sequence,
+        user_id_str(&ad.provider),
+        ad.sequence
+    );
 
     let plaintext = serde_json::to_vec(&connection_request_to_json(&req, &identity_pubkey))?;
     // The arms are split rather than sharing one `NoKnownAddress |
@@ -610,13 +849,24 @@ pub fn request_tunnel(store: &StateStore, advertisement: &str, out: Option<PathB
     // operator can learn *why* delivery failed — "unreachable right now"
     // and "we have no address for this peer at all" want very different
     // responses, and collapsing them discarded that distinction.
-    if needs_file_fallback(try_deliver(store, &ad.provider, p2p_transport::StatementKind::TunnelConnectionRequest, &plaintext), &ad.provider) {
+    if needs_file_fallback(
+        try_deliver(
+            store,
+            &ad.provider,
+            p2p_transport::StatementKind::TunnelConnectionRequest,
+            &plaintext,
+        ),
+        &ad.provider,
+    ) {
         match &out {
             Some(path) => {
                 write_maybe_sealed(&plaintext, Some(&ad.messaging_pubkey), path)?;
                 println!("exported to {} for manual delivery", path.display());
             }
-            None => eprintln!("no --out path given — this connection request has not reached {} by any route", user_id_str(&ad.provider)),
+            None => eprintln!(
+                "no --out path given — this connection request has not reached {} by any route",
+                user_id_str(&ad.provider)
+            ),
         }
     }
     Ok(())
@@ -624,22 +874,43 @@ pub fn request_tunnel(store: &StateStore, advertisement: &str, out: Option<PathB
 
 pub(crate) fn ingest_tunnel_request_bytes(store: &StateStore, bytes: &[u8]) -> Result<()> {
     let json = parse_maybe_sealed_bytes(store, bytes)?;
-    let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
+    let get_str = |key: &str| -> Result<&str> {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("missing `{key}`"))
+    };
     let requester = parse_user_ref(get_str("requester")?)?;
     let identity_pubkey = PublicKeyBytes(bytes32(get_str("identity_pubkey")?)?);
     let req = TunnelConnectionRequest {
         requester,
-        sequence: json.get("sequence").and_then(|v| v.as_u64()).context("missing `sequence`")?,
+        sequence: json
+            .get("sequence")
+            .and_then(|v| v.as_u64())
+            .context("missing `sequence`")?,
         advertisement: parse_statement_ref(get_str("advertisement")?)?,
         requester_wg_pubkey: WgPublicKeyBytes(bytes32(get_str("requester_wg_pubkey")?)?),
-        requester_messaging_pubkey: MessagingPublicKeyBytes(bytes32(get_str("requester_messaging_pubkey")?)?),
-        requested_at: json.get("requested_at").and_then(|v| v.as_i64()).context("missing `requested_at`")?,
+        requester_messaging_pubkey: MessagingPublicKeyBytes(bytes32(get_str(
+            "requester_messaging_pubkey",
+        )?)?),
+        requested_at: json
+            .get("requested_at")
+            .and_then(|v| v.as_i64())
+            .context("missing `requested_at`")?,
         signature: domain_types::SignatureBytes(bytes64(get_str("signature")?)?),
     };
-    crypto::verify(&identity_pubkey, crypto::contexts::TUNNEL_CONNECTION_REQUEST, &req.signing_bytes(), &req.signature)
-        .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
+    crypto::verify(
+        &identity_pubkey,
+        crypto::contexts::TUNNEL_CONNECTION_REQUEST,
+        &req.signing_bytes(),
+        &req.signature,
+    )
+    .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
     store.store_tunnel_connection_request(&req)?;
-    println!("ingested tunnel connection request #{} from {} (pending review)", req.sequence, user_id_str(&req.requester));
+    println!(
+        "ingested tunnel connection request #{} from {} (pending review)",
+        req.sequence,
+        user_id_str(&req.requester)
+    );
     Ok(())
 }
 
@@ -655,7 +926,13 @@ pub fn list_pending_tunnel_requests(store: &StateStore) -> Result<()> {
         return Ok(());
     }
     for r in reqs {
-        println!("#{} from {} (against advertisement {}/{})", r.sequence, user_id_str(&r.requester), user_id_str(&r.advertisement.author), r.advertisement.sequence);
+        println!(
+            "#{} from {} (against advertisement {}/{})",
+            r.sequence,
+            user_id_str(&r.requester),
+            user_id_str(&r.advertisement.author),
+            r.advertisement.sequence
+        );
     }
     Ok(())
 }
@@ -671,8 +948,17 @@ pub fn tunnel_balance(store: &StateStore) -> Result<()> {
         return Ok(());
     }
     for b in balances {
-        let ratio = if b.given_to > 0 { format!("{:.3}", b.taken_from as f64 / b.given_to as f64) } else { "n/a".to_string() };
-        println!("{}: given {}B, taken {}B (received/given ratio: {ratio})", user_id_str(&b.peer), b.given_to, b.taken_from);
+        let ratio = if b.given_to > 0 {
+            format!("{:.3}", b.taken_from as f64 / b.given_to as f64)
+        } else {
+            "n/a".to_string()
+        };
+        println!(
+            "{}: given {}B, taken {}B (received/given ratio: {ratio})",
+            user_id_str(&b.peer),
+            b.given_to,
+            b.taken_from
+        );
     }
     Ok(())
 }
@@ -689,7 +975,12 @@ pub fn tunnel_balance(store: &StateStore) -> Result<()> {
 /// (an explicit CLI invocation vs. a trusted `TunnelTrustRule`) and the
 /// export step, since manual acceptance exports to an admin-chosen path
 /// while auto-accept exports to a predictable location for later pickup.
-fn do_accept_tunnel_request(store: &StateStore, provider: UserId, seed: &[u8; 32], req: &TunnelConnectionRequest) -> Result<(TunnelConnectionAccept, PublicKeyBytes)> {
+fn do_accept_tunnel_request(
+    store: &StateStore,
+    provider: UserId,
+    seed: &[u8; 32],
+    req: &TunnelConnectionRequest,
+) -> Result<(TunnelConnectionAccept, PublicKeyBytes)> {
     let kp = crypto::Keypair::from_seed(seed);
     let (fwmark, route_table) = store.allocate_fwmark_and_route_table()?;
     // Deterministic from the allocated route table, so each accepted
@@ -721,7 +1012,10 @@ fn do_accept_tunnel_request(store: &StateStore, provider: UserId, seed: &[u8; 32
 
     let mut accept = TunnelConnectionAccept {
         provider,
-        request_ref: StatementRef { author: req.requester, sequence: req.sequence },
+        request_ref: StatementRef {
+            author: req.requester,
+            sequence: req.sequence,
+        },
         assigned_tunnel_ip: tunnel_ip.clone(),
         assigned_tunnel_ip6: Some(tunnel_ip6.clone()),
         accepted_at: now_unix(),
@@ -735,7 +1029,10 @@ fn do_accept_tunnel_request(store: &StateStore, provider: UserId, seed: &[u8; 32
     Ok((accept, kp.public_key()))
 }
 
-fn accept_to_json(accept: &TunnelConnectionAccept, identity_pubkey: &PublicKeyBytes) -> serde_json::Value {
+fn accept_to_json(
+    accept: &TunnelConnectionAccept,
+    identity_pubkey: &PublicKeyBytes,
+) -> serde_json::Value {
     serde_json::json!({
         "provider": user_id_str(&accept.provider),
         "request_ref": format!("{}/{}", user_id_str(&accept.request_ref.author), accept.request_ref.sequence),
@@ -747,7 +1044,12 @@ fn accept_to_json(accept: &TunnelConnectionAccept, identity_pubkey: &PublicKeyBy
     })
 }
 
-pub fn accept_tunnel_request(store: &StateStore, requester: &str, sequence: u64, out: Option<PathBuf>) -> Result<()> {
+pub fn accept_tunnel_request(
+    store: &StateStore,
+    requester: &str,
+    sequence: u64,
+    out: Option<PathBuf>,
+) -> Result<()> {
     let requester_user = parse_user_ref(requester)?;
     let (provider, seed) = self_identity(store)?;
 
@@ -762,18 +1064,33 @@ pub fn accept_tunnel_request(store: &StateStore, requester: &str, sequence: u64,
         "accepted tunnel connection request #{sequence} from {}: assigned {}{}",
         user_id_str(&requester_user),
         accept.assigned_tunnel_ip,
-        accept.assigned_tunnel_ip6.as_deref().map(|ip6| format!(" / {ip6}")).unwrap_or_default()
+        accept
+            .assigned_tunnel_ip6
+            .as_deref()
+            .map(|ip6| format!(" / {ip6}"))
+            .unwrap_or_default()
     );
 
     let plaintext = serde_json::to_vec(&accept_to_json(&accept, &identity_pubkey))?;
-    if needs_file_fallback(try_deliver(store, &requester_user, p2p_transport::StatementKind::TunnelConnectionAccept, &plaintext), &requester_user) {
+    if needs_file_fallback(
+        try_deliver(
+            store,
+            &requester_user,
+            p2p_transport::StatementKind::TunnelConnectionAccept,
+            &plaintext,
+        ),
+        &requester_user,
+    ) {
         match out {
             Some(path) => {
                 // Always sealed — a connection accept is inherently pairwise.
                 write_maybe_sealed(&plaintext, Some(&req.requester_messaging_pubkey), &path)?;
                 println!("exported (sealed to requester) to {}", path.display());
             }
-            None => eprintln!("no --out path given — this accept has not reached {} by any route", user_id_str(&requester_user)),
+            None => eprintln!(
+                "no --out path given — this accept has not reached {} by any route",
+                user_id_str(&requester_user)
+            ),
         }
     }
     Ok(())
@@ -781,19 +1098,34 @@ pub fn accept_tunnel_request(store: &StateStore, requester: &str, sequence: u64,
 
 pub(crate) fn ingest_tunnel_accept_bytes(store: &StateStore, bytes: &[u8]) -> Result<()> {
     let json = parse_maybe_sealed_bytes(store, bytes)?;
-    let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
+    let get_str = |key: &str| -> Result<&str> {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("missing `{key}`"))
+    };
     let provider = parse_user_ref(get_str("provider")?)?;
     let identity_pubkey = PublicKeyBytes(bytes32(get_str("identity_pubkey")?)?);
     let accept = TunnelConnectionAccept {
         provider,
         request_ref: parse_statement_ref(get_str("request_ref")?)?,
         assigned_tunnel_ip: get_str("assigned_tunnel_ip")?.to_string(),
-        assigned_tunnel_ip6: json.get("assigned_tunnel_ip6").and_then(|v| v.as_str()).map(String::from),
-        accepted_at: json.get("accepted_at").and_then(|v| v.as_i64()).context("missing `accepted_at`")?,
+        assigned_tunnel_ip6: json
+            .get("assigned_tunnel_ip6")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        accepted_at: json
+            .get("accepted_at")
+            .and_then(|v| v.as_i64())
+            .context("missing `accepted_at`")?,
         signature: domain_types::SignatureBytes(bytes64(get_str("signature")?)?),
     };
-    crypto::verify(&identity_pubkey, crypto::contexts::TUNNEL_CONNECTION_ACCEPT, &accept.signing_bytes(), &accept.signature)
-        .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
+    crypto::verify(
+        &identity_pubkey,
+        crypto::contexts::TUNNEL_CONNECTION_ACCEPT,
+        &accept.signing_bytes(),
+        &accept.signature,
+    )
+    .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
     store.store_tunnel_connection_accept(&accept)?;
 
     // A `provisioned_tunnels` row is what `select-tunnel` (and later,
@@ -807,7 +1139,10 @@ pub(crate) fn ingest_tunnel_accept_bytes(store: &StateStore, bytes: &[u8]) -> Re
         .get_tunnel_connection_request(&accept.request_ref.author, accept.request_ref.sequence)?
         .context("missing our own connection request record — this accept doesn't match anything we sent")?;
     let ad = store
-        .get_tunnel_advertisement(own_request.advertisement.author, own_request.advertisement.sequence)?
+        .get_tunnel_advertisement(
+            own_request.advertisement.author,
+            own_request.advertisement.sequence,
+        )?
         .context("missing the original advertisement this request was against")?;
     let (fwmark, route_table) = store.allocate_fwmark_and_route_table()?;
     store.upsert_provisioned_tunnel(&state_store::ProvisionedTunnel {
@@ -831,7 +1166,11 @@ pub(crate) fn ingest_tunnel_accept_bytes(store: &StateStore, bytes: &[u8]) -> Re
         "ingested tunnel connection accept from {}: assigned IP {}{}",
         user_id_str(&accept.provider),
         accept.assigned_tunnel_ip,
-        accept.assigned_tunnel_ip6.as_deref().map(|ip6| format!(" / {ip6}")).unwrap_or_default()
+        accept
+            .assigned_tunnel_ip6
+            .as_deref()
+            .map(|ip6| format!(" / {ip6}"))
+            .unwrap_or_default()
     );
     Ok(())
 }
@@ -848,10 +1187,50 @@ pub fn ingest_tunnel_accept(store: &StateStore, file: &Path) -> Result<()> {
 /// arrived. A malformed or rejected payload returns `Err` — `sf listen`
 /// (below) logs and continues rather than propagating a failure that
 /// would kill the whole listener.
-pub fn dispatch_envelope(store: &StateStore, kind: p2p_transport::StatementKind, payload: &[u8]) -> Result<()> {
+pub fn dispatch_envelope(
+    store: &StateStore,
+    kind: p2p_transport::StatementKind,
+    payload: &[u8],
+) -> Result<()> {
     match kind {
-        p2p_transport::StatementKind::TunnelConnectionRequest => ingest_tunnel_request_bytes(store, payload),
-        p2p_transport::StatementKind::TunnelConnectionAccept => ingest_tunnel_accept_bytes(store, payload),
+        p2p_transport::StatementKind::TunnelConnectionRequest => {
+            ingest_tunnel_request_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::TunnelConnectionAccept => {
+            ingest_tunnel_accept_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::GroupJoinRequest => {
+            crate::group::ingest_group_join_request_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::Group => crate::group::ingest_group_bytes(store, payload),
+        p2p_transport::StatementKind::PartyLineMessage => {
+            crate::group::ingest_party_line_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::RestrictedTunnelAdvertisement => {
+            ingest_tunnel_advertisement_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::RestrictedTunnelServiceRequest => {
+            ingest_tunnel_service_request_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::RestrictedSharedRuleList => {
+            crate::list::ingest_list_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::SyncGroupRequest
+        | p2p_transport::StatementKind::SyncGroupResponse => {
+            bail!("group sync envelopes require the sync protocol handler")
+        }
+        p2p_transport::StatementKind::SharedPolicy => {
+            crate::shared_policy::ingest_policy_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::PolicyVote => {
+            crate::shared_policy::ingest_policy_vote_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::FingerprintObservation => {
+            crate::fingerprint::ingest_observation_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::FingerprintComment => {
+            crate::fingerprint::ingest_comment_bytes(store, payload)
+        }
     }
 }
 
@@ -879,7 +1258,9 @@ pub(crate) fn known_follow_for_node_id(store: &StateStore, from: &str) -> Option
     match store.find_follow_by_iroh_node_id(from) {
         Ok(found) => found,
         Err(e) => {
-            eprintln!("could not check whether {from} is a known follow ({e}) — refusing the envelope");
+            eprintln!(
+                "could not check whether {from} is a known follow ({e}) — refusing the envelope"
+            );
             None
         }
     }
@@ -905,19 +1286,31 @@ pub fn listen(store: &StateStore) -> Result<()> {
             seed
         }
     };
-    let transport = p2p_transport::IrohTransport::new(seed, b"social-firewall/1").map_err(|e| anyhow::anyhow!("failed to start Iroh transport: {e}"))?;
+    let transport = p2p_transport::IrohTransport::new(seed, b"social-firewall/1")
+        .map_err(|e| anyhow::anyhow!("failed to start Iroh transport: {e}"))?;
     println!("listening — this node's Iroh id: {}", transport.node_id());
     loop {
-        match transport.recv() {
-            Ok((from, envelope)) => {
-                let Some(peer) = known_follow_for_node_id(store, &from) else {
-                    eprintln!("rejected {:?} from unrecognized node {from} — no follow claims this Iroh node_id (add it with `sf set-follow-node-id`)", envelope.kind);
-                    continue;
-                };
-                match dispatch_envelope(store, envelope.kind, &envelope.payload) {
-                    Ok(()) => println!("dispatched {:?} from {} ({from})", envelope.kind, user_id_str(&peer)),
-                    Err(e) => eprintln!("rejected envelope from {} ({from}): {e}", user_id_str(&peer)),
-                }
+        match transport.recv_and_dispatch(&|from, envelope| {
+            let peer = known_follow_for_node_id(store, from)
+                .ok_or_else(|| format!("unrecognized node {from}"))?;
+            if envelope.kind == p2p_transport::StatementKind::SyncGroupRequest {
+                let response =
+                    crate::group::handle_sync_group_request(store, peer, from, &envelope.payload)
+                        .map_err(|e| e.to_string())?;
+                return Ok(Some(response));
+            }
+            dispatch_envelope(store, envelope.kind, &envelope.payload)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "dispatched {:?} from {} ({from})",
+                envelope.kind,
+                user_id_str(&peer)
+            );
+            Ok(None)
+        }) {
+            Ok(()) => {}
+            Err(p2p_transport::TransportError::ApplicationRejected(reason)) => {
+                eprintln!("rejected inbound envelope: {reason}");
             }
             Err(e) => {
                 eprintln!("transport closed: {e}");
@@ -927,15 +1320,30 @@ pub fn listen(store: &StateStore) -> Result<()> {
     }
 }
 
-pub fn select_tunnel(store: &StateStore, advertisement: &str, targets: &[(String, String)]) -> Result<()> {
+pub fn select_tunnel(
+    store: &StateStore,
+    advertisement: &str,
+    targets: &[(String, String)],
+) -> Result<()> {
     let advertisement_ref = parse_statement_ref(advertisement)?;
     let (requester, _) = self_identity(store)?;
     let accept = store
         .get_tunnel_connection_accept_for(&requester, advertisement_ref.sequence)?
         .context("no accepted connection for this advertisement yet — run request-tunnel and ingest-tunnel-accept first")?;
-    let selected: Vec<TargetSelector> = targets.iter().map(|(k, v)| parse_target(k, v)).collect::<Result<_>>()?;
-    store.set_provisioned_tunnel_selected_targets(&accept.provider, state_store::TunnelDirection::Consuming, &selected)?;
-    println!("selected {} target(s) to route through {}'s tunnel", selected.len(), user_id_str(&accept.provider));
+    let selected: Vec<TargetSelector> = targets
+        .iter()
+        .map(|(k, v)| parse_target(k, v))
+        .collect::<Result<_>>()?;
+    store.set_provisioned_tunnel_selected_targets(
+        &accept.provider,
+        state_store::TunnelDirection::Consuming,
+        &selected,
+    )?;
+    println!(
+        "selected {} target(s) to route through {}'s tunnel",
+        selected.len(),
+        user_id_str(&accept.provider)
+    );
     Ok(())
 }
 
@@ -1004,7 +1412,8 @@ pub fn sync_tunnels(
     let mut report = SyncTunnelsReport::default();
 
     if !dry_run {
-        std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+        std::fs::create_dir_all(out_dir)
+            .with_context(|| format!("creating {}", out_dir.display()))?;
     }
 
     // Auto-respond to pending service requests from trusted requesters.
@@ -1012,12 +1421,19 @@ pub fn sync_tunnels(
         if req.requester == self_user {
             continue; // never auto-respond to our own want-ad
         }
-        let Some(trust) = store.get_tunnel_trust_rule(&req.requester)? else { continue };
+        let Some(trust) = store.get_tunnel_trust_rule(&req.requester)? else {
+            continue;
+        };
         if trust.excluded || !trust.auto_respond_to_service_requests {
             continue;
         }
         let already_responded = store.list_tunnel_advertisements()?.iter().any(|ad| {
-            ad.provider == self_user && ad.in_response_to == Some(StatementRef { author: req.requester, sequence: req.sequence })
+            ad.provider == self_user
+                && ad.in_response_to
+                    == Some(StatementRef {
+                        author: req.requester,
+                        sequence: req.sequence,
+                    })
         });
         if already_responded {
             continue;
@@ -1030,7 +1446,11 @@ pub fn sync_tunnels(
             }
         };
         if dry_run {
-            println!("(dry-run) would auto-respond to service request #{} from {}", req.sequence, user_id_str(&req.requester));
+            println!(
+                "(dry-run) would auto-respond to service request #{} from {}",
+                req.sequence,
+                user_id_str(&req.requester)
+            );
             report.auto_responses += 1;
             continue;
         }
@@ -1043,12 +1463,31 @@ pub fn sync_tunnels(
             None,
             None,
             Visibility::Restricted,
-            Some(StatementRef { author: req.requester, sequence: req.sequence }),
+            Some(StatementRef {
+                author: req.requester,
+                sequence: req.sequence,
+            }),
         )?;
         let plaintext = serde_json::to_vec(&advertisement_to_json(&ad, &identity_pubkey))?;
         let path = out_dir.join(format!("tunnel-advertisement-{}.json", ad.sequence));
-        write_maybe_sealed(&plaintext, Some(&recipient_pubkey), &path)?;
-        println!("auto-responded to service request #{} from {}: exported to {}", req.sequence, user_id_str(&req.requester), path.display());
+        let payload = maybe_sealed_bytes(&plaintext, Some(&recipient_pubkey))?;
+        if needs_file_fallback(
+            try_deliver(
+                store,
+                &req.requester,
+                p2p_transport::StatementKind::RestrictedTunnelAdvertisement,
+                &payload,
+            ),
+            &req.requester,
+        ) {
+            write_maybe_sealed(&plaintext, Some(&recipient_pubkey), &path)?;
+            println!(
+                "auto-responded to service request #{} from {}: exported to {}",
+                req.sequence,
+                user_id_str(&req.requester),
+                path.display()
+            );
+        }
         report.auto_responses += 1;
     }
 
@@ -1064,7 +1503,9 @@ pub fn sync_tunnels(
         if req.advertisement.author != self_user {
             continue;
         }
-        let Some(trust) = store.get_tunnel_trust_rule(&req.requester)? else { continue };
+        let Some(trust) = store.get_tunnel_trust_rule(&req.requester)? else {
+            continue;
+        };
         if trust.excluded || !trust.auto_accept_requests {
             continue;
         }
@@ -1091,15 +1532,35 @@ pub fn sync_tunnels(
             }
         }
         if dry_run {
-            println!("(dry-run) would auto-accept connection request #{} from {}", req.sequence, user_id_str(&req.requester));
+            println!(
+                "(dry-run) would auto-accept connection request #{} from {}",
+                req.sequence,
+                user_id_str(&req.requester)
+            );
             report.auto_accepts += 1;
             continue;
         }
         let (accept, identity_pubkey) = do_accept_tunnel_request(store, provider, &seed, &req)?;
         let plaintext = serde_json::to_vec(&accept_to_json(&accept, &identity_pubkey))?;
-        println!("auto-accepted connection request #{} from {}", req.sequence, user_id_str(&req.requester));
-        if needs_file_fallback(try_deliver(store, &req.requester, p2p_transport::StatementKind::TunnelConnectionAccept, &plaintext), &req.requester) {
-            let path = out_dir.join(format!("tunnel-accept-{}-{}.json", user_id_str(&req.requester).replace('/', "_"), req.sequence));
+        println!(
+            "auto-accepted connection request #{} from {}",
+            req.sequence,
+            user_id_str(&req.requester)
+        );
+        if needs_file_fallback(
+            try_deliver(
+                store,
+                &req.requester,
+                p2p_transport::StatementKind::TunnelConnectionAccept,
+                &plaintext,
+            ),
+            &req.requester,
+        ) {
+            let path = out_dir.join(format!(
+                "tunnel-accept-{}-{}.json",
+                user_id_str(&req.requester).replace('/', "_"),
+                req.sequence
+            ));
             write_maybe_sealed(&plaintext, Some(&req.requester_messaging_pubkey), &path)?;
             println!("exported to {} for manual delivery", path.display());
         }
@@ -1113,7 +1574,9 @@ pub fn sync_tunnels(
         if ad.provider == self_user {
             continue; // never auto-request our own advertisement
         }
-        let Some(trust) = store.get_tunnel_trust_rule(&ad.provider)? else { continue };
+        let Some(trust) = store.get_tunnel_trust_rule(&ad.provider)? else {
+            continue;
+        };
         if trust.excluded || !trust.auto_consume_advertisements {
             continue;
         }
@@ -1126,20 +1589,43 @@ pub fn sync_tunnels(
                 continue;
             }
         }
-        let ad_ref = StatementRef { author: ad.provider, sequence: ad.sequence };
+        let ad_ref = StatementRef {
+            author: ad.provider,
+            sequence: ad.sequence,
+        };
         if store.has_tunnel_connection_request_for(&self_user, &ad_ref)? {
             continue;
         }
         if dry_run {
-            println!("(dry-run) would auto-request tunnel against advertisement {}/{}", user_id_str(&ad.provider), ad.sequence);
+            println!(
+                "(dry-run) would auto-request tunnel against advertisement {}/{}",
+                user_id_str(&ad.provider),
+                ad.sequence
+            );
             report.auto_consumes += 1;
             continue;
         }
         let (req, identity_pubkey) = build_and_store_connection_request(store, ad_ref)?;
         let plaintext = serde_json::to_vec(&connection_request_to_json(&req, &identity_pubkey))?;
         let path = out_dir.join(format!("tunnel-request-{}.json", req.sequence));
-        write_maybe_sealed(&plaintext, Some(&ad.messaging_pubkey), &path)?;
-        println!("auto-requested tunnel against {}/{}: exported to {}", user_id_str(&ad.provider), ad.sequence, path.display());
+        let payload = maybe_sealed_bytes(&plaintext, Some(&ad.messaging_pubkey))?;
+        if needs_file_fallback(
+            try_deliver(
+                store,
+                &ad.provider,
+                p2p_transport::StatementKind::TunnelConnectionRequest,
+                &payload,
+            ),
+            &ad.provider,
+        ) {
+            write_maybe_sealed(&plaintext, Some(&ad.messaging_pubkey), &path)?;
+            println!(
+                "auto-requested tunnel against {}/{}: exported to {}",
+                user_id_str(&ad.provider),
+                ad.sequence,
+                path.display()
+            );
+        }
         report.auto_consumes += 1;
     }
 
@@ -1152,7 +1638,10 @@ pub fn sync_tunnels(
     let result = ctrl.reconcile()?;
     report.peers_added = result.peers_added;
     report.peers_removed = result.peers_removed;
-    println!("wireguard reconcile: {} peer(s) added, {} peer(s) removed", result.peers_added, result.peers_removed);
+    println!(
+        "wireguard reconcile: {} peer(s) added, {} peer(s) removed",
+        result.peers_added, result.peers_removed
+    );
 
     Ok(report)
 }
@@ -1163,18 +1652,26 @@ mod sync_tunnels_tests {
     use domain_types::FederationId;
 
     fn user(byte: u8) -> UserId {
-        UserId { federation: FederationId(domain_types::Hash32([byte; 32])), local_id: domain_types::Hash32([byte.wrapping_add(100); 32]) }
+        UserId {
+            federation: FederationId(domain_types::Hash32([byte; 32])),
+            local_id: domain_types::Hash32([byte.wrapping_add(100); 32]),
+        }
     }
 
     fn store_with_self_identity() -> (StateStore, UserId) {
         let store = StateStore::open_in_memory().unwrap();
         let self_user = user(1);
         let kp = crypto::Keypair::generate();
-        store.set_self_identity(self_user, kp.public_key(), &kp.seed_bytes(), None).unwrap();
+        store
+            .set_self_identity(self_user, kp.public_key(), &kp.seed_bytes(), None)
+            .unwrap();
         (store, self_user)
     }
 
-    fn seed_advertisement(provider: UserId, messaging_pubkey: MessagingPublicKeyBytes) -> TunnelAdvertisement {
+    fn seed_advertisement(
+        provider: UserId,
+        messaging_pubkey: MessagingPublicKeyBytes,
+    ) -> TunnelAdvertisement {
         TunnelAdvertisement {
             provider,
             sequence: 0,
@@ -1210,23 +1707,56 @@ mod sync_tunnels_tests {
         }
     }
 
-    fn trust_rule(user: UserId, auto_accept_requests: bool, auto_consume_advertisements: bool, auto_respond_to_service_requests: bool) -> TunnelTrustRule {
-        TunnelTrustRule { user, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded: false, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0 }
+    fn trust_rule(
+        user: UserId,
+        auto_accept_requests: bool,
+        auto_consume_advertisements: bool,
+        auto_respond_to_service_requests: bool,
+    ) -> TunnelTrustRule {
+        TunnelTrustRule {
+            user,
+            auto_accept_requests,
+            auto_consume_advertisements,
+            auto_respond_to_service_requests,
+            excluded: false,
+            tag_filter: None,
+            min_reciprocity_ratio: None,
+            expires_at: None,
+            created_at: 0,
+        }
     }
 
     fn wg_config(dir: &Path) -> wg_tunnel::WgTunnelConfig {
-        wg_tunnel::WgTunnelConfig { scratch_dir: dir.to_path_buf(), dnsmasq_dir: dir.to_path_buf(), ..wg_tunnel::WgTunnelConfig::default() }
+        wg_tunnel::WgTunnelConfig {
+            scratch_dir: dir.to_path_buf(),
+            dnsmasq_dir: dir.to_path_buf(),
+            ..wg_tunnel::WgTunnelConfig::default()
+        }
     }
 
     #[test]
     fn dispatch_envelope_routes_a_tunnel_connection_request_to_the_same_ingest_path() {
         let (store, self_user) = store_with_self_identity();
-        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(
+            &store,
+            "self's own ad",
+            None,
+            vec![TargetSelector::Domain("example.com".into())],
+            Vec::new(),
+            None,
+            None,
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
         let bob = user(2);
         let req = TunnelConnectionRequest {
             requester: bob,
             sequence: 0,
-            advertisement: StatementRef { author: self_user, sequence: 0 },
+            advertisement: StatementRef {
+                author: self_user,
+                sequence: 0,
+            },
             requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
             requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
             requested_at: 0,
@@ -1236,23 +1766,45 @@ mod sync_tunnels_tests {
         // unsigned/garbage payload the same way ingest_tunnel_request does.
         let bob_kp = crypto::Keypair::generate();
         let mut signed_req = req.clone();
-        signed_req.signature = bob_kp.sign(crypto::contexts::TUNNEL_CONNECTION_REQUEST, &req.signing_bytes());
+        signed_req.signature = bob_kp.sign(
+            crypto::contexts::TUNNEL_CONNECTION_REQUEST,
+            &req.signing_bytes(),
+        );
         let json = connection_request_to_json(&signed_req, &bob_kp.public_key());
         let bytes = serde_json::to_vec(&json).unwrap();
 
-        dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, &bytes).unwrap();
+        dispatch_envelope(
+            &store,
+            p2p_transport::StatementKind::TunnelConnectionRequest,
+            &bytes,
+        )
+        .unwrap();
 
-        assert_eq!(store.list_pending_tunnel_connection_requests().unwrap().len(), 1, "the request must have been stored via the normal ingest path");
+        assert_eq!(
+            store
+                .list_pending_tunnel_connection_requests()
+                .unwrap()
+                .len(),
+            1,
+            "the request must have been stored via the normal ingest path"
+        );
     }
 
     #[test]
     fn dispatch_envelope_rejects_a_tampered_payload_without_panicking() {
         let (store, _self_user) = store_with_self_identity();
-        let result = dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, b"not even json");
+        let result = dispatch_envelope(
+            &store,
+            p2p_transport::StatementKind::TunnelConnectionRequest,
+            b"not even json",
+        );
         assert!(result.is_err());
     }
 
-    fn follow_with_node_id(user: UserId, iroh_node_id: Option<String>) -> domain_types::LocalTrustRule {
+    fn follow_with_node_id(
+        user: UserId,
+        iroh_node_id: Option<String>,
+    ) -> domain_types::LocalTrustRule {
         domain_types::LocalTrustRule {
             user,
             allow_weight: 1.0,
@@ -1272,12 +1824,19 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let bob = user(2);
         let bobs_node = "b0b".repeat(16);
-        store.upsert_follow(&follow_with_node_id(bob, Some(bobs_node.clone()))).unwrap();
+        store
+            .upsert_follow(&follow_with_node_id(bob, Some(bobs_node.clone())))
+            .unwrap();
         // A follow with no node id recorded must never match anything.
-        store.upsert_follow(&follow_with_node_id(user(3), None)).unwrap();
+        store
+            .upsert_follow(&follow_with_node_id(user(3), None))
+            .unwrap();
 
         assert_eq!(known_follow_for_node_id(&store, &bobs_node), Some(bob));
-        assert!(known_follow_for_node_id(&store, &"dead".repeat(12)).is_none(), "a node id no follow claims must not resolve");
+        assert!(
+            known_follow_for_node_id(&store, &"dead".repeat(12)).is_none(),
+            "a node id no follow claims must not resolve"
+        );
         assert!(known_follow_for_node_id(&store, "").is_none());
     }
 
@@ -1291,64 +1850,135 @@ mod sync_tunnels_tests {
     #[test]
     fn an_envelope_from_an_unrecognized_node_is_not_dispatched() {
         let (store, self_user) = store_with_self_identity();
-        let (_ad, _pubkey) =
-            build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(
+            &store,
+            "self's own ad",
+            None,
+            vec![TargetSelector::Domain("example.com".into())],
+            Vec::new(),
+            None,
+            None,
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
         let bob = user(2);
         // Bob is followed, but with a *different* node id than the one
         // the connection arrives from.
-        store.upsert_follow(&follow_with_node_id(bob, Some("b0b".repeat(16)))).unwrap();
+        store
+            .upsert_follow(&follow_with_node_id(bob, Some("b0b".repeat(16))))
+            .unwrap();
 
         let bob_kp = crypto::Keypair::generate();
         let mut req = TunnelConnectionRequest {
             requester: bob,
             sequence: 0,
-            advertisement: StatementRef { author: self_user, sequence: 0 },
+            advertisement: StatementRef {
+                author: self_user,
+                sequence: 0,
+            },
             requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
             requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
             requested_at: 0,
             signature: domain_types::SignatureBytes([0; 64]),
         };
-        req.signature = bob_kp.sign(crypto::contexts::TUNNEL_CONNECTION_REQUEST, &req.signing_bytes());
-        let bytes = serde_json::to_vec(&connection_request_to_json(&req, &bob_kp.public_key())).unwrap();
+        req.signature = bob_kp.sign(
+            crypto::contexts::TUNNEL_CONNECTION_REQUEST,
+            &req.signing_bytes(),
+        );
+        let bytes =
+            serde_json::to_vec(&connection_request_to_json(&req, &bob_kp.public_key())).unwrap();
 
         // What `listen` does: refuse before dispatching.
         let attacker_node = "acab".repeat(12);
-        assert!(known_follow_for_node_id(&store, &attacker_node).is_none(), "an unrecognized sender must not resolve to a follow");
-        assert_eq!(store.list_pending_tunnel_connection_requests().unwrap().len(), 0, "nothing may be ingested from an unrecognized sender");
+        assert!(
+            known_follow_for_node_id(&store, &attacker_node).is_none(),
+            "an unrecognized sender must not resolve to a follow"
+        );
+        assert_eq!(
+            store
+                .list_pending_tunnel_connection_requests()
+                .unwrap()
+                .len(),
+            0,
+            "nothing may be ingested from an unrecognized sender"
+        );
 
         // The payload itself was always fine — only the sender was not.
-        dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, &bytes).unwrap();
-        assert_eq!(store.list_pending_tunnel_connection_requests().unwrap().len(), 1);
+        dispatch_envelope(
+            &store,
+            p2p_transport::StatementKind::TunnelConnectionRequest,
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .list_pending_tunnel_connection_requests()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn a_recognized_follows_node_id_passes_the_gate_and_dispatches() {
         let (store, self_user) = store_with_self_identity();
-        let (_ad, _pubkey) =
-            build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(
+            &store,
+            "self's own ad",
+            None,
+            vec![TargetSelector::Domain("example.com".into())],
+            Vec::new(),
+            None,
+            None,
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
         let bob = user(2);
         let bobs_node = "b0b".repeat(16);
-        store.upsert_follow(&follow_with_node_id(bob, Some(bobs_node.clone()))).unwrap();
+        store
+            .upsert_follow(&follow_with_node_id(bob, Some(bobs_node.clone())))
+            .unwrap();
 
         let bob_kp = crypto::Keypair::generate();
         let mut req = TunnelConnectionRequest {
             requester: bob,
             sequence: 0,
-            advertisement: StatementRef { author: self_user, sequence: 0 },
+            advertisement: StatementRef {
+                author: self_user,
+                sequence: 0,
+            },
             requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
             requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
             requested_at: 0,
             signature: domain_types::SignatureBytes([0; 64]),
         };
-        req.signature = bob_kp.sign(crypto::contexts::TUNNEL_CONNECTION_REQUEST, &req.signing_bytes());
-        let bytes = serde_json::to_vec(&connection_request_to_json(&req, &bob_kp.public_key())).unwrap();
+        req.signature = bob_kp.sign(
+            crypto::contexts::TUNNEL_CONNECTION_REQUEST,
+            &req.signing_bytes(),
+        );
+        let bytes =
+            serde_json::to_vec(&connection_request_to_json(&req, &bob_kp.public_key())).unwrap();
 
         // Exactly `listen`'s sequence: gate, then dispatch.
-        let peer = known_follow_for_node_id(&store, &bobs_node).expect("a follow that recorded this node id must be recognized");
+        let peer = known_follow_for_node_id(&store, &bobs_node)
+            .expect("a follow that recorded this node id must be recognized");
         assert_eq!(peer, bob);
-        dispatch_envelope(&store, p2p_transport::StatementKind::TunnelConnectionRequest, &bytes).unwrap();
+        dispatch_envelope(
+            &store,
+            p2p_transport::StatementKind::TunnelConnectionRequest,
+            &bytes,
+        )
+        .unwrap();
 
-        assert_eq!(store.list_pending_tunnel_connection_requests().unwrap().len(), 1);
+        assert_eq!(
+            store
+                .list_pending_tunnel_connection_requests()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1359,9 +1989,15 @@ mod sync_tunnels_tests {
         // Seeds bob's messaging pubkey into the store the only way this
         // trust-on-first-ingest model knows how — via something bob
         // published — since `sync_tunnels` needs it to seal the response.
-        store.store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key())).unwrap();
-        store.store_own_tunnel_service_request(&seed_service_request(bob)).unwrap();
-        store.upsert_tunnel_trust_rule(&trust_rule(bob, false, false, true)).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key()))
+            .unwrap();
+        store
+            .store_own_tunnel_service_request(&seed_service_request(bob))
+            .unwrap();
+        store
+            .upsert_tunnel_trust_rule(&trust_rule(bob, false, false, true))
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
@@ -1372,10 +2008,18 @@ mod sync_tunnels_tests {
         assert_eq!(report.auto_responses, 1);
         let ads = store.list_tunnel_advertisements().unwrap();
         assert!(
-            ads.iter().any(|ad| ad.provider == self_user && ad.in_response_to == Some(StatementRef { author: bob, sequence: 0 })),
+            ads.iter().any(|ad| ad.provider == self_user
+                && ad.in_response_to
+                    == Some(StatementRef {
+                        author: bob,
+                        sequence: 0
+                    })),
             "must have published a response advertisement referencing bob's want-ad"
         );
-        assert!(std::fs::read_dir(&out_dir).unwrap().count() > 0, "the auto-response must be exported for pickup");
+        assert!(
+            std::fs::read_dir(&out_dir).unwrap().count() > 0,
+            "the auto-response must be exported for pickup"
+        );
     }
 
     #[test]
@@ -1383,35 +2027,74 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
-        store.store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key())).unwrap();
-        store.store_own_tunnel_service_request(&seed_service_request(bob)).unwrap();
-        store.upsert_tunnel_trust_rule(&trust_rule(bob, false, false, true)).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key()))
+            .unwrap();
+        store
+            .store_own_tunnel_service_request(&seed_service_request(bob))
+            .unwrap();
+        store
+            .upsert_tunnel_trust_rule(&trust_rule(bob, false, false, true))
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
-        let second = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
+        let second = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(second.auto_responses, 0, "a service request already responded to must not be responded to again");
+        assert_eq!(
+            second.auto_responses, 0,
+            "a service request already responded to must not be responded to again"
+        );
     }
 
     #[test]
     fn auto_accepts_a_connection_request_against_our_own_advertisement_from_a_trusted_requester() {
         let (store, self_user) = store_with_self_identity();
-        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(
+            &store,
+            "self's own ad",
+            None,
+            vec![TargetSelector::Domain("example.com".into())],
+            Vec::new(),
+            None,
+            None,
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
         let bob = user(2);
         store
             .store_tunnel_connection_request(&TunnelConnectionRequest {
                 requester: bob,
                 sequence: 0,
-                advertisement: StatementRef { author: self_user, sequence: 0 },
+                advertisement: StatementRef {
+                    author: self_user,
+                    sequence: 0,
+                },
                 requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
                 requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
                 requested_at: 0,
                 signature: domain_types::SignatureBytes([0; 64]),
             })
             .unwrap();
-        store.upsert_tunnel_trust_rule(&trust_rule(bob, true, false, false)).unwrap();
+        store
+            .upsert_tunnel_trust_rule(&trust_rule(bob, true, false, false))
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
@@ -1420,8 +2103,17 @@ mod sync_tunnels_tests {
         let report = sync_tunnels(&store, &runner, &out_dir, wg_config(dir.path()), false).unwrap();
 
         assert_eq!(report.auto_accepts, 1);
-        assert!(store.get_tunnel_connection_accept_for(&bob, 0).unwrap().is_some(), "an accept must have been stored");
-        assert!(std::fs::read_dir(&out_dir).unwrap().count() > 0, "the auto-accept must be exported for pickup");
+        assert!(
+            store
+                .get_tunnel_connection_accept_for(&bob, 0)
+                .unwrap()
+                .is_some(),
+            "an accept must have been stored"
+        );
+        assert!(
+            std::fs::read_dir(&out_dir).unwrap().count() > 0,
+            "the auto-accept must be exported for pickup"
+        );
     }
 
     #[test]
@@ -1439,20 +2131,35 @@ mod sync_tunnels_tests {
             .store_tunnel_connection_request(&TunnelConnectionRequest {
                 requester: self_user,
                 sequence: 0,
-                advertisement: StatementRef { author: bob, sequence: 0 },
+                advertisement: StatementRef {
+                    author: bob,
+                    sequence: 0,
+                },
                 requester_wg_pubkey: WgPublicKeyBytes([1; 32]),
                 requester_messaging_pubkey: MessagingPublicKeyBytes([2; 32]),
                 requested_at: 0,
                 signature: domain_types::SignatureBytes([0; 64]),
             })
             .unwrap();
-        store.upsert_tunnel_trust_rule(&trust_rule(self_user, true, false, false)).unwrap();
+        store
+            .upsert_tunnel_trust_rule(&trust_rule(self_user, true, false, false))
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        let report = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(report.auto_accepts, 0, "a request this router sent to someone else must never be auto-accepted");
+        assert_eq!(
+            report.auto_accepts, 0,
+            "a request this router sent to someone else must never be auto-accepted"
+        );
     }
 
     fn pending_request_against_own_ad(store: &StateStore, requester: UserId, provider: UserId) {
@@ -1460,7 +2167,10 @@ mod sync_tunnels_tests {
             .store_tunnel_connection_request(&TunnelConnectionRequest {
                 requester,
                 sequence: 0,
-                advertisement: StatementRef { author: provider, sequence: 0 },
+                advertisement: StatementRef {
+                    author: provider,
+                    sequence: 0,
+                },
                 requester_wg_pubkey: WgPublicKeyBytes([3; 32]),
                 requester_messaging_pubkey: MessagingPublicKeyBytes([4; 32]),
                 requested_at: 0,
@@ -1472,62 +2182,187 @@ mod sync_tunnels_tests {
     #[test]
     fn reciprocity_floor_skips_auto_accept_when_a_taker_has_given_nothing_back() {
         let (store, self_user) = store_with_self_identity();
-        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(
+            &store,
+            "self's own ad",
+            None,
+            vec![TargetSelector::Domain("example.com".into())],
+            Vec::new(),
+            None,
+            None,
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
         let bob = user(2);
         pending_request_against_own_ad(&store, bob, self_user);
         store
-            .upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: false, auto_respond_to_service_requests: false, excluded: false, tag_filter: None, min_reciprocity_ratio: Some(0.1), expires_at: None, created_at: 0 })
+            .upsert_tunnel_trust_rule(&TunnelTrustRule {
+                user: bob,
+                auto_accept_requests: true,
+                auto_consume_advertisements: false,
+                auto_respond_to_service_requests: false,
+                excluded: false,
+                tag_filter: None,
+                min_reciprocity_ratio: Some(0.1),
+                expires_at: None,
+                created_at: 0,
+            })
             .unwrap();
         // Past the volume floor (100MB), given entirely one-way — bob has
         // never reciprocated at all.
-        store.record_transfer_sample(&bob, state_store::TunnelDirection::Providing, 200_000_000, 0, 100).unwrap();
+        store
+            .record_transfer_sample(
+                &bob,
+                state_store::TunnelDirection::Providing,
+                200_000_000,
+                0,
+                100,
+            )
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        let report = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(report.auto_accepts, 0, "a peer below the configured reciprocity floor must fall back to manual review");
-        assert!(store.get_tunnel_connection_accept_for(&bob, 0).unwrap().is_none(), "no accept should have been stored");
+        assert_eq!(
+            report.auto_accepts, 0,
+            "a peer below the configured reciprocity floor must fall back to manual review"
+        );
+        assert!(
+            store
+                .get_tunnel_connection_accept_for(&bob, 0)
+                .unwrap()
+                .is_none(),
+            "no accept should have been stored"
+        );
     }
 
     #[test]
     fn reciprocity_floor_is_not_checked_below_the_minimum_volume() {
         let (store, self_user) = store_with_self_identity();
-        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(
+            &store,
+            "self's own ad",
+            None,
+            vec![TargetSelector::Domain("example.com".into())],
+            Vec::new(),
+            None,
+            None,
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
         let bob = user(2);
         pending_request_against_own_ad(&store, bob, self_user);
         store
-            .upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: false, auto_respond_to_service_requests: false, excluded: false, tag_filter: None, min_reciprocity_ratio: Some(0.1), expires_at: None, created_at: 0 })
+            .upsert_tunnel_trust_rule(&TunnelTrustRule {
+                user: bob,
+                auto_accept_requests: true,
+                auto_consume_advertisements: false,
+                auto_respond_to_service_requests: false,
+                excluded: false,
+                tag_filter: None,
+                min_reciprocity_ratio: Some(0.1),
+                expires_at: None,
+                created_at: 0,
+            })
             .unwrap();
         // Well under the 100MB volume floor, despite a terrible ratio — a
         // brand-new relationship must never be flagged on noise.
-        store.record_transfer_sample(&bob, state_store::TunnelDirection::Providing, 1_000, 0, 100).unwrap();
+        store
+            .record_transfer_sample(&bob, state_store::TunnelDirection::Providing, 1_000, 0, 100)
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        let report = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(report.auto_accepts, 1, "below the volume floor, the reciprocity ratio must not gate auto-accept at all");
+        assert_eq!(
+            report.auto_accepts, 1,
+            "below the volume floor, the reciprocity ratio must not gate auto-accept at all"
+        );
     }
 
     #[test]
     fn reciprocity_floor_allows_auto_accept_when_the_ratio_is_met() {
         let (store, self_user) = store_with_self_identity();
-        let (_ad, _pubkey) = build_and_store_own_advertisement(&store, "self's own ad", None, vec![TargetSelector::Domain("example.com".into())], Vec::new(), None, None, Visibility::Public, None).unwrap();
+        let (_ad, _pubkey) = build_and_store_own_advertisement(
+            &store,
+            "self's own ad",
+            None,
+            vec![TargetSelector::Domain("example.com".into())],
+            Vec::new(),
+            None,
+            None,
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
         let bob = user(2);
         pending_request_against_own_ad(&store, bob, self_user);
         store
-            .upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: false, auto_respond_to_service_requests: false, excluded: false, tag_filter: None, min_reciprocity_ratio: Some(0.1), expires_at: None, created_at: 0 })
+            .upsert_tunnel_trust_rule(&TunnelTrustRule {
+                user: bob,
+                auto_accept_requests: true,
+                auto_consume_advertisements: false,
+                auto_respond_to_service_requests: false,
+                excluded: false,
+                tag_filter: None,
+                min_reciprocity_ratio: Some(0.1),
+                expires_at: None,
+                created_at: 0,
+            })
             .unwrap();
-        store.record_transfer_sample(&bob, state_store::TunnelDirection::Providing, 200_000_000, 0, 100).unwrap();
+        store
+            .record_transfer_sample(
+                &bob,
+                state_store::TunnelDirection::Providing,
+                200_000_000,
+                0,
+                100,
+            )
+            .unwrap();
         // Bob has reciprocated well above the 0.1 floor (0.5).
-        store.record_transfer_sample(&bob, state_store::TunnelDirection::Consuming, 100_000_000, 0, 100).unwrap();
+        store
+            .record_transfer_sample(
+                &bob,
+                state_store::TunnelDirection::Consuming,
+                100_000_000,
+                0,
+                100,
+            )
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        let report = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(report.auto_accepts, 1, "a peer meeting the reciprocity floor must still be auto-accepted normally");
+        assert_eq!(
+            report.auto_accepts, 1,
+            "a peer meeting the reciprocity floor must still be auto-accepted normally"
+        );
     }
 
     #[test]
@@ -1535,8 +2370,12 @@ mod sync_tunnels_tests {
         let (store, self_user) = store_with_self_identity();
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
-        store.store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key())).unwrap();
-        store.upsert_tunnel_trust_rule(&trust_rule(bob, false, true, false)).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key()))
+            .unwrap();
+        store
+            .upsert_tunnel_trust_rule(&trust_rule(bob, false, true, false))
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
@@ -1545,8 +2384,19 @@ mod sync_tunnels_tests {
         let report = sync_tunnels(&store, &runner, &out_dir, wg_config(dir.path()), false).unwrap();
 
         assert_eq!(report.auto_consumes, 1);
-        assert!(store.has_tunnel_connection_request_for(&self_user, &StatementRef { author: bob, sequence: 0 }).unwrap());
-        assert!(std::fs::read_dir(&out_dir).unwrap().count() > 0, "the auto-request must be exported for pickup");
+        assert!(store
+            .has_tunnel_connection_request_for(
+                &self_user,
+                &StatementRef {
+                    author: bob,
+                    sequence: 0
+                }
+            )
+            .unwrap());
+        assert!(
+            std::fs::read_dir(&out_dir).unwrap().count() > 0,
+            "the auto-request must be exported for pickup"
+        );
     }
 
     #[test]
@@ -1554,15 +2404,36 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
-        store.store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key())).unwrap();
-        store.upsert_tunnel_trust_rule(&trust_rule(bob, false, true, false)).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key()))
+            .unwrap();
+        store
+            .upsert_tunnel_trust_rule(&trust_rule(bob, false, true, false))
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
-        let second = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
+        let second = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(second.auto_consumes, 0, "an advertisement already requested must not be requested again");
+        assert_eq!(
+            second.auto_consumes, 0,
+            "an advertisement already requested must not be requested again"
+        );
     }
 
     #[test]
@@ -1570,17 +2441,45 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
-        store.store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key())).unwrap();
-        store.upsert_tunnel_trust_rule(&TunnelTrustRule { user: bob, auto_accept_requests: true, auto_consume_advertisements: true, auto_respond_to_service_requests: true, excluded: true, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key()))
+            .unwrap();
+        store
+            .upsert_tunnel_trust_rule(&TunnelTrustRule {
+                user: bob,
+                auto_accept_requests: true,
+                auto_consume_advertisements: true,
+                auto_respond_to_service_requests: true,
+                excluded: true,
+                tag_filter: None,
+                min_reciprocity_ratio: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        let report = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(report.auto_consumes, 0, "`excluded` must override every auto-behavior flag on the same rule");
+        assert_eq!(
+            report.auto_consumes, 0,
+            "`excluded` must override every auto-behavior flag on the same rule"
+        );
     }
 
-    fn seed_advertisement_with_tags(provider: UserId, messaging_pubkey: MessagingPublicKeyBytes, tags: Vec<String>) -> TunnelAdvertisement {
+    fn seed_advertisement_with_tags(
+        provider: UserId,
+        messaging_pubkey: MessagingPublicKeyBytes,
+        tags: Vec<String>,
+    ) -> TunnelAdvertisement {
         let mut ad = seed_advertisement(provider, messaging_pubkey);
         ad.tags = tags;
         ad
@@ -1591,16 +2490,32 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
-        store.store_own_tunnel_advertisement(&seed_advertisement_with_tags(bob, bob_messaging_kp.public_key(), vec!["gaming".into()])).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement_with_tags(
+                bob,
+                bob_messaging_kp.public_key(),
+                vec!["gaming".into()],
+            ))
+            .unwrap();
         let mut trust = trust_rule(bob, false, true, false);
         trust.tag_filter = Some("streaming".into());
         store.upsert_tunnel_trust_rule(&trust).unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        let report = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(report.auto_consumes, 0, "the advertisement's tags don't include the filter, so it must not be auto-consumed");
+        assert_eq!(
+            report.auto_consumes, 0,
+            "the advertisement's tags don't include the filter, so it must not be auto-consumed"
+        );
     }
 
     #[test]
@@ -1608,16 +2523,32 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
-        store.store_own_tunnel_advertisement(&seed_advertisement_with_tags(bob, bob_messaging_kp.public_key(), vec!["streaming".into(), "gaming".into()])).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement_with_tags(
+                bob,
+                bob_messaging_kp.public_key(),
+                vec!["streaming".into(), "gaming".into()],
+            ))
+            .unwrap();
         let mut trust = trust_rule(bob, false, true, false);
         trust.tag_filter = Some("streaming".into());
         store.upsert_tunnel_trust_rule(&trust).unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        let report = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(report.auto_consumes, 1, "the advertisement's tags include the filter, so it must be auto-consumed");
+        assert_eq!(
+            report.auto_consumes, 1,
+            "the advertisement's tags include the filter, so it must be auto-consumed"
+        );
     }
 
     #[test]
@@ -1625,14 +2556,32 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
-        store.store_own_tunnel_advertisement(&seed_advertisement_with_tags(bob, bob_messaging_kp.public_key(), vec!["unrelated".into()])).unwrap();
-        store.upsert_tunnel_trust_rule(&trust_rule(bob, false, true, false)).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement_with_tags(
+                bob,
+                bob_messaging_kp.public_key(),
+                vec!["unrelated".into()],
+            ))
+            .unwrap();
+        store
+            .upsert_tunnel_trust_rule(&trust_rule(bob, false, true, false))
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        let report = sync_tunnels(&store, &runner, &dir.path().join("out"), wg_config(dir.path()), false).unwrap();
+        let report = sync_tunnels(
+            &store,
+            &runner,
+            &dir.path().join("out"),
+            wg_config(dir.path()),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(report.auto_consumes, 1, "no tag_filter set means every advertisement from this trusted provider counts");
+        assert_eq!(
+            report.auto_consumes, 1,
+            "no tag_filter set means every advertisement from this trusted provider counts"
+        );
     }
 
     #[test]
@@ -1640,9 +2589,15 @@ mod sync_tunnels_tests {
         let (store, _self_user) = store_with_self_identity();
         let bob = user(2);
         let bob_messaging_kp = crypto::MessagingKeypair::generate();
-        store.store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key())).unwrap();
-        store.store_own_tunnel_service_request(&seed_service_request(bob)).unwrap();
-        store.upsert_tunnel_trust_rule(&trust_rule(bob, false, false, true)).unwrap();
+        store
+            .store_own_tunnel_advertisement(&seed_advertisement(bob, bob_messaging_kp.public_key()))
+            .unwrap();
+        store
+            .store_own_tunnel_service_request(&seed_service_request(bob))
+            .unwrap();
+        store
+            .upsert_tunnel_trust_rule(&trust_rule(bob, false, false, true))
+            .unwrap();
 
         let runner = wg_tunnel::FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
@@ -1650,8 +2605,14 @@ mod sync_tunnels_tests {
 
         let report = sync_tunnels(&store, &runner, &out_dir, wg_config(dir.path()), true).unwrap();
 
-        assert_eq!(report.auto_responses, 1, "dry-run must still report what it would have done");
-        assert!(!out_dir.exists(), "dry-run must not create the export directory or write any files");
+        assert_eq!(
+            report.auto_responses, 1,
+            "dry-run must still report what it would have done"
+        );
+        assert!(
+            !out_dir.exists(),
+            "dry-run must not create the export directory or write any files"
+        );
         assert_eq!(store.list_tunnel_advertisements().unwrap().len(), 1, "dry-run must not actually store a response advertisement — only bob's seeded one exists");
         assert_eq!(runner.call_count(), 0, "dry-run must never touch wg/ip/nft");
     }

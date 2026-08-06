@@ -1,5 +1,8 @@
-use axum::{extract::{Query, State}, response::Response};
 use axum::http::{header, StatusCode};
+use axum::{
+    extract::{Query, State},
+    response::Response,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -49,14 +52,12 @@ pub async fn get(
         .await;
 
     match out {
-        Ok(o) if o.status.success() => {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "image/svg+xml")
-                .header(header::CACHE_CONTROL, "no-store")
-                .body(String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap()
-        }
+        Ok(o) if o.status.success() => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/svg+xml")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap(),
         _ => err(StatusCode::INTERNAL_SERVER_ERROR, "qrencode failed"),
     }
 }

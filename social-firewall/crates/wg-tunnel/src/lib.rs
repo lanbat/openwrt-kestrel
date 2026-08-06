@@ -33,7 +33,9 @@ mod routing;
 
 pub use command::{CommandOutput, CommandRunner, FakeCommandRunner, SystemCommandRunner};
 pub use keypair::WgKeypair;
-pub use routing::{apply_policy_route, compile_mark_script, dnsmasq_conf_snippet, CompiledMarkScript};
+pub use routing::{
+    apply_policy_route, compile_mark_script, dnsmasq_conf_snippet, CompiledMarkScript,
+};
 
 use domain_types::WgPublicKeyBytes;
 use state_store::{StateStore, StoreError};
@@ -97,8 +99,16 @@ pub struct WgTunnelController<'a> {
 }
 
 impl<'a> WgTunnelController<'a> {
-    pub fn new(runner: &'a dyn CommandRunner, store: &'a StateStore, config: WgTunnelConfig) -> Self {
-        Self { runner, store, config }
+    pub fn new(
+        runner: &'a dyn CommandRunner,
+        store: &'a StateStore,
+        config: WgTunnelConfig,
+    ) -> Self {
+        Self {
+            runner,
+            store,
+            config,
+        }
     }
 
     /// Idempotently ensures this router has a WireGuard keypair
@@ -122,17 +132,33 @@ impl<'a> WgTunnelController<'a> {
         let public_key = keypair.public_key();
         let iface = &self.config.interface_name;
 
-        let show = self.runner.run("ip", &["link", "show", iface], self.config.command_timeout);
+        let show = self
+            .runner
+            .run("ip", &["link", "show", iface], self.config.command_timeout);
         if !show.success {
-            let add = self.runner.run("ip", &["link", "add", iface, "type", "wireguard"], self.config.command_timeout);
+            let add = self.runner.run(
+                "ip",
+                &["link", "add", iface, "type", "wireguard"],
+                self.config.command_timeout,
+            );
             if !add.success {
-                return Err(WgTunnelError::Command(format!("failed to create interface {iface}: {}", add.stderr)));
+                return Err(WgTunnelError::Command(format!(
+                    "failed to create interface {iface}: {}",
+                    add.stderr
+                )));
             }
         }
 
-        let up = self.runner.run("ip", &["link", "set", iface, "up"], self.config.command_timeout);
+        let up = self.runner.run(
+            "ip",
+            &["link", "set", iface, "up"],
+            self.config.command_timeout,
+        );
         if !up.success {
-            return Err(WgTunnelError::Command(format!("failed to bring up interface {iface}: {}", up.stderr)));
+            return Err(WgTunnelError::Command(format!(
+                "failed to bring up interface {iface}: {}",
+                up.stderr
+            )));
         }
 
         Ok(public_key)
@@ -152,21 +178,39 @@ impl<'a> WgTunnelController<'a> {
     /// `apply_policy_route` does — `allowed-ips` is the one thing
     /// `apply_policy_route`'s own IPv4/IPv6 symmetry can't substitute
     /// for.
-    pub fn add_or_update_peer(&self, peer_wg_pubkey: &WgPublicKeyBytes, allowed_ip_v4: &str, allowed_ip_v6: Option<&str>, endpoint_hint: Option<&str>) -> Result<(), WgTunnelError> {
+    pub fn add_or_update_peer(
+        &self,
+        peer_wg_pubkey: &WgPublicKeyBytes,
+        allowed_ip_v4: &str,
+        allowed_ip_v6: Option<&str>,
+        endpoint_hint: Option<&str>,
+    ) -> Result<(), WgTunnelError> {
         let pubkey_b64 = base64_encode(&peer_wg_pubkey.0);
         let keepalive_secs = PERSISTENT_KEEPALIVE_SECS.to_string();
         let allowed_ips = match allowed_ip_v6 {
             Some(v6) => format!("{allowed_ip_v4},{v6}"),
             None => allowed_ip_v4.to_string(),
         };
-        let mut args = vec!["set", self.config.interface_name.as_str(), "peer", pubkey_b64.as_str(), "allowed-ips", allowed_ips.as_str(), "persistent-keepalive", keepalive_secs.as_str()];
+        let mut args = vec![
+            "set",
+            self.config.interface_name.as_str(),
+            "peer",
+            pubkey_b64.as_str(),
+            "allowed-ips",
+            allowed_ips.as_str(),
+            "persistent-keepalive",
+            keepalive_secs.as_str(),
+        ];
         if let Some(hint) = endpoint_hint {
             args.push("endpoint");
             args.push(hint);
         }
         let out = self.runner.run("wg", &args, self.config.command_timeout);
         if !out.success {
-            return Err(WgTunnelError::Command(format!("failed to add/update peer: {}", out.stderr)));
+            return Err(WgTunnelError::Command(format!(
+                "failed to add/update peer: {}",
+                out.stderr
+            )));
         }
         Ok(())
     }
@@ -174,9 +218,22 @@ impl<'a> WgTunnelController<'a> {
     /// Real `wg set <iface> peer <pubkey> remove`.
     pub fn remove_peer(&self, peer_wg_pubkey: &WgPublicKeyBytes) -> Result<(), WgTunnelError> {
         let pubkey_b64 = base64_encode(&peer_wg_pubkey.0);
-        let out = self.runner.run("wg", &["set", self.config.interface_name.as_str(), "peer", pubkey_b64.as_str(), "remove"], self.config.command_timeout);
+        let out = self.runner.run(
+            "wg",
+            &[
+                "set",
+                self.config.interface_name.as_str(),
+                "peer",
+                pubkey_b64.as_str(),
+                "remove",
+            ],
+            self.config.command_timeout,
+        );
         if !out.success {
-            return Err(WgTunnelError::Command(format!("failed to remove peer: {}", out.stderr)));
+            return Err(WgTunnelError::Command(format!(
+                "failed to remove peer: {}",
+                out.stderr
+            )));
         }
         Ok(())
     }
@@ -186,7 +243,11 @@ impl<'a> WgTunnelController<'a> {
     /// diff, mirroring how `nft-enforcer`'s health check re-lists live
     /// `nft` state rather than trusting its own compiled struct.
     pub fn list_configured_peers(&self) -> Result<Vec<WgPublicKeyBytes>, WgTunnelError> {
-        let out = self.runner.run("wg", &["show", self.config.interface_name.as_str(), "dump"], self.config.command_timeout);
+        let out = self.runner.run(
+            "wg",
+            &["show", self.config.interface_name.as_str(), "dump"],
+            self.config.command_timeout,
+        );
         if !out.success {
             // No interface yet is a legitimate "zero peers configured"
             // state, not an error — `ensure_interface_and_keypair` is
@@ -219,7 +280,11 @@ impl<'a> WgTunnelController<'a> {
     /// `state_store::StateStore::list_tunnel_balances`); this method only
     /// reads live state, it doesn't touch `state-store` itself.
     pub fn list_peer_transfers(&self) -> Result<Vec<(WgPublicKeyBytes, u64, u64)>, WgTunnelError> {
-        let out = self.runner.run("wg", &["show", self.config.interface_name.as_str(), "dump"], self.config.command_timeout);
+        let out = self.runner.run(
+            "wg",
+            &["show", self.config.interface_name.as_str(), "dump"],
+            self.config.command_timeout,
+        );
         if !out.success {
             return Ok(Vec::new());
         }
@@ -229,12 +294,20 @@ impl<'a> WgTunnelController<'a> {
                 continue; // interface line, not a peer
             }
             let fields: Vec<&str> = line.split('\t').collect();
-            let (Some(pubkey_field), Some(rx_field), Some(tx_field)) = (fields.first(), fields.get(5), fields.get(6)) else { continue };
-            let Some(bytes) = base64_decode(pubkey_field) else { continue };
+            let (Some(pubkey_field), Some(rx_field), Some(tx_field)) =
+                (fields.first(), fields.get(5), fields.get(6))
+            else {
+                continue;
+            };
+            let Some(bytes) = base64_decode(pubkey_field) else {
+                continue;
+            };
             if bytes.len() != 32 {
                 continue;
             }
-            let (Ok(rx), Ok(tx)) = (rx_field.parse::<u64>(), tx_field.parse::<u64>()) else { continue };
+            let (Ok(rx), Ok(tx)) = (rx_field.parse::<u64>(), tx_field.parse::<u64>()) else {
+                continue;
+            };
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&bytes);
             transfers.push((WgPublicKeyBytes(arr), rx, tx));
@@ -261,21 +334,30 @@ impl<'a> WgTunnelController<'a> {
     pub fn reconcile(&self) -> Result<ReconcileResult, WgTunnelError> {
         self.ensure_interface_and_keypair()?;
         let desired = self.store.list_provisioned_tunnels()?;
-        let desired_active: Vec<&state_store::ProvisionedTunnel> = desired.iter().filter(|t| t.status == "active").collect();
+        let desired_active: Vec<&state_store::ProvisionedTunnel> =
+            desired.iter().filter(|t| t.status == "active").collect();
         let live = self.list_configured_peers()?;
 
         let mut added = 0;
         for t in &desired_active {
             if !live.contains(&t.peer_wg_pubkey) {
                 let allowed_ip_v6 = t.tunnel_ip6.as_ref().map(|ip6| format!("{ip6}/128"));
-                self.add_or_update_peer(&t.peer_wg_pubkey, &format!("{}/32", t.tunnel_ip), allowed_ip_v6.as_deref(), None)?;
+                self.add_or_update_peer(
+                    &t.peer_wg_pubkey,
+                    &format!("{}/32", t.tunnel_ip),
+                    allowed_ip_v6.as_deref(),
+                    None,
+                )?;
                 added += 1;
             }
         }
 
         let mut removed = 0;
         for live_pubkey in &live {
-            if !desired_active.iter().any(|t| &t.peer_wg_pubkey == live_pubkey) {
+            if !desired_active
+                .iter()
+                .any(|t| &t.peer_wg_pubkey == live_pubkey)
+            {
                 self.remove_peer(live_pubkey)?;
                 removed += 1;
             }
@@ -290,7 +372,8 @@ impl<'a> WgTunnelController<'a> {
         let now = now_unix();
         for (pubkey, rx, tx) in self.list_peer_transfers()? {
             for t in desired_active.iter().filter(|t| t.peer_wg_pubkey == pubkey) {
-                self.store.record_transfer_sample(&t.peer, t.direction, rx, tx, now)?;
+                self.store
+                    .record_transfer_sample(&t.peer, t.direction, rx, tx, now)?;
             }
         }
 
@@ -298,14 +381,23 @@ impl<'a> WgTunnelController<'a> {
         // own outgoing traffic — a *providing* tunnel's routing is the
         // other side's problem, this side just accepts the WireGuard peer
         // (handled above) and forwards whatever arrives on the interface.
-        for t in desired_active.iter().filter(|t| t.direction == state_store::TunnelDirection::Consuming) {
-            let selected = self.store.get_provisioned_tunnel_selected_targets(&t.peer, state_store::TunnelDirection::Consuming)?;
+        for t in desired_active
+            .iter()
+            .filter(|t| t.direction == state_store::TunnelDirection::Consuming)
+        {
+            let selected = self.store.get_provisioned_tunnel_selected_targets(
+                &t.peer,
+                state_store::TunnelDirection::Consuming,
+            )?;
             let mut domains = Vec::new();
             let mut static_addrs = Vec::new();
             for target in &selected {
                 match target {
-                    domain_types::TargetSelector::Domain(d) | domain_types::TargetSelector::DomainSuffix(d) => domains.push(d.clone()),
-                    domain_types::TargetSelector::Ip(a) | domain_types::TargetSelector::Cidr(a) => static_addrs.push(a.clone()),
+                    domain_types::TargetSelector::Domain(d)
+                    | domain_types::TargetSelector::DomainSuffix(d) => domains.push(d.clone()),
+                    domain_types::TargetSelector::Ip(a) | domain_types::TargetSelector::Cidr(a) => {
+                        static_addrs.push(a.clone())
+                    }
                     // `Service`/`ProtoPort` aren't resolvable to an
                     // address at all — not yet enforceable here, same
                     // "recorded but not yet enforceable" gap `nft-enforcer`
@@ -323,14 +415,30 @@ impl<'a> WgTunnelController<'a> {
             // no limits are applied, not an error.
             let (max_connections, max_bandwidth_kbps) = t
                 .advertisement_sequence
-                .and_then(|seq| self.store.get_tunnel_advertisement(t.peer, seq).ok().flatten())
+                .and_then(|seq| {
+                    self.store
+                        .get_tunnel_advertisement(t.peer, seq)
+                        .ok()
+                        .flatten()
+                })
                 .map(|ad| (ad.max_connections, ad.max_bandwidth_kbps))
                 .unwrap_or((None, None));
             let peer_short_id = hex_prefix(&t.peer.local_id.0, 8);
-            self.provision_routing(&peer_short_id, t.fwmark, t.route_table, &domains, &static_addrs, max_connections, max_bandwidth_kbps)?;
+            self.provision_routing(
+                &peer_short_id,
+                t.fwmark,
+                t.route_table,
+                &domains,
+                &static_addrs,
+                max_connections,
+                max_bandwidth_kbps,
+            )?;
         }
 
-        Ok(ReconcileResult { peers_added: added, peers_removed: removed })
+        Ok(ReconcileResult {
+            peers_added: added,
+            peers_removed: removed,
+        })
     }
 
     /// Provisions the traffic-marking half of routing a consuming
@@ -349,22 +457,56 @@ impl<'a> WgTunnelController<'a> {
     /// happens to this peer's traffic," that's "is this peer allowed to
     /// connect at all."
     #[allow(clippy::too_many_arguments)]
-    pub fn provision_routing(&self, peer_short_id: &str, fwmark: i64, route_table: i64, domains: &[String], static_addrs: &[String], max_connections: Option<u32>, max_bandwidth_kbps: Option<u64>) -> Result<(), WgTunnelError> {
-        let compiled = compile_mark_script(peer_short_id, fwmark, static_addrs, max_connections, max_bandwidth_kbps);
-        let script_path = self.config.scratch_dir.join(format!("social_firewall_tunnel_{peer_short_id}.nft"));
+    pub fn provision_routing(
+        &self,
+        peer_short_id: &str,
+        fwmark: i64,
+        route_table: i64,
+        domains: &[String],
+        static_addrs: &[String],
+        max_connections: Option<u32>,
+        max_bandwidth_kbps: Option<u64>,
+    ) -> Result<(), WgTunnelError> {
+        let compiled = compile_mark_script(
+            peer_short_id,
+            fwmark,
+            static_addrs,
+            max_connections,
+            max_bandwidth_kbps,
+        );
+        let script_path = self
+            .config
+            .scratch_dir
+            .join(format!("social_firewall_tunnel_{peer_short_id}.nft"));
         std::fs::write(&script_path, &compiled.script)?;
         let script_path_str = script_path.to_string_lossy().into_owned();
-        let out = self.runner.run("nft", &["-f", &script_path_str], self.config.command_timeout);
+        let out = self.runner.run(
+            "nft",
+            &["-f", &script_path_str],
+            self.config.command_timeout,
+        );
         if !out.success {
-            return Err(WgTunnelError::Command(format!("failed to apply mark script for {peer_short_id}: {}", out.stderr)));
+            return Err(WgTunnelError::Command(format!(
+                "failed to apply mark script for {peer_short_id}: {}",
+                out.stderr
+            )));
         }
 
         let snippet = dnsmasq_conf_snippet(domains, &compiled.set_v4, &compiled.set_v6);
-        let conf_path = self.config.dnsmasq_dir.join(format!("social-firewall-tunnel-{peer_short_id}.conf"));
+        let conf_path = self
+            .config
+            .dnsmasq_dir
+            .join(format!("social-firewall-tunnel-{peer_short_id}.conf"));
         std::fs::write(&conf_path, snippet)?;
 
-        apply_policy_route(self.runner, fwmark, route_table, &self.config.interface_name, self.config.command_timeout)
-            .map_err(WgTunnelError::Command)?;
+        apply_policy_route(
+            self.runner,
+            fwmark,
+            route_table,
+            &self.config.interface_name,
+            self.config.command_timeout,
+        )
+        .map_err(WgTunnelError::Command)?;
         Ok(())
     }
 }
@@ -390,15 +532,23 @@ pub struct ReconcileResult {
 /// for two small functions.
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0];
         let b1 = *chunk.get(1).unwrap_or(&0);
         let b2 = *chunk.get(2).unwrap_or(&0);
         out.push(ALPHABET[(b0 >> 2) as usize] as char);
         out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[(b2 & 0x3f) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -431,7 +581,10 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 fn now_unix() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -446,8 +599,13 @@ mod tests {
     /// set up first.
     fn store_with_identity() -> StateStore {
         let store = StateStore::open_in_memory().unwrap();
-        let user = UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([2; 32]) };
-        store.set_self_identity(user, PublicKeyBytes([3; 32]), &[4; 32], None).unwrap();
+        let user = UserId {
+            federation: FederationId(Hash32([1; 32])),
+            local_id: Hash32([2; 32]),
+        };
+        store
+            .set_self_identity(user, PublicKeyBytes([3; 32]), &[4; 32], None)
+            .unwrap();
         store
     }
 
@@ -459,7 +617,10 @@ mod tests {
         assert_eq!(decoded, bytes.to_vec());
     }
 
-    fn controller<'a>(runner: &'a FakeCommandRunner, store: &'a StateStore) -> WgTunnelController<'a> {
+    fn controller<'a>(
+        runner: &'a FakeCommandRunner,
+        store: &'a StateStore,
+    ) -> WgTunnelController<'a> {
         WgTunnelController::new(runner, store, WgTunnelConfig::default())
     }
 
@@ -467,13 +628,22 @@ mod tests {
     fn ensure_interface_creates_it_when_missing() {
         let store = store_with_identity();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("link") && a.get(1).map(String::as_str) == Some("show"));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.first().map(String::as_str) == Some("link")
+                && a.get(1).map(String::as_str) == Some("show")
+        });
         let ctrl = controller(&runner, &store);
 
         ctrl.ensure_interface_and_keypair().unwrap();
 
         let calls = runner.calls();
-        assert!(calls.iter().any(|(p, a)| p == "ip" && a.first().map(String::as_str) == Some("link") && a.get(1).map(String::as_str) == Some("add")), "must create the interface when `ip link show` fails");
+        assert!(
+            calls.iter().any(|(p, a)| p == "ip"
+                && a.first().map(String::as_str) == Some("link")
+                && a.get(1).map(String::as_str) == Some("add")),
+            "must create the interface when `ip link show` fails"
+        );
     }
 
     #[test]
@@ -485,7 +655,12 @@ mod tests {
         ctrl.ensure_interface_and_keypair().unwrap();
 
         let calls = runner.calls();
-        assert!(!calls.iter().any(|(p, a)| p == "ip" && a.first().map(String::as_str) == Some("link") && a.get(1).map(String::as_str) == Some("add")), "must not recreate an already-present interface");
+        assert!(
+            !calls.iter().any(|(p, a)| p == "ip"
+                && a.first().map(String::as_str) == Some("link")
+                && a.get(1).map(String::as_str) == Some("add")),
+            "must not recreate an already-present interface"
+        );
     }
 
     #[test]
@@ -505,13 +680,22 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store);
 
-        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None, Some("203.0.113.9:51820")).unwrap();
+        ctrl.add_or_update_peer(
+            &WgPublicKeyBytes([7; 32]),
+            "10.99.0.4/32",
+            None,
+            Some("203.0.113.9:51820"),
+        )
+        .unwrap();
 
         let calls = runner.calls();
         let (_, args) = calls.last().unwrap();
         assert!(args.contains(&"endpoint".to_string()));
         assert!(args.contains(&"203.0.113.9:51820".to_string()));
-        assert!(args.contains(&"persistent-keepalive".to_string()), "an endpoint being present must not crowd out the keepalive flag");
+        assert!(
+            args.contains(&"persistent-keepalive".to_string()),
+            "an endpoint being present must not crowd out the keepalive flag"
+        );
     }
 
     /// The IPv6 allowed-ip must be comma-joined onto the v4 one in a
@@ -524,11 +708,20 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store);
 
-        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", Some("fd99::c8:4/128"), Some("203.0.113.9:51820")).unwrap();
+        ctrl.add_or_update_peer(
+            &WgPublicKeyBytes([7; 32]),
+            "10.99.0.4/32",
+            Some("fd99::c8:4/128"),
+            Some("203.0.113.9:51820"),
+        )
+        .unwrap();
 
         let calls = runner.calls();
         let (_, args) = calls.last().unwrap();
-        assert!(args.contains(&"10.99.0.4/32,fd99::c8:4/128".to_string()), "expected a single comma-joined allowed-ips value, got: {args:?}");
+        assert!(
+            args.contains(&"10.99.0.4/32,fd99::c8:4/128".to_string()),
+            "expected a single comma-joined allowed-ips value, got: {args:?}"
+        );
         assert!(args.contains(&"endpoint".to_string()));
         assert!(args.contains(&"203.0.113.9:51820".to_string()));
     }
@@ -539,12 +732,16 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store);
 
-        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None, None).unwrap();
+        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None, None)
+            .unwrap();
 
         let calls = runner.calls();
         let (_, args) = calls.last().unwrap();
         assert!(args.contains(&"10.99.0.4/32".to_string()));
-        assert!(!args.iter().any(|a| a.contains(',')), "must not emit a trailing comma or empty second entry when no IPv6 address is assigned");
+        assert!(
+            !args.iter().any(|a| a.contains(',')),
+            "must not emit a trailing comma or empty second entry when no IPv6 address is assigned"
+        );
     }
 
     /// Every peer this crate ever manages is inherently a remote,
@@ -559,7 +756,8 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store);
 
-        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None, None).unwrap();
+        ctrl.add_or_update_peer(&WgPublicKeyBytes([7; 32]), "10.99.0.4/32", None, None)
+            .unwrap();
 
         let calls = runner.calls();
         let (_, args) = calls.last().unwrap();
@@ -584,7 +782,8 @@ mod tests {
     fn list_configured_peers_is_empty_when_no_interface_exists() {
         let store = StateStore::open_in_memory().unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "wg" && a.first().map(String::as_str) == Some("show"));
+        runner
+            .fail_next_matching(|p, a| p == "wg" && a.first().map(String::as_str) == Some("show"));
         let ctrl = controller(&runner, &store);
 
         assert_eq!(ctrl.list_configured_peers().unwrap(), Vec::new());
@@ -622,18 +821,27 @@ mod tests {
     fn reconcile_ensures_the_interface_exists() {
         let store = store_with_identity();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.first().map(String::as_str) == Some("link") && a.get(1).map(String::as_str) == Some("show"));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.first().map(String::as_str) == Some("link")
+                && a.get(1).map(String::as_str) == Some("show")
+        });
         let ctrl = controller(&runner, &store);
 
         ctrl.reconcile().unwrap();
 
         let calls = runner.calls();
-        assert!(calls.iter().any(|(p, a)| p == "ip" && a.first().map(String::as_str) == Some("link") && a.get(1).map(String::as_str) == Some("add")));
+        assert!(calls.iter().any(|(p, a)| p == "ip"
+            && a.first().map(String::as_str) == Some("link")
+            && a.get(1).map(String::as_str) == Some("add")));
     }
 
     fn provisioned(peer_local: u8, wg_pubkey: [u8; 32]) -> state_store::ProvisionedTunnel {
         state_store::ProvisionedTunnel {
-            peer: UserId { federation: FederationId(Hash32([9; 32])), local_id: Hash32([peer_local; 32]) },
+            peer: UserId {
+                federation: FederationId(Hash32([9; 32])),
+                local_id: Hash32([peer_local; 32]),
+            },
             direction: state_store::TunnelDirection::Consuming,
             peer_wg_pubkey: WgPublicKeyBytes(wg_pubkey),
             interface_name: "sf_tun0".into(),
@@ -650,7 +858,9 @@ mod tests {
     #[test]
     fn reconcile_adds_a_desired_peer_that_is_not_yet_live() {
         let store = store_with_identity();
-        store.upsert_provisioned_tunnel(&provisioned(1, [7; 32])).unwrap();
+        store
+            .upsert_provisioned_tunnel(&provisioned(1, [7; 32]))
+            .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store);
 
@@ -659,7 +869,14 @@ mod tests {
         assert_eq!(result.peers_added, 1);
         assert_eq!(result.peers_removed, 0);
         let calls = runner.calls();
-        let wg_set = calls.iter().find(|(p, a)| p == "wg" && a.first().map(String::as_str) == Some("set") && a.contains(&"allowed-ips".to_string())).expect("must issue a wg set ... allowed-ips call");
+        let wg_set = calls
+            .iter()
+            .find(|(p, a)| {
+                p == "wg"
+                    && a.first().map(String::as_str) == Some("set")
+                    && a.contains(&"allowed-ips".to_string())
+            })
+            .expect("must issue a wg set ... allowed-ips call");
         assert!(wg_set.1.contains(&"10.99.0.4/32,fd99::c8:4/128".to_string()), "reconcile must thread the provisioned tunnel's own tunnel_ip6 through to allowed-ips, got: {:?}", wg_set.1);
     }
 
@@ -675,7 +892,10 @@ mod tests {
 
         let result = ctrl.reconcile().unwrap();
 
-        assert_eq!(result.peers_added, 0, "an already-live desired peer must not be re-added");
+        assert_eq!(
+            result.peers_added, 0,
+            "an already-live desired peer must not be re-added"
+        );
         assert_eq!(result.peers_removed, 0);
     }
 
@@ -692,7 +912,14 @@ mod tests {
         ctrl.reconcile().unwrap();
 
         let balances = store.list_tunnel_balances().unwrap();
-        assert_eq!(balances, vec![state_store::TunnelBalance { peer: entry.peer, given_to: 0, taken_from: 1000 + 2000 }]);
+        assert_eq!(
+            balances,
+            vec![state_store::TunnelBalance {
+                peer: entry.peer,
+                given_to: 0,
+                taken_from: 1000 + 2000
+            }]
+        );
     }
 
     #[test]
@@ -709,7 +936,9 @@ mod tests {
         assert_eq!(result.peers_added, 0);
         assert_eq!(result.peers_removed, 1);
         let calls = runner.calls();
-        assert!(calls.iter().any(|(p, a)| p == "wg" && a.contains(&"remove".to_string())));
+        assert!(calls
+            .iter()
+            .any(|(p, a)| p == "wg" && a.contains(&"remove".to_string())));
     }
 
     #[test]
@@ -723,46 +952,116 @@ mod tests {
 
         let result = ctrl.reconcile().unwrap();
 
-        assert_eq!(result.peers_added, 0, "a non-active provisioned tunnel must not be added as a live peer");
+        assert_eq!(
+            result.peers_added, 0,
+            "a non-active provisioned tunnel must not be added as a live peer"
+        );
     }
 
-    fn controller_with_dirs<'a>(runner: &'a FakeCommandRunner, store: &'a StateStore, dir: &std::path::Path) -> WgTunnelController<'a> {
-        WgTunnelController::new(runner, store, WgTunnelConfig { scratch_dir: dir.to_path_buf(), dnsmasq_dir: dir.to_path_buf(), ..WgTunnelConfig::default() })
+    fn controller_with_dirs<'a>(
+        runner: &'a FakeCommandRunner,
+        store: &'a StateStore,
+        dir: &std::path::Path,
+    ) -> WgTunnelController<'a> {
+        WgTunnelController::new(
+            runner,
+            store,
+            WgTunnelConfig {
+                scratch_dir: dir.to_path_buf(),
+                dnsmasq_dir: dir.to_path_buf(),
+                ..WgTunnelConfig::default()
+            },
+        )
     }
 
     #[test]
     fn provision_routing_applies_mark_script_dnsmasq_snippet_and_policy_route() {
         let store = store_with_identity();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
-        ctrl.provision_routing("ab12", 0x1000, 200, &["example.com".to_string()], &[], None, None).unwrap();
+        ctrl.provision_routing(
+            "ab12",
+            0x1000,
+            200,
+            &["example.com".to_string()],
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
 
         let calls = runner.calls();
-        assert!(calls.iter().any(|(p, a)| p == "nft" && a.first().map(String::as_str) == Some("-f")), "must apply the compiled mark script via `nft -f`");
-        assert!(calls.iter().any(|(p, a)| p == "ip" && a.contains(&"rule".to_string()) && a.contains(&"add".to_string())), "must apply the fwmark policy route");
+        assert!(
+            calls
+                .iter()
+                .any(|(p, a)| p == "nft" && a.first().map(String::as_str) == Some("-f")),
+            "must apply the compiled mark script via `nft -f`"
+        );
+        assert!(
+            calls.iter().any(|(p, a)| p == "ip"
+                && a.contains(&"rule".to_string())
+                && a.contains(&"add".to_string())),
+            "must apply the fwmark policy route"
+        );
 
-        let conf = std::fs::read_to_string(dir.path().join("social-firewall-tunnel-ab12.conf")).unwrap();
-        assert!(conf.contains("example.com"), "dnsmasq snippet must be written for the selected domain");
+        let conf =
+            std::fs::read_to_string(dir.path().join("social-firewall-tunnel-ab12.conf")).unwrap();
+        assert!(
+            conf.contains("example.com"),
+            "dnsmasq snippet must be written for the selected domain"
+        );
     }
 
     #[test]
     fn provision_routing_populates_the_static_set_for_selected_cidrs() {
         let store = store_with_identity();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
-        ctrl.provision_routing("ab12", 0x1000, 200, &[], &["10.0.0.0/8".to_string()], None, None).unwrap();
+        ctrl.provision_routing(
+            "ab12",
+            0x1000,
+            200,
+            &[],
+            &["10.0.0.0/8".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
 
         let script_path = dir.path().join("social_firewall_tunnel_ab12.nft");
         let script = std::fs::read_to_string(&script_path).unwrap();
-        assert!(script.contains("10.0.0.0/8"), "the selected CIDR must reach the compiled mark script, not just be silently dropped");
+        assert!(
+            script.contains("10.0.0.0/8"),
+            "the selected CIDR must reach the compiled mark script, not just be silently dropped"
+        );
     }
 
     #[test]
@@ -773,7 +1072,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
-        assert!(ctrl.provision_routing("ab12", 0x1000, 200, &["example.com".to_string()], &[], None, None).is_err());
+        assert!(ctrl
+            .provision_routing(
+                "ab12",
+                0x1000,
+                200,
+                &["example.com".to_string()],
+                &[],
+                None,
+                None
+            )
+            .is_err());
     }
 
     #[test]
@@ -782,22 +1091,41 @@ mod tests {
         let entry = provisioned(1, [7; 32]);
         store.upsert_provisioned_tunnel(&entry).unwrap();
         store
-            .set_provisioned_tunnel_selected_targets(&entry.peer, state_store::TunnelDirection::Consuming, &[domain_types::TargetSelector::Domain("example.com".into())])
+            .set_provisioned_tunnel_selected_targets(
+                &entry.peer,
+                state_store::TunnelDirection::Consuming,
+                &[domain_types::TargetSelector::Domain("example.com".into())],
+            )
             .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         // `apply_policy_route`'s idempotent `while ip rule del succeeds`
         // loop needs a queued failure to actually terminate against a
         // fake runner that otherwise always succeeds — see the identical
         // pattern in `routing::tests::apply_policy_route_issues_rule_and_route_commands`.
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
         ctrl.reconcile().unwrap();
 
         let calls = runner.calls();
-        assert!(calls.iter().any(|(p, a)| p == "nft" && a.first().map(String::as_str) == Some("-f")), "reconcile must provision routing for a consuming tunnel's selected domains");
+        assert!(
+            calls
+                .iter()
+                .any(|(p, a)| p == "nft" && a.first().map(String::as_str) == Some("-f")),
+            "reconcile must provision routing for a consuming tunnel's selected domains"
+        );
     }
 
     #[test]
@@ -830,20 +1158,44 @@ mod tests {
         entry.advertisement_sequence = Some(0);
         store.upsert_provisioned_tunnel(&entry).unwrap();
         store
-            .set_provisioned_tunnel_selected_targets(&entry.peer, state_store::TunnelDirection::Consuming, &[domain_types::TargetSelector::Domain("example.com".into())])
+            .set_provisioned_tunnel_selected_targets(
+                &entry.peer,
+                state_store::TunnelDirection::Consuming,
+                &[domain_types::TargetSelector::Domain("example.com".into())],
+            )
             .unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
         ctrl.reconcile().unwrap();
 
         let peer_short_id = hex_prefix(&entry.peer.local_id.0, 8);
-        let script = std::fs::read_to_string(dir.path().join(format!("social_firewall_tunnel_{peer_short_id}.nft"))).unwrap();
-        assert!(script.contains("ct count over 50 drop"), "script was:\n{script}");
-        assert!(script.contains("limit rate over 1000000 bytes/second drop"), "script was:\n{script}");
+        let script = std::fs::read_to_string(
+            dir.path()
+                .join(format!("social_firewall_tunnel_{peer_short_id}.nft")),
+        )
+        .unwrap();
+        assert!(
+            script.contains("ct count over 50 drop"),
+            "script was:\n{script}"
+        );
+        assert!(
+            script.contains("limit rate over 1000000 bytes/second drop"),
+            "script was:\n{script}"
+        );
     }
 
     #[test]
@@ -852,11 +1204,25 @@ mod tests {
         let entry = provisioned(1, [7; 32]);
         store.upsert_provisioned_tunnel(&entry).unwrap();
         store
-            .set_provisioned_tunnel_selected_targets(&entry.peer, state_store::TunnelDirection::Consuming, &[domain_types::TargetSelector::Cidr("10.0.0.0/8".into())])
+            .set_provisioned_tunnel_selected_targets(
+                &entry.peer,
+                state_store::TunnelDirection::Consuming,
+                &[domain_types::TargetSelector::Cidr("10.0.0.0/8".into())],
+            )
             .unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
@@ -879,18 +1245,44 @@ mod tests {
         let entry = provisioned(1, [7; 32]);
         store.upsert_provisioned_tunnel(&entry).unwrap();
         store
-            .set_provisioned_tunnel_selected_targets(&entry.peer, state_store::TunnelDirection::Consuming, &[domain_types::TargetSelector::Domain("example.com".into())])
+            .set_provisioned_tunnel_selected_targets(
+                &entry.peer,
+                state_store::TunnelDirection::Consuming,
+                &[domain_types::TargetSelector::Domain("example.com".into())],
+            )
             .unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
 
         let peer_short_id = hex_prefix(&entry.peer.local_id.0, 8);
-        let script_path = dir.path().join(format!("social_firewall_tunnel_{peer_short_id}.nft"));
+        let script_path = dir
+            .path()
+            .join(format!("social_firewall_tunnel_{peer_short_id}.nft"));
 
         ctrl.reconcile().unwrap();
         let script_after_first = std::fs::read_to_string(&script_path).unwrap();
@@ -900,13 +1292,18 @@ mod tests {
         // Every reconcile pass writes the exact same deterministic
         // script (it always flushes-then-repopulates) — byte-identical
         // across repeated calls is itself proof nothing is accumulating.
-        assert_eq!(script_after_first, script_after_second, "the compiled script must be identical across repeated reconcile passes, not growing");
+        assert_eq!(
+            script_after_first, script_after_second,
+            "the compiled script must be identical across repeated reconcile passes, not growing"
+        );
     }
 
     #[test]
     fn reconcile_skips_routing_provisioning_when_no_targets_are_selected() {
         let store = store_with_identity();
-        store.upsert_provisioned_tunnel(&provisioned(1, [7; 32])).unwrap();
+        store
+            .upsert_provisioned_tunnel(&provisioned(1, [7; 32]))
+            .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
         let ctrl = controller_with_dirs(&runner, &store, dir.path());
@@ -914,6 +1311,11 @@ mod tests {
         ctrl.reconcile().unwrap();
 
         let calls = runner.calls();
-        assert!(!calls.iter().any(|(p, a)| p == "nft" && a.first().map(String::as_str) == Some("-f")), "no selected targets means nothing to route yet");
+        assert!(
+            !calls
+                .iter()
+                .any(|(p, a)| p == "nft" && a.first().map(String::as_str) == Some("-f")),
+            "no selected targets means nothing to route yet"
+        );
     }
 }

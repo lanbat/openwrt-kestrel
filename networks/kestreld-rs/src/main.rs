@@ -45,7 +45,8 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--check-vpn") {
         let base_dir = PathBuf::from("/etc/kestrel/networks");
         let split_routing_dir = PathBuf::from("/etc/kestrel/split-routing");
-        let code = current_thread_rt().block_on(kestreld::check_vpn::run(&base_dir, &split_routing_dir));
+        let code =
+            current_thread_rt().block_on(kestreld::check_vpn::run(&base_dir, &split_routing_dir));
         std::process::exit(code);
     }
 
@@ -70,7 +71,29 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--digest") {
         let base_dir = PathBuf::from("/etc/kestrel/networks");
         let split_routing_dir = PathBuf::from("/etc/kestrel/split-routing");
-        let code = current_thread_rt().block_on(kestreld::digest::run(&base_dir, &split_routing_dir));
+        let code =
+            current_thread_rt().block_on(kestreld::digest::run(&base_dir, &split_routing_dir));
+        std::process::exit(code);
+    }
+
+    // One-shot subcommand, same shape as --update-oui above: imports the
+    // legacy flat files under base_dir into `kestrel.sqlite` (see
+    // `kestreld::migrate`), renaming each imported file to `.migrated`
+    // rather than deleting it. Idempotent — safe to invoke from
+    // install.sh on every upgrade, and safe if it's ever re-run by hand.
+    //
+    // Deliberately NOT auto-triggered from `AppState::build`/daemon
+    // startup yet, unlike the migration plan's original intent: nothing
+    // reads from `Store` yet (`state.rs` still reads the flat files
+    // directly), so auto-migrating today would rename away the files the
+    // live daemon depends on while nothing reads their SQLite
+    // replacement — a real, silent data-loss outage on first start after
+    // upgrade, not a safety net. Wire the auto-trigger in once `state.rs`
+    // actually reads from `Store` (tracked as a follow-up to that phase),
+    // not before.
+    if args.get(1).map(String::as_str) == Some("--migrate-storage") {
+        let base_dir = PathBuf::from("/etc/kestrel/networks");
+        let code = current_thread_rt().block_on(kestreld::migrate::run(&base_dir));
         std::process::exit(code);
     }
 
@@ -85,8 +108,16 @@ fn main() {
         };
         let base_dir = PathBuf::from("/etc/kestrel/networks");
         let split_routing_dir = PathBuf::from("/etc/kestrel/split-routing");
-        let code = current_thread_rt()
-            .block_on(kestreld::regen_inspect::run(&base_dir, &split_routing_dir, iface));
+        let code = current_thread_rt().block_on(async {
+            let store = match kestreld::db::Store::open(&base_dir).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("regen-inspect: failed to open kestrel.sqlite: {e}");
+                    return 1;
+                }
+            };
+            kestreld::regen_inspect::run(&base_dir, &split_routing_dir, &store, iface).await
+        });
         std::process::exit(code);
     }
 
@@ -130,7 +161,9 @@ fn main() {
             .await
             .unwrap_or_else(|e| panic!("bind 0.0.0.0:{port} failed: {e}"));
 
-        axum::serve(listener, routes::build(app_state)).await.unwrap();
+        axum::serve(listener, routes::build(app_state))
+            .await
+            .unwrap();
     });
 }
 

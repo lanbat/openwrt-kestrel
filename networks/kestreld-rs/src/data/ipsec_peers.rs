@@ -34,7 +34,14 @@ pub async fn fetch_peers() -> Vec<IpsecPeer> {
 /// comma-separated fragment, e.g. `"..., 1234 " ` before `"bytes_i"`.
 fn number_before(line: &str, marker: &str) -> Option<u64> {
     let idx = line.find(marker)?;
-    line[..idx].rsplit(',').next()?.trim().split_whitespace().next()?.parse().ok()
+    line[..idx]
+        .rsplit(',')
+        .next()?
+        .trim()
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn parse_statusall(output: &str) -> Vec<IpsecPeer> {
@@ -49,16 +56,32 @@ fn parse_statusall(output: &str) -> Vec<IpsecPeer> {
                 continue;
             }
             let (established, remote) = match tail.split_once(", ") {
-                Some((e, r)) => (e.to_string(), r.split("...").nth(1).unwrap_or(r).to_string()),
+                Some((e, r)) => (
+                    e.to_string(),
+                    r.split("...").nth(1).unwrap_or(r).to_string(),
+                ),
                 None => (tail.to_string(), String::new()),
             };
-            peers.push(IpsecPeer { name, remote, established, traffic: "—".to_string() });
+            peers.push(IpsecPeer {
+                name,
+                remote,
+                established,
+                traffic: "—".to_string(),
+            });
         } else if line.contains("bytes_i") && line.contains("bytes_o") {
-            let Some(name) = line.split('{').next().map(|s| s.trim().to_string()) else { continue };
-            let Some(peer) = peers.iter_mut().rev().find(|p| p.name == name) else { continue };
+            let Some(name) = line.split('{').next().map(|s| s.trim().to_string()) else {
+                continue;
+            };
+            let Some(peer) = peers.iter_mut().rev().find(|p| p.name == name) else {
+                continue;
+            };
             let rx = number_before(line, "bytes_i").unwrap_or(0);
             let tx = number_before(line, "bytes_o").unwrap_or(0);
-            peer.traffic = format!("{} / {}", super::wg::human_bytes(rx), super::wg::human_bytes(tx));
+            peer.traffic = format!(
+                "{} / {}",
+                super::wg::human_bytes(rx),
+                super::wg::human_bytes(tx)
+            );
         }
     }
 

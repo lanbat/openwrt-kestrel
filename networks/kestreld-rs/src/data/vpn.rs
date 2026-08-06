@@ -3,8 +3,8 @@ use tokio::process::Command;
 
 #[derive(Clone)]
 pub struct VpnTier {
-    pub name: String,   // "bg"
-    pub iface: String,  // "mv_bg"
+    pub name: String,  // "bg"
+    pub iface: String, // "mv_bg"
     pub fwmark: u32,
     pub state: VpnState,
 }
@@ -42,14 +42,25 @@ pub async fn fetch_tiers(dir: &Path) -> Vec<VpnTier> {
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let Some(tier) = name.strip_prefix("vpn-").and_then(|s| s.strip_suffix(".conf")) else {
+        let Some(tier) = name
+            .strip_prefix("vpn-")
+            .and_then(|s| s.strip_suffix(".conf"))
+        else {
             continue;
         };
-        let content = tokio::fs::read_to_string(entry.path()).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(entry.path())
+            .await
+            .unwrap_or_default();
         let vars = crate::data::files::parse_sh_vars(&content);
-        let Some(iface) = vars.get("VPN_IFACE").cloned() else { continue };
-        let table: u32 = vars.get("ROUTE_TABLE").and_then(|v| v.parse().ok()).unwrap_or(0);
-        let fwmark: u32 = vars.get("FWMARK")
+        let Some(iface) = vars.get("VPN_IFACE").cloned() else {
+            continue;
+        };
+        let table: u32 = vars
+            .get("ROUTE_TABLE")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let fwmark: u32 = vars
+            .get("FWMARK")
             .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
             .unwrap_or(0);
         confs.push((tier.to_string(), iface, table, fwmark));
@@ -59,7 +70,12 @@ pub async fn fetch_tiers(dir: &Path) -> Vec<VpnTier> {
     let mut tiers = Vec::new();
     for (name, iface, table, fwmark) in confs {
         let state = check_state(&iface, table).await;
-        tiers.push(VpnTier { name, iface, fwmark, state });
+        tiers.push(VpnTier {
+            name,
+            iface,
+            fwmark,
+            state,
+        });
     }
     tiers
 }

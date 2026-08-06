@@ -37,7 +37,9 @@ pub async fn flag_domains(list_path: &Path, queried: &[String]) -> HashMap<Strin
     if let Ok(file) = tokio::fs::File::open(list_path).await {
         let mut lines = BufReader::new(file).lines();
         while matched.len() < needed.len() {
-            let Ok(Some(line)) = lines.next_line().await else { break };
+            let Ok(Some(line)) = lines.next_line().await else {
+                break;
+            };
             if let Some(dom) = parse_domain(&line) {
                 if needed.contains(dom) {
                     matched.insert(dom.to_string());
@@ -62,7 +64,9 @@ fn suffixes(domain: &str) -> Vec<String> {
     if labels.len() < 2 {
         return Vec::new();
     }
-    (0..labels.len() - 1).map(|i| labels[i..].join(".")).collect()
+    (0..labels.len() - 1)
+        .map(|i| labels[i..].join("."))
+        .collect()
 }
 
 /// Extracts the domain out of `local=/domain/` or `local=/domain/#`.
@@ -78,18 +82,26 @@ mod tests {
 
     async fn write_fixture(lines: &[&str]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("adb_list.overall"), lines.join("\n")).await.unwrap();
+        tokio::fs::write(dir.path().join("adb_list.overall"), lines.join("\n"))
+            .await
+            .unwrap();
         dir
     }
 
     #[test]
     fn parse_domain_handles_nxdomain_marker() {
-        assert_eq!(parse_domain("local=/doubleclick.net/#"), Some("doubleclick.net"));
+        assert_eq!(
+            parse_domain("local=/doubleclick.net/#"),
+            Some("doubleclick.net")
+        );
     }
 
     #[test]
     fn parse_domain_handles_bare_local_directive() {
-        assert_eq!(parse_domain("local=/tracker.example.com/"), Some("tracker.example.com"));
+        assert_eq!(
+            parse_domain("local=/tracker.example.com/"),
+            Some("tracker.example.com")
+        );
     }
 
     #[test]
@@ -101,7 +113,11 @@ mod tests {
     fn suffixes_covers_domain_and_parents_but_not_bare_tld() {
         assert_eq!(
             suffixes("ads.tracker.example.com"),
-            vec!["ads.tracker.example.com", "tracker.example.com", "example.com"]
+            vec![
+                "ads.tracker.example.com",
+                "tracker.example.com",
+                "example.com"
+            ]
         );
     }
 

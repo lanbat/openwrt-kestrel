@@ -22,7 +22,10 @@
 //! set it to the VM's own SSH-reachable address, then include that same
 //! address as a `deny:ip:...` entry and confirm you can still SSH in.
 
-use nft_enforcer::{ApplyResult, NftablesController, NftablesControllerConfig, PolicyEntry, ProtectedDestinations, SystemCommandRunner, Target};
+use nft_enforcer::{
+    ApplyResult, NftablesController, NftablesControllerConfig, PolicyEntry, ProtectedDestinations,
+    SystemCommandRunner, Target,
+};
 use state_store::StateStore;
 use std::path::PathBuf;
 
@@ -58,7 +61,10 @@ fn parse_protected(raw: &str) -> ProtectedDestinations {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        eprintln!("Usage: {} <store.sqlite> <scratch-dir> <apply|dry-run> <revision> [entry...]", args[0]);
+        eprintln!(
+            "Usage: {} <store.sqlite> <scratch-dir> <apply|dry-run> <revision> [entry...]",
+            args[0]
+        );
         std::process::exit(2);
     }
     let store_path = PathBuf::from(&args[1]);
@@ -69,10 +75,16 @@ fn main() {
 
     std::fs::create_dir_all(&scratch_dir).expect("failed to create scratch dir");
     let store = StateStore::open(&store_path).expect("failed to open state store");
-    let protected = std::env::var("SF_PROTECT_IPS").map(|v| parse_protected(&v)).unwrap_or_else(|_| ProtectedDestinations::default().with_defaults());
+    let protected = std::env::var("SF_PROTECT_IPS")
+        .map(|v| parse_protected(&v))
+        .unwrap_or_else(|_| ProtectedDestinations::default().with_defaults());
 
     let runner = SystemCommandRunner;
-    let config = NftablesControllerConfig { protected, scratch_dir, ..NftablesControllerConfig::default() };
+    let config = NftablesControllerConfig {
+        protected,
+        scratch_dir,
+        ..NftablesControllerConfig::default()
+    };
     let ctrl = NftablesController::new(&runner, &store, config);
 
     match mode {

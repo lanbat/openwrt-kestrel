@@ -11,16 +11,24 @@
 //! without ever binding a socket; `serve` is a thin, synchronous loop
 //! around it.
 
-use domain_types::{DeviceApprovalOpinion, Group, SharedRuleList, TargetSelector, UserId, Visibility};
+use domain_types::{
+    DeviceApprovalOpinion, Group, SharedRuleList, TargetSelector, UserId, Visibility,
+};
 use state_store::{StateStore, StoreError, TunnelDirection};
 use std::fmt::Write as _;
 
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn now_unix() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// One composite "does anything need my attention" number, built from
@@ -38,7 +46,10 @@ fn render_network_health_section(store: &StateStore) -> Result<String, StoreErro
     if items == 0 {
         html.push_str("<p class=\"empty\">all clear \u{2014} 0 items need attention</p>");
     } else {
-        let _ = write!(html, "<p class=\"attention\">{items} item(s) need attention</p>");
+        let _ = write!(
+            html,
+            "<p class=\"attention\">{items} item(s) need attention</p>"
+        );
     }
     html.push_str("<table>");
     let _ = write!(
@@ -46,7 +57,11 @@ fn render_network_health_section(store: &StateStore) -> Result<String, StoreErro
         "<tr><td>Groups you own with a single owner (succession risk)</td><td>{} of {}</td></tr>",
         summary.owned_groups_single_owner, summary.owned_groups_total
     );
-    let _ = write!(html, "<tr><td>Your own group votes that have expired</td><td>{} of {}</td></tr>", summary.own_votes_expired, summary.own_votes_total);
+    let _ = write!(
+        html,
+        "<tr><td>Your own group votes that have expired</td><td>{} of {}</td></tr>",
+        summary.own_votes_expired, summary.own_votes_total
+    );
     let _ = write!(
         html,
         "<tr><td>Followed peers with block reports <span class=\"note\">(known to this router only \u{2014} reports you haven't received aren't counted)</span></td><td>{}</td></tr>",
@@ -72,7 +87,9 @@ fn target_str(t: &TargetSelector) -> String {
         TargetSelector::Ip(s) => format!("ip:{s}"),
         TargetSelector::Cidr(s) => format!("cidr:{s}"),
         TargetSelector::Service(s) => format!("service:{s}"),
-        TargetSelector::ProtoPort { inner, proto, port } => format!("{}/{proto}:{port}", target_str(inner)),
+        TargetSelector::ProtoPort { inner, proto, port } => {
+            format!("{}/{proto}:{port}", target_str(inner))
+        }
     }
 }
 
@@ -102,7 +119,13 @@ fn render_tunnels_section(store: &StateStore) -> Result<String, StoreError> {
                 ad.sequence,
                 escape_html(&ad.description),
                 visibility_str(ad.visibility),
-                escape_html(&ad.route_scope.iter().map(target_str).collect::<Vec<_>>().join(", ")),
+                escape_html(
+                    &ad.route_scope
+                        .iter()
+                        .map(target_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 escape_html(&ad.tags.join(", ")),
             );
         }
@@ -149,8 +172,19 @@ fn render_tunnel_balance_section(store: &StateStore) -> Result<String, StoreErro
     }
     html.push_str("<table><tr><th>Peer</th><th>Given (bytes)</th><th>Taken (bytes)</th><th>Received/given ratio</th></tr>");
     for b in &balances {
-        let ratio = if b.given_to > 0 { format!("{:.3}", b.taken_from as f64 / b.given_to as f64) } else { "n/a".to_string() };
-        let _ = write!(html, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", escape_html(&user_ref(&b.peer)), b.given_to, b.taken_from, escape_html(&ratio));
+        let ratio = if b.given_to > 0 {
+            format!("{:.3}", b.taken_from as f64 / b.given_to as f64)
+        } else {
+            "n/a".to_string()
+        };
+        let _ = write!(
+            html,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(&user_ref(&b.peer)),
+            b.given_to,
+            b.taken_from,
+            escape_html(&ratio)
+        );
     }
     html.push_str("</table>");
     Ok(html)
@@ -207,8 +241,20 @@ fn render_group_row(html: &mut String, g: &Group) {
         escape_html(&g.name),
         escape_html(&g.owners.iter().map(user_ref).collect::<Vec<_>>().join(", ")),
         escape_html(&g.admins.iter().map(user_ref).collect::<Vec<_>>().join(", ")),
-        escape_html(&g.voting_members.iter().map(user_ref).collect::<Vec<_>>().join(", ")),
-        escape_html(&g.non_voting_members.iter().map(user_ref).collect::<Vec<_>>().join(", ")),
+        escape_html(
+            &g.voting_members
+                .iter()
+                .map(user_ref)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        escape_html(
+            &g.non_voting_members
+                .iter()
+                .map(user_ref)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     );
 }
 
@@ -216,7 +262,9 @@ fn render_device_approvals_section(store: &StateStore) -> Result<String, StoreEr
     let opinions = store.list_all_device_approval_opinions()?;
     let mut html = String::new();
     html.push_str("<h2>Device-Approval Opinions</h2>");
-    html.push_str("<p class=\"note\">Advisory only — never written to any kestreld join-approval table.</p>");
+    html.push_str(
+        "<p class=\"note\">Advisory only — never written to any kestreld join-approval table.</p>",
+    );
     if opinions.is_empty() {
         html.push_str("<p class=\"empty\">no known device-approval opinions</p>");
         return Ok(html);
@@ -269,10 +317,15 @@ pub fn serve(store: StateStore, addr: &str) -> std::io::Result<()> {
     for request in server.incoming_requests() {
         let response = match render_index(&store) {
             Ok(html) => {
-                let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).expect("valid header");
+                let header = tiny_http::Header::from_bytes(
+                    &b"Content-Type"[..],
+                    &b"text/html; charset=utf-8"[..],
+                )
+                .expect("valid header");
                 tiny_http::Response::from_string(html).with_header(header)
             }
-            Err(e) => tiny_http::Response::from_string(format!("internal error: {e}")).with_status_code(500),
+            Err(e) => tiny_http::Response::from_string(format!("internal error: {e}"))
+                .with_status_code(500),
         };
         let _ = request.respond(response);
     }
@@ -282,10 +335,16 @@ pub fn serve(store: StateStore, addr: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain_types::{FederationId, Hash32, LocalOverride, OverrideKind, Reason, ReasonCode, SignatureBytes, Stance};
+    use domain_types::{
+        FederationId, Hash32, LocalOverride, OverrideKind, Reason, ReasonCode, SignatureBytes,
+        Stance,
+    };
 
     fn user(fed_n: u8, local_n: u8) -> UserId {
-        UserId { federation: FederationId(Hash32([fed_n; 32])), local_id: Hash32([local_n; 32]) }
+        UserId {
+            federation: FederationId(Hash32([fed_n; 32])),
+            local_id: Hash32([local_n; 32]),
+        }
     }
 
     #[test]
@@ -305,14 +364,19 @@ mod tests {
         assert!(html.contains("no known groups"));
         assert!(html.contains("no known device-approval opinions"));
         assert!(html.contains("no tunnel transfer data recorded yet"));
-        assert!(html.contains("all clear"), "with no self identity and no data, network health must report zero attention items");
+        assert!(
+            html.contains("all clear"),
+            "with no self identity and no data, network health must report zero attention items"
+        );
     }
 
     #[test]
     fn render_index_shows_network_health_attention_items() {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
-        store.set_self_identity(owner, domain_types::PublicKeyBytes([1; 32]), &[1; 32], None).unwrap();
+        store
+            .set_self_identity(owner, domain_types::PublicKeyBytes([1; 32]), &[1; 32], None)
+            .unwrap();
         store
             .ingest_group(&Group {
                 group_id: domain_types::GroupId(Hash32([5; 32])),
@@ -336,14 +400,25 @@ mod tests {
 
         let html = render_index(&store).unwrap();
         assert!(html.contains("Network Health"));
-        assert!(html.contains("1 item(s) need attention"), "a single-owner group should be flagged as succession risk, got:\n{html}");
+        assert!(
+            html.contains("1 item(s) need attention"),
+            "a single-owner group should be flagged as succession risk, got:\n{html}"
+        );
     }
 
     #[test]
     fn render_index_shows_a_recorded_tunnel_balance() {
         let store = StateStore::open_in_memory().unwrap();
         let peer = user(1, 1);
-        store.record_transfer_sample(&peer, state_store::TunnelDirection::Providing, 300, 100, 100).unwrap();
+        store
+            .record_transfer_sample(
+                &peer,
+                state_store::TunnelDirection::Providing,
+                300,
+                100,
+                100,
+            )
+            .unwrap();
         let html = render_index(&store).unwrap();
         assert!(html.contains("Tunnel Balance"));
         assert!(html.contains("400")); // given_to = rx+tx = 300+100
@@ -402,7 +477,10 @@ mod tests {
         store.ingest_group(&group).unwrap();
 
         let html = render_index(&store).unwrap();
-        assert!(!html.contains("<script>alert(1)</script>"), "a peer-controlled group name must never be emitted unescaped");
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "a peer-controlled group name must never be emitted unescaped"
+        );
         assert!(html.contains("&lt;script&gt;"));
     }
 
@@ -410,18 +488,24 @@ mod tests {
     fn render_index_lists_a_device_approval_opinion() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.store_own_device_approval_opinion(&DeviceApprovalOpinion {
-            author,
-            sequence: 0,
-            mac: "aa:bb:cc:dd:ee:ff".into(),
-            stance: Stance::Deny,
-            reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] },
-            device_label: Some("shady-cam".into()),
-            issued_at: 0,
-            expires_at: None,
-            supersedes: None,
-            signature: SignatureBytes([0; 64]),
-        }).unwrap();
+        store
+            .store_own_device_approval_opinion(&DeviceApprovalOpinion {
+                author,
+                sequence: 0,
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Malware,
+                    note: None,
+                    evidence: vec![],
+                },
+                device_label: Some("shady-cam".into()),
+                issued_at: 0,
+                expires_at: None,
+                supersedes: None,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let html = render_index(&store).unwrap();
         assert!(html.contains("aa:bb:cc:dd:ee:ff"));

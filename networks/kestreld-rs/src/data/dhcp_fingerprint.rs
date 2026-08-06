@@ -45,7 +45,9 @@ pub fn parse_all(lines: &[String]) -> HashMap<String, DhcpFingerprint> {
             current_mac = Some(mac);
             continue;
         }
-        let Some(mac) = current_mac.clone() else { continue };
+        let Some(mac) = current_mac.clone() else {
+            continue;
+        };
         if let Some(opts) = requested_options(line) {
             result.entry(mac).or_default().requested_options = opts;
         } else if let Some(vc) = vendor_class(line) {
@@ -77,13 +79,21 @@ fn requested_options(line: &str) -> Option<String> {
         .filter_map(|part| part.trim().split(':').next())
         .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
         .collect();
-    if nums.is_empty() { None } else { Some(nums.join(",")) }
+    if nums.is_empty() {
+        None
+    } else {
+        Some(nums.join(","))
+    }
 }
 
 fn vendor_class(line: &str) -> Option<String> {
     let rest = line.split("vendor class:").nth(1)?;
     let vc = rest.trim();
-    if vc.is_empty() { None } else { Some(vc.to_string()) }
+    if vc.is_empty() {
+        None
+    } else {
+        Some(vc.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -119,8 +129,14 @@ mod tests {
             "dnsmasq-dhcp[2]: requested options: 1:netmask, 6:dns-server, 15:domain",
         ]);
         let fps = parse_all(&log);
-        assert_eq!(fps.get("02:aa:aa:aa:aa:aa").unwrap().requested_options, "1,3");
-        assert_eq!(fps.get("02:bb:bb:bb:bb:bb").unwrap().requested_options, "1,6,15");
+        assert_eq!(
+            fps.get("02:aa:aa:aa:aa:aa").unwrap().requested_options,
+            "1,3"
+        );
+        assert_eq!(
+            fps.get("02:bb:bb:bb:bb:bb").unwrap().requested_options,
+            "1,6,15"
+        );
     }
 
     #[test]
@@ -132,7 +148,10 @@ mod tests {
             "dnsmasq-dhcp[2]: requested options: 1:netmask, 3:router, 6:dns-server",
         ]);
         let fps = parse_all(&log);
-        assert_eq!(fps.get("02:11:22:33:44:55").unwrap().requested_options, "1,3,6");
+        assert_eq!(
+            fps.get("02:11:22:33:44:55").unwrap().requested_options,
+            "1,3,6"
+        );
     }
 
     #[test]

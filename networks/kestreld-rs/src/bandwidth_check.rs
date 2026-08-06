@@ -17,6 +17,7 @@ use std::path::Path;
 
 use crate::cmd;
 use crate::data::{dhcp, files, neigh, nft};
+use crate::db::Store;
 
 fn human_bytes(b: u64) -> String {
     let b = b as f64;
@@ -44,20 +45,33 @@ fn combine_by_mac(
 ) -> HashMap<String, (String, u64)> {
     let mut totals: HashMap<String, (String, u64)> = HashMap::new();
     for (ip, bytes) in v4 {
-        let Some(mac) = ip_to_mac_v4.get(ip) else { continue };
+        let Some(mac) = ip_to_mac_v4.get(ip) else {
+            continue;
+        };
         let entry = totals.entry(mac.clone()).or_insert_with(|| (ip.clone(), 0));
         entry.1 += bytes;
     }
     for (ip6, bytes) in v6 {
-        let Some(mac) = neigh_table.mac_for_ip(ip6) else { continue };
-        let entry = totals.entry(mac.to_string()).or_insert_with(|| (ip6.clone(), 0));
+        let Some(mac) = neigh_table.mac_for_ip(ip6) else {
+            continue;
+        };
+        let entry = totals
+            .entry(mac.to_string())
+            .or_insert_with(|| (ip6.clone(), 0));
         entry.1 += bytes;
     }
     totals
 }
 
 pub async fn run(base_dir: &Path) -> i32 {
-    run_and_report(base_dir).await.0
+    let store = match Store::open(base_dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("check-bandwidth: failed to open kestrel.sqlite: {e}");
+            return 1;
+        }
+    };
+    run_and_report(base_dir, &store).await.0
 }
 
 /// Same as `run`, but also reports every `(mac, bytes)` that just crossed
@@ -65,17 +79,21 @@ pub async fn run(base_dir: &Path) -> i32 {
 /// `plugins::Event::BandwidthThresholdCrossed` per device — `run` stays
 /// the CLI-facing entry point (`kestreld --check-bandwidth`, exit code
 /// only).
-pub async fn run_and_report(base_dir: &Path) -> (i32, Vec<(String, u64)>) {
+pub async fn run_and_report(base_dir: &Path, store: &Store) -> (i32, Vec<(String, u64)>) {
     let mut crossed = Vec::new();
     let confs = files::read_all_network_confs(base_dir).await;
     let nft_state = nft::fetch().await;
     let leases = dhcp::fetch().await;
     let neigh_table = neigh::fetch().await;
 
-    let ip_to_mac_v4: HashMap<String, String> =
-        leases.iter().map(|l| (l.ip.clone(), l.mac.clone())).collect();
-    let hostname_by_ip: HashMap<String, String> =
-        leases.iter().map(|l| (l.ip.clone(), l.hostname.clone())).collect();
+    let ip_to_mac_v4: HashMap<String, String> = leases
+        .iter()
+        .map(|l| (l.ip.clone(), l.mac.clone()))
+        .collect();
+    let hostname_by_ip: HashMap<String, String> = leases
+        .iter()
+        .map(|l| (l.ip.clone(), l.hostname.clone()))
+        .collect();
 
     for conf in confs {
         if conf.notify_url.is_empty() || conf.iface.is_empty() || conf.bandwidth_threshold_mb == 0 {
@@ -95,9 +113,10 @@ pub async fn run_and_report(base_dir: &Path) -> (i32, Vec<(String, u64)>) {
             continue;
         }
 
-        let alerted_path = base_dir.join(format!("{iface}-bw-alerted"));
-        let alerted: Vec<String> =
-            files::read_lines(&alerted_path).await.into_iter().map(|l| l.to_lowercase()).collect();
+        let alerted: Vec<String> = store
+            .bandwidth_alerted_macs(iface)
+            .await
+            .unwrap_or_default();
 
         for (mac, (ip, bytes)) in &combined {
             if alerted.contains(&mac.to_lowercase()) || *bytes <= thresh_bytes {
@@ -107,7 +126,7 @@ pub async fn run_and_report(base_dir: &Path) -> (i32, Vec<(String, u64)>) {
                 Some(name) if !name.is_empty() => format!("{name} ({ip})"),
                 _ => ip.clone(),
             };
-            let _ = files::file_append(&alerted_path, mac).await;
+            let _ = store.bandwidth_alerted_add(iface, mac).await;
             crossed.push((mac.clone(), *bytes));
             cmd::ntfy(
                 &conf.notify_url,
@@ -116,18 +135,31 @@ pub async fn run_and_report(base_dir: &Path) -> (i32, Vec<(String, u64)>) {
                 "warning",
                 &format!(
                     "Type: Bandwidth alert\n\n{label} has used {} on {iface} (threshold: {} MB).",
-                    human_bytes(*bytes), conf.bandwidth_threshold_mb
+                    human_bytes(*bytes),
+                    conf.bandwidth_threshold_mb
                 ),
-            ).await;
+            )
+            .await;
         }
 
-        if tokio::fs::metadata(&alerted_path).await.is_ok() {
-            let still_present: String = alerted.iter()
-                .filter(|a| combined.keys().any(|m| &m.to_lowercase() == *a))
-                .map(|a| format!("{a}\n"))
-                .collect();
-            let _ = tokio::fs::write(&alerted_path, still_present).await;
-        }
+        // Re-read post-loop rather than reusing the pre-loop `alerted`
+        // snapshot: the flat-file version this replaces built the
+        // retained set from the *stale* in-memory list, so a MAC that
+        // crossed the threshold and got appended to the file this exact
+        // round was then immediately dropped again by this same prune
+        // step — silently defeating "alert once per session" and causing
+        // a repeat alert next run despite staying over threshold the
+        // whole time. Fixed here by construction, not preserved.
+        let alerted_after: Vec<String> = store
+            .bandwidth_alerted_macs(iface)
+            .await
+            .unwrap_or_default();
+        let still_present: Vec<String> = alerted_after
+            .iter()
+            .filter(|a| combined.keys().any(|m| &m.to_lowercase() == *a))
+            .cloned()
+            .collect();
+        let _ = store.bandwidth_alerted_retain(iface, &still_present).await;
     }
 
     (0, crossed)
@@ -147,7 +179,8 @@ mod tests {
 
     fn neigh_with(ip: &str, mac: &str) -> neigh::NeighTable {
         let mut t = neigh::NeighTable::default();
-        t.by_ip.insert(ip.to_string(), (mac.to_string(), "REACHABLE".to_string()));
+        t.by_ip
+            .insert(ip.to_string(), (mac.to_string(), "REACHABLE".to_string()));
         t
     }
 
@@ -155,7 +188,8 @@ mod tests {
     fn combines_v4_and_v6_bytes_for_the_same_mac() {
         let v4 = HashMap::from([("192.168.3.100".to_string(), 1000u64)]);
         let v6 = HashMap::from([("2001:db8::1".to_string(), 2000u64)]);
-        let ip_to_mac = HashMap::from([("192.168.3.100".to_string(), "aa:bb:cc:dd:ee:ff".to_string())]);
+        let ip_to_mac =
+            HashMap::from([("192.168.3.100".to_string(), "aa:bb:cc:dd:ee:ff".to_string())]);
         let neigh_table = neigh_with("2001:db8::1", "aa:bb:cc:dd:ee:ff");
 
         let combined = combine_by_mac(&v4, &v6, &ip_to_mac, &neigh_table);
@@ -165,15 +199,29 @@ mod tests {
     #[test]
     fn drops_ips_with_no_resolvable_mac() {
         let v4 = HashMap::from([("192.168.3.200".to_string(), 999u64)]);
-        let combined = combine_by_mac(&v4, &HashMap::new(), &HashMap::new(), &neigh::NeighTable::default());
+        let combined = combine_by_mac(
+            &v4,
+            &HashMap::new(),
+            &HashMap::new(),
+            &neigh::NeighTable::default(),
+        );
         assert!(combined.is_empty());
     }
 
     #[test]
     fn keeps_first_seen_ip_as_representative() {
         let v4 = HashMap::from([("192.168.3.100".to_string(), 1u64)]);
-        let ip_to_mac = HashMap::from([("192.168.3.100".to_string(), "aa:bb:cc:dd:ee:ff".to_string())]);
-        let combined = combine_by_mac(&v4, &HashMap::new(), &ip_to_mac, &neigh::NeighTable::default());
-        assert_eq!(combined.get("aa:bb:cc:dd:ee:ff").unwrap().0, "192.168.3.100");
+        let ip_to_mac =
+            HashMap::from([("192.168.3.100".to_string(), "aa:bb:cc:dd:ee:ff".to_string())]);
+        let combined = combine_by_mac(
+            &v4,
+            &HashMap::new(),
+            &ip_to_mac,
+            &neigh::NeighTable::default(),
+        );
+        assert_eq!(
+            combined.get("aa:bb:cc:dd:ee:ff").unwrap().0,
+            "192.168.3.100"
+        );
     }
 }

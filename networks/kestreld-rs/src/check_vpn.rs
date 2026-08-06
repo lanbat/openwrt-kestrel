@@ -12,6 +12,7 @@ use std::path::Path;
 
 use crate::cmd;
 use crate::data::{files, vpn};
+use crate::db::Store;
 
 /// Whether a state-change notification needs to go out — kept separate
 /// from the real `ip`/file I/O in `run()` so it's directly testable.
@@ -31,20 +32,35 @@ fn decide(current_up: bool, last_state: &str) -> Transition {
 }
 
 pub async fn run(base_dir: &Path, split_routing_dir: &Path) -> i32 {
-    run_and_report(base_dir, split_routing_dir).await.0
+    let store = match Store::open(base_dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("check-vpn: failed to open kestrel.sqlite: {e}");
+            return 1;
+        }
+    };
+    run_and_report(base_dir, split_routing_dir, &store).await.0
 }
 
 /// Same as `run`, but also reports every tier that actually changed state
 /// this call (`(iface, now_up)`) so `daemon.rs` can broadcast a
 /// `plugins::Event::VpnStateChanged` per tier — `run` stays the CLI-facing
 /// entry point (`kestreld --check-vpn`, exit code only).
-pub async fn run_and_report(base_dir: &Path, split_routing_dir: &Path) -> (i32, Vec<(String, bool)>) {
+pub async fn run_and_report(
+    base_dir: &Path,
+    split_routing_dir: &Path,
+    store: &Store,
+) -> (i32, Vec<(String, bool)>) {
     if tokio::fs::metadata(split_routing_dir).await.is_err() {
         return (0, Vec::new());
     }
 
     let confs = files::read_all_network_confs(base_dir).await;
-    let Some(notify_url) = confs.into_iter().map(|c| c.notify_url).find(|u| !u.is_empty()) else {
+    let Some(notify_url) = confs
+        .into_iter()
+        .map(|c| c.notify_url)
+        .find(|u| !u.is_empty())
+    else {
         return (0, Vec::new());
     };
 
@@ -54,14 +70,19 @@ pub async fn run_and_report(base_dir: &Path, split_routing_dir: &Path) -> (i32, 
 
     for tier in tiers {
         let current_up = tier.state == vpn::VpnState::Up;
-        let state_file = base_dir.join(format!("vpn-state-{}", tier.iface));
-        let last = tokio::fs::read_to_string(&state_file).await
-            .map(|s| s.trim().to_string())
+        let last = store
+            .get_vpn_state(&tier.iface)
+            .await
+            .unwrap_or(None)
             .unwrap_or_default();
 
-        let Transition::Changed { now_up } = decide(current_up, &last) else { continue };
+        let Transition::Changed { now_up } = decide(current_up, &last) else {
+            continue;
+        };
 
-        let _ = tokio::fs::write(&state_file, format!("{}\n", if now_up { "up" } else { "down" })).await;
+        let _ = store
+            .set_vpn_state(&tier.iface, if now_up { "up" } else { "down" })
+            .await;
         changed.push((tier.iface.clone(), now_up));
 
         if now_up {
@@ -73,7 +94,8 @@ pub async fn run_and_report(base_dir: &Path, split_routing_dir: &Path) -> (i32, 
                 "Dashboard",
                 &dash,
                 &format!("VPN ({}) came back up.\nDashboard: {dash}", tier.iface),
-            ).await;
+            )
+            .await;
         } else {
             cmd::ntfy_with_action(
                 &notify_url,
@@ -82,8 +104,12 @@ pub async fn run_and_report(base_dir: &Path, split_routing_dir: &Path) -> (i32, 
                 "warning",
                 "Dashboard",
                 &dash,
-                &format!("VPN ({}) went down. Check the connection.\nDashboard: {dash}", tier.iface),
-            ).await;
+                &format!(
+                    "VPN ({}) went down. Check the connection.\nDashboard: {dash}",
+                    tier.iface
+                ),
+            )
+            .await;
         }
     }
 

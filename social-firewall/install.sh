@@ -22,9 +22,13 @@ NFT_SCRATCH_DIR="$BASE_DIR/nft"
 STORE="$BASE_DIR/social-firewall.sqlite"
 CRONTAB=/etc/crontabs/root
 CRON_TAG="social-firewall-apply"
+NOTIFY_CRON_TAG="social-firewall-notify"
+SYNC_CRON_TAG="social-firewall-sync"
 
 if [ "${1:-}" = "remove" ]; then
     sed -i "/# ${CRON_TAG}\$/d" "$CRONTAB" 2>/dev/null || true
+    sed -i "/# ${NOTIFY_CRON_TAG}\$/d" "$CRONTAB" 2>/dev/null || true
+    sed -i "/# ${SYNC_CRON_TAG}\$/d" "$CRONTAB" 2>/dev/null || true
     /etc/init.d/cron restart 2>/dev/null || true
     nft delete table inet social_firewall 2>/dev/null || true
     if [ "${2:-}" = "--purge" ]; then
@@ -67,12 +71,33 @@ EOF
 
 touch "$CRONTAB"
 sed -i "/# ${CRON_TAG}\$/d" "$CRONTAB"
+sed -i "/# ${NOTIFY_CRON_TAG}\$/d" "$CRONTAB"
+sed -i "/# ${SYNC_CRON_TAG}\$/d" "$CRONTAB"
 cat >>"$CRONTAB" <<EOF
 */5 * * * * . $CONFIG; /usr/bin/sf --db $STORE apply --threshold "\$THRESHOLD" \$(for ip in \$PROTECT_IPS; do printf -- '--protect-ip %s ' "\$ip"; done) --scratch-dir $NFT_SCRATCH_DIR >/tmp/social-firewall-apply.log 2>&1  # ${CRON_TAG}
+*/5 * * * * /usr/bin/sf --db $STORE notify >/tmp/social-firewall-notify.log 2>&1  # ${NOTIFY_CRON_TAG}
+* * * * * /usr/bin/sf --db $STORE sync >/tmp/social-firewall-sync.log 2>&1  # ${SYNC_CRON_TAG}
 EOF
 /etc/init.d/cron restart 2>/dev/null || true
+
+# uhttpd runs the party-line chat as a fresh CGI process per request.
+mkdir -p /www/cgi-bin
+ln -sf /usr/bin/sf /www/cgi-bin/sf-chat
+ln -sf /usr/bin/sf /www/cgi-bin/sf-chat-font
+ln -sf /usr/bin/sf /www/cgi-bin/sf-policies
+ln -sf /usr/bin/sf /www/cgi-bin/sf-policy-vote
+ln -sf /usr/bin/sf /www/cgi-bin/sf-policy-explain
+ln -sf /usr/bin/sf /www/cgi-bin/sf-fingerprint
+ln -sf /usr/bin/sf /www/cgi-bin/sf-profiles
+ln -sf /usr/bin/sf /www/cgi-bin/sf-routes
+if ! uci -q get uhttpd.main.cgi_prefix >/dev/null 2>&1; then
+    uci set uhttpd.main.cgi_prefix=/cgi-bin
+    uci commit uhttpd
+    /etc/init.d/uhttpd restart 2>/dev/null || true
+fi
 
 echo "Installed."
 echo "  $CONFIG"
 echo "  $STORE"
 echo "  Cron: $(grep "$CRON_TAG" "$CRONTAB")"
+echo "  Chat: http://<router-ip>/cgi-bin/sf-chat"

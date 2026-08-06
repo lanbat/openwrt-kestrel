@@ -467,10 +467,11 @@ Both kinds react to the same events and share the same enable/disable mechanism 
 | `WanStateChanged` | `iface`, `up` | WAN connectivity comes up or goes down (see [WAN monitoring](#wan-monitoring)) |
 | `VpnStateChanged` | `tier`, `up` | A split-routing VPN tier comes up or goes down (see [VPN monitoring](#vpn-monitoring)) |
 | `BandwidthThresholdCrossed` | `mac`, `bytes` | A device crosses its network's bandwidth threshold (see [Bandwidth alerts](#bandwidth-alerts)) |
+| `ChatMessage` | `group`, `sender`, `body` | A social-firewall chat bridge forwards a received party-line message to the daemon |
 
 Each line looks like `{"event":"NewConnection","mac":"aa:bb:cc:dd:ee:ff","dst":"1.2.3.4","port":"443","proto":"tcp"}`. The WAN/VPN/bandwidth events inherit those checks' own gate: they only run at all when some network has `NOTIFY_URL` set.
 
-**Selective subscriptions** — by default a plugin receives every event. Write `{"subscribe":["NewConnection","DnsAnswer"]}` on your plugin's stdout at any point to narrow that down to just the named events (a later `subscribe` line replaces the filter, doesn't add to it).
+**Selective subscriptions** — by default a plugin receives every event. Write `{"subscribe":["NewConnection","DnsAnswer"]}` on your plugin's stdout at any point to narrow that down to just the named events (a later `subscribe` line replaces the filter, doesn't add to it). A chat bot should subscribe to `ChatMessage`.
 
 **Actions** — a plugin writes JSON lines back on its stdout, read independently of the events it receives (no need to reply to each one):
 
@@ -480,6 +481,8 @@ Each line looks like `{"event":"NewConnection","mac":"aa:bb:cc:dd:ee:ff","dst":"
 | `log` | `message` | Writes a line to the daemon's own log |
 | `add_rule` | `iface`, `mac`, and either `domain` or (`ip`, `port`, `proto`) | Approves a destination for a device — the same effect as the device page's approval, minus the ability to choose a VPN route (always plain WAN) |
 | `annotate` | `iface`, `mac`, `dst`, `note` | Attaches a short note (max 200 characters) to a specific device+destination, shown right on the device page's pending-connections table — e.g. a plugin doing its own reputation lookup can explain *why* it flagged something, at the point the approve/deny decision is actually made. Replaces any previous note for the same destination; the note is always attributed to your plugin's name by the daemon itself, not something you can spoof |
+| `http_get` | `request_id`, `url` | Fetches an HTTP(S) URL with a 10-second timeout and 64 KiB response limit, then sends `{"response":"http_response","request_id":...,"ok":...,"body":...}` back to the plugin |
+| `chat_send` | `group`, `body` | Publishes a signed party-line message through `/usr/bin/sf`; body is limited to 4096 bytes and the social-firewall database path is fixed by the package layout |
 
 An external plugin gets no shell or root access by default — only the four actions above. This is deliberately a separate process, not a dynamically loaded library: a crashing or misbehaving plugin can't take the daemon down, and it doesn't need to be rebuilt against kestreld's exact version.
 

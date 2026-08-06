@@ -16,6 +16,23 @@ BASE_DIR=/etc/kestrel/networks
 mkdir -p "$BASE_DIR"
 grep -qF "$BASE_DIR" /etc/sysupgrade.conf 2>/dev/null || printf '%s\n' "$BASE_DIR" >> /etc/sysupgrade.conf
 
+# ── Flat-file → SQLite migration ─────────────────────────────────────────────
+# `kestreld --migrate-storage` (see networks/kestreld-rs/src/migrate.rs)
+# imports any legacy flat files under $BASE_DIR into kestrel.sqlite, renaming
+# each one to `.migrated` rather than deleting it. This is the one, sole,
+# authoritative trigger for that import — it must run before anything below
+# calls into kestreld (regen-inspect, the OUI/threat-intel fetches further
+# down, the daemon service) now that all of those read/write through
+# `Store` instead of the flat files directly. Idempotent (skips files
+# already marked `.migrated`), so it's safe that this script runs once per
+# configured network — a second or third call the same day just does
+# nothing on an already-migrated router.
+if [ -x /usr/bin/kestreld ]; then
+    /usr/bin/kestreld --migrate-storage
+else
+    echo "WARNING: /usr/bin/kestreld not found — skipping flat-file migration. There is no automatic fallback: re-run this script (or 'kestreld --migrate-storage' directly) once the kestrel package is installed, before starting the daemon or serving any CGI request." >&2
+fi
+
 # Store repo location so tools can reference each other by absolute path
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 _gcfg="${BASE_DIR}/config"

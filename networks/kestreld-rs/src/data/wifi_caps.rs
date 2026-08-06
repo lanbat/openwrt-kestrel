@@ -27,8 +27,14 @@ const FLAGS: &[&str] = &["ht", "vht", "he", "wmm", "mfp"];
 /// see `hostapd_iface_for`), or empty if hostapd isn't reachable, the
 /// ubus object doesn't exist, or the MAC isn't currently associated.
 pub async fn capabilities(net: &str, mac: &str) -> String {
-    let Some(iface) = hostapd_iface_for(net).await else { return String::new() };
-    let (ok, out) = cmd::run("ubus", &["call", &format!("hostapd.{iface}"), "get_clients"]).await;
+    let Some(iface) = hostapd_iface_for(net).await else {
+        return String::new();
+    };
+    let (ok, out) = cmd::run(
+        "ubus",
+        &["call", &format!("hostapd.{iface}"), "get_clients"],
+    )
+    .await;
     if !ok {
         return String::new();
     }
@@ -49,17 +55,26 @@ async fn hostapd_iface_for(net: &str) -> Option<String> {
         if !name.starts_with("hostapd-") || !name.ends_with(".conf") {
             continue;
         }
-        let Ok(content) = tokio::fs::read_to_string(entry.path()).await else { continue };
+        let Ok(content) = tokio::fs::read_to_string(entry.path()).await else {
+            continue;
+        };
         if content.contains(&needle) {
-            return name.strip_prefix("hostapd-").and_then(|s| s.strip_suffix(".conf")).map(String::from);
+            return name
+                .strip_prefix("hostapd-")
+                .and_then(|s| s.strip_suffix(".conf"))
+                .map(String::from);
         }
     }
     None
 }
 
 fn parse_capabilities(json_text: &str, mac: &str) -> String {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(json_text) else { return String::new() };
-    let Some(client) = root.get("clients").and_then(|c| c.get(mac)) else { return String::new() };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return String::new();
+    };
+    let Some(client) = root.get("clients").and_then(|c| c.get(mac)) else {
+        return String::new();
+    };
     FLAGS
         .iter()
         .filter(|&&flag| client.get(flag).and_then(|v| v.as_bool()).unwrap_or(false))
@@ -109,7 +124,10 @@ mod tests {
 
     #[test]
     fn newer_device_with_more_capabilities_reports_them_all() {
-        assert_eq!(parse_capabilities(SAMPLE, "11:22:33:44:55:66"), "ht,vht,he,wmm,mfp");
+        assert_eq!(
+            parse_capabilities(SAMPLE, "11:22:33:44:55:66"),
+            "ht,vht,he,wmm,mfp"
+        );
     }
 
     #[test]
@@ -124,6 +142,9 @@ mod tests {
 
     #[test]
     fn missing_clients_key_returns_empty() {
-        assert_eq!(parse_capabilities(r#"{"freq": 2412}"#, "aa:bb:cc:dd:ee:ff"), "");
+        assert_eq!(
+            parse_capabilities(r#"{"freq": 2412}"#, "aa:bb:cc:dd:ee:ff"),
+            ""
+        );
     }
 }

@@ -20,7 +20,11 @@ pub async fn fetch() -> NftState {
 impl NftState {
     /// Bytes for a counter chain (in = iifname, out = oifname).
     pub fn chain_bytes(&self, chain: &str, direction: &str) -> u64 {
-        let iface_kw = if direction == "in" { "iifname" } else { "oifname" };
+        let iface_kw = if direction == "in" {
+            "iifname"
+        } else {
+            "oifname"
+        };
         let header = format!("chain {chain} {{");
         let mut in_chain = false;
         let mut depth = 0usize;
@@ -184,26 +188,34 @@ table inet fw4 {
 
     #[test]
     fn chain_bytes_in_direction() {
-        let state = NftState { raw: NFT_RULESET.to_string() };
+        let state = NftState {
+            raw: NFT_RULESET.to_string(),
+        };
         assert_eq!(state.chain_bytes("EXTNET-ACCT-guest-in", "in"), 999000);
     }
 
     #[test]
     fn chain_bytes_out_direction() {
-        let state = NftState { raw: NFT_RULESET.to_string() };
+        let state = NftState {
+            raw: NFT_RULESET.to_string(),
+        };
         assert_eq!(state.chain_bytes("EXTNET-ACCT-guest-out", "out"), 123456);
     }
 
     #[test]
     fn chain_bytes_missing_chain_returns_zero() {
-        let state = NftState { raw: NFT_RULESET.to_string() };
+        let state = NftState {
+            raw: NFT_RULESET.to_string(),
+        };
         assert_eq!(state.chain_bytes("EXTNET-ACCT-nonexistent", "in"), 0);
     }
 
     #[test]
     fn chain_bytes_wrong_direction_misses_counter() {
         // "in" rule won't match an "out" query
-        let state = NftState { raw: NFT_RULESET.to_string() };
+        let state = NftState {
+            raw: NFT_RULESET.to_string(),
+        };
         assert_eq!(state.chain_bytes("EXTNET-ACCT-guest-in", "out"), 0);
     }
 
@@ -233,7 +245,9 @@ table inet fw4 {
 
     #[test]
     fn device_bytes_single_line_elements() {
-        let state = NftState { raw: NFT_WITH_SET_SINGLE_LINE.to_string() };
+        let state = NftState {
+            raw: NFT_WITH_SET_SINGLE_LINE.to_string(),
+        };
         let map = state.device_bytes("EXTNET-TRACK-guest");
         assert_eq!(map.get("10.10.0.5"), Some(&4096));
         assert_eq!(map.get("10.10.0.6"), Some(&512));
@@ -241,7 +255,9 @@ table inet fw4 {
 
     #[test]
     fn device_bytes_multi_line_elements() {
-        let state = NftState { raw: NFT_WITH_SET_MULTI_LINE.to_string() };
+        let state = NftState {
+            raw: NFT_WITH_SET_MULTI_LINE.to_string(),
+        };
         let map = state.device_bytes("EXTNET-TRACK-guest");
         assert_eq!(map.get("10.10.0.1"), Some(&10000));
         assert_eq!(map.get("10.10.0.2"), Some(&5000));
@@ -250,7 +266,9 @@ table inet fw4 {
 
     #[test]
     fn device_bytes_missing_set_returns_empty() {
-        let state = NftState { raw: NFT_WITH_SET_SINGLE_LINE.to_string() };
+        let state = NftState {
+            raw: NFT_WITH_SET_SINGLE_LINE.to_string(),
+        };
         let map = state.device_bytes("EXTNET-TRACK-nonexistent");
         assert!(map.is_empty());
     }

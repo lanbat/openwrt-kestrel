@@ -45,7 +45,9 @@ pub async fn fetch_servers() -> Vec<OpenVpnServer> {
         if status_path.is_empty() {
             continue;
         }
-        let Ok(content) = tokio::fs::read_to_string(&status_path).await else { continue };
+        let Ok(content) = tokio::fs::read_to_string(&status_path).await else {
+            continue;
+        };
         let peers = parse_status_v2(&content);
         if !peers.is_empty() {
             servers.push(OpenVpnServer { name, peers });
@@ -63,7 +65,11 @@ fn instance_names(uci_raw: &str) -> Vec<String> {
         .filter_map(|line| {
             let rest = line.strip_prefix("openvpn.")?;
             let name = rest.strip_suffix("=openvpn")?;
-            if name.starts_with('@') { None } else { Some(name.to_string()) }
+            if name.starts_with('@') {
+                None
+            } else {
+                Some(name.to_string())
+            }
         })
         .collect()
 }
@@ -96,8 +102,18 @@ fn parse_status_v2(content: &str) -> Vec<OpenVpnPeer> {
             let rx: u64 = f.next()?.parse().unwrap_or(0);
             let tx: u64 = f.next()?.parse().unwrap_or(0);
             let connected_since = f.next().unwrap_or("").to_string();
-            let traffic = format!("{} / {}", super::wg::human_bytes(rx), super::wg::human_bytes(tx));
-            Some(OpenVpnPeer { common_name, real_address, virtual_address, connected_since, traffic })
+            let traffic = format!(
+                "{} / {}",
+                super::wg::human_bytes(rx),
+                super::wg::human_bytes(tx)
+            );
+            Some(OpenVpnPeer {
+                common_name,
+                real_address,
+                virtual_address,
+                connected_since,
+                traffic,
+            })
         })
         .collect()
 }
@@ -121,7 +137,10 @@ openvpn.@openvpn[0].enabled='0'
 
     #[test]
     fn uci_get_reads_status_option() {
-        assert_eq!(uci_get(UCI_RAW, "openvpn.myserver.status"), "/var/run/openvpn.myserver.status");
+        assert_eq!(
+            uci_get(UCI_RAW, "openvpn.myserver.status"),
+            "/var/run/openvpn.myserver.status"
+        );
     }
 
     #[test]

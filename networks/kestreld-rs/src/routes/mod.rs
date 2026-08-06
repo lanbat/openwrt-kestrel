@@ -8,7 +8,10 @@ pub mod qr;
 pub mod rotate_password;
 pub mod status;
 
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use std::sync::Arc;
 
 use crate::state::AppState;
@@ -20,8 +23,14 @@ pub fn build(state: Arc<AppState>) -> Router {
         .route("/cgi-bin/device", get(device::get).post(device::post))
         .route("/cgi-bin/identity", get(identity::get))
         .route("/cgi-bin/qr", get(qr::get))
-        .route("/cgi-bin/approve-access", get(approve_access::get).post(approve_access::post))
-        .route("/cgi-bin/approve-join", get(approve_join::get).post(approve_join::post))
+        .route(
+            "/cgi-bin/approve-access",
+            get(approve_access::get).post(approve_access::post),
+        )
+        .route(
+            "/cgi-bin/approve-join",
+            get(approve_join::get).post(approve_join::post),
+        )
         .route("/cgi-bin/rotate-password", post(rotate_password::post))
         .with_state(state)
 }
@@ -42,7 +51,10 @@ mod tests {
 
     #[test]
     fn safe_redirect_accepts_cgi_bin_path() {
-        assert_eq!(safe_redirect(Some("/cgi-bin/network?net=guest")), Some("/cgi-bin/network?net=guest".to_string()));
+        assert_eq!(
+            safe_redirect(Some("/cgi-bin/network?net=guest")),
+            Some("/cgi-bin/network?net=guest".to_string())
+        );
     }
 
     #[test]

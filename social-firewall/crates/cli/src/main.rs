@@ -13,19 +13,28 @@
 //! against the embedded key; it does not verify that the embedded key is
 //! actually the one the federation has on record for that user.
 
+mod cgi;
 mod device;
+mod fingerprint;
 mod group;
 mod list;
+mod notify;
+mod ntfy;
+mod profile;
+mod shared_policy;
 mod tunnel;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use domain_types::{
-    Decision, FederationId, Hash32, LocalOverride, LocalTrustRule, OpinionRef,
-    OverrideKind, PolicyOpinion, PublicKeyBytes, Reason, ReasonCode, SignatureBytes, Stance,
+    Decision, FederationId, Hash32, LocalOverride, LocalTrustRule, OpinionRef, OverrideKind,
+    PolicyAction, PolicyOpinion, PublicKeyBytes, Reason, ReasonCode, SignatureBytes, Stance,
     StatementAuthor, TargetSelector, UserId,
 };
-use nft_enforcer::{ApplyResult, CommandRunner, NftablesController, NftablesControllerConfig, PolicyEntry, ProtectedDestinations, SystemCommandRunner};
+use nft_enforcer::{
+    ApplyResult, CommandRunner, NftablesController, NftablesControllerConfig, PolicyEntry,
+    ProtectedDestinations, SystemCommandRunner,
+};
 use policy_engine::PolicyInputs;
 use state_store::StateStore;
 use std::path::PathBuf;
@@ -44,11 +53,31 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Generate a new signing identity for this router and store it.
+    #[command(visible_alias = "init")]
     InitIdentity {
         #[arg(long)]
         display_name: Option<String>,
     },
+    /// Set or clear this node's local nickname used in party-line displays.
+    #[command(visible_alias = "nick")]
+    SetIdentityName {
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Set or clear this router's local nickname for its home federation.
+    #[command(visible_alias = "fed-name")]
+    SetFederationName {
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Browse every followed router and its local trust settings.
+    #[command(visible_alias = "follows")]
+    ListFollows,
+    /// Print the compact command reference used by the chat window.
+    #[command(hide = true)]
+    ChatHelp,
     /// Follow another user with allow/deny trust weights.
+    #[command(visible_alias = "follow")]
     AddFollow {
         #[arg(long)]
         federation: String,
@@ -79,6 +108,7 @@ enum Command {
     },
     /// Relabel an already-followed user without touching their trust
     /// weights — omit `--name` to clear the label.
+    #[command(visible_alias = "rename")]
     SetFollowName {
         #[arg(long)]
         federation: String,
@@ -96,6 +126,11 @@ enum Command {
         #[arg(long)]
         node_id: Option<String>,
     },
+    /// Set or clear the optional plain-HTTP ntfy notification topic.
+    SetNtfyTopic {
+        #[arg(long)]
+        url: Option<String>,
+    },
     /// Set a reasonless, private, local-only stance for a target.
     SetOverride {
         #[arg(long)]
@@ -112,6 +147,7 @@ enum Command {
         ttl_seconds: Option<i64>,
     },
     /// Publish a signed, reasoned opinion under this router's own identity.
+    #[command(visible_alias = "opinion")]
     PublishOpinion {
         #[arg(long)]
         target_kind: String,
@@ -135,6 +171,7 @@ enum Command {
         file: PathBuf,
     },
     /// Compute and print the effective policy decision for a target.
+    #[command(visible_alias = "check")]
     EvaluateTarget {
         #[arg(long)]
         target_kind: String,
@@ -147,6 +184,7 @@ enum Command {
     /// override, own opinion, ingested opinion, or federation statement)
     /// and enforce the result via nftables. Intended to be cron-driven —
     /// see `social-firewall/install.sh`.
+    #[command(visible_alias = "enforce")]
     Apply {
         #[arg(long, default_value_t = 1.0)]
         threshold: f64,
@@ -239,6 +277,8 @@ enum Command {
     },
     /// Browse pending tunnel connection requests awaiting review/accept.
     ListPendingTunnelRequests,
+    /// Scan and post notifications for pending decisions.
+    Notify,
     /// Per-peer WireGuard transfer totals: how much this router has given
     /// (provided) vs. taken (consumed) — the substrate `set-tunnel-trust
     /// --min-reciprocity-ratio` gates auto-accept on.
@@ -326,6 +366,15 @@ enum Command {
     /// identity (generated on first use, same as `sf init-identity`'s
     /// signing keypair).
     Listen,
+    /// Retry due real-time group and party-line deliveries. Full catch-up
+    /// reconciliation is intentionally deferred to the next reliability slice.
+    Sync,
+    /// Request missing group-scoped party-line messages from configured
+    /// members with known Iroh node ids.
+    SyncGroup {
+        #[arg(long)]
+        group: String,
+    },
     /// Publish a signed, named, categorized bundle of rules for other
     /// operators to subscribe to.
     PublishList {
@@ -349,6 +398,157 @@ enum Command {
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
+    /// Publish a signed, versioned policy whose entries can be voted on and
+    /// materialized locally as firewall, route, or DNS configuration.
+    PublishPolicy {
+        #[arg(long)]
+        policy_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        entries_file: PathBuf,
+        #[arg(long = "category")]
+        categories: Vec<String>,
+        #[arg(long, default_value = "public")]
+        visibility: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Ingest a signed shared policy exported by `publish-policy`.
+    IngestPolicy {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Browse all locally known shared policies.
+    ListPolicies,
+    /// Cast a signed group vote on a shared-policy entry.
+    VotePolicyEntry {
+        #[arg(long)]
+        policy_id: String,
+        #[arg(long)]
+        entry_id: String,
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        stance: String,
+        #[arg(long)]
+        reason_code: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Explain the current group result for a shared-policy entry.
+    ExplainPolicyEntry {
+        #[arg(long)]
+        policy_id: String,
+        #[arg(long)]
+        entry_id: String,
+        #[arg(long)]
+        group: String,
+    },
+    /// Ingest a signed policy vote exported by `vote-policy-entry`.
+    IngestPolicyVote {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Publish a privacy-preserving fingerprint observation to a group.
+    PublishFingerprintObservation {
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        fingerprint_id: String,
+        #[arg(long)]
+        revision: u64,
+        #[arg(long)]
+        signal_family: String,
+        #[arg(long)]
+        evidence_digest: String,
+        #[arg(long)]
+        confidence: u8,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Publish a group-scoped comment on a fingerprint revision.
+    PublishFingerprintComment {
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        fingerprint_id: String,
+        #[arg(long)]
+        revision: u64,
+        #[arg(long)]
+        body: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// List observations and comments for a group-scoped fingerprint revision.
+    ListFingerprint {
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        fingerprint_id: String,
+        #[arg(long)]
+        revision: u64,
+    },
+    /// Ingest a signed fingerprint observation.
+    IngestFingerprintObservation {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Store a manually provisioned 32-byte group fingerprint key.
+    SetFingerprintKey {
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        key_hex: String,
+    },
+    /// Derive a group-scoped fingerprint ID from kestreld canonical material.
+    DeriveFingerprintId {
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        material_file: PathBuf,
+    },
+    /// Create a local profile for selecting policy collections.
+    CreateProfile {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+    },
+    /// Add a shared policy collection to a local profile.
+    AddProfilePolicy {
+        #[arg(long)]
+        profile_id: String,
+        #[arg(long)]
+        policy_id: String,
+    },
+    /// Select the active local profile.
+    SelectProfile {
+        #[arg(long)]
+        profile_id: String,
+    },
+    /// List local profiles and their selected collections.
+    ListProfiles,
+    /// List policy collections selected by the active local profile.
+    ListActivePolicies,
+    /// Report materialization status for selected policy entries.
+    ListProfileEffects,
+    /// Register a local route profile used by shared route actions.
+    AddRouteProfile {
+        #[arg(long)] name: String,
+        #[arg(long)] table: u32,
+        #[arg(long)] interface: String,
+        #[arg(long, default_value_t = false)] enabled: bool,
+        #[arg(long, default_value_t = false)] vpn: bool,
+    },
+    /// List local route profiles.
+    ListRouteProfiles,
+    /// Preview validated IP/CIDR route effects without executing route commands.
+    PreviewRoutes,
     /// Ingest a shared rule list previously exported by `publish-list --out`.
     IngestList {
         #[arg(long)]
@@ -389,6 +589,7 @@ enum Command {
     ListEnforcedDecisions,
     /// Create a new owner-controlled group — you become its sole owner
     /// and first voting member.
+    #[command(visible_alias = "group-create")]
     CreateGroup {
         #[arg(long)]
         name: String,
@@ -409,6 +610,7 @@ enum Command {
         file: PathBuf,
     },
     /// Browse every known group.
+    #[command(visible_alias = "groups")]
     ListGroups,
     /// Ask to join a group — never open self-add; an owner/admin must
     /// approve it.
@@ -518,6 +720,16 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Set the IRC-style topic shown above a group's party line.
+    SetGroupTopic {
+        /// A canonical group ID or an exact local group name.
+        #[arg(long)]
+        group: String,
+        #[arg(long, visible_alias = "description")]
+        topic: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Toggle the party line between open (any member may post) and
     /// moderated (only owners/admins and voiced members may post) — the
     /// IRC `+m`/`-m` analogue.
@@ -595,7 +807,9 @@ enum Command {
     },
     /// Publish a "party line" message to every current group member —
     /// sealed per member, the same way a `Restricted` export is.
+    #[command(visible_aliases = ["say", "msg"])]
     PublishPartyLine {
+        /// A canonical group ID or an exact local group name.
         #[arg(long)]
         group: String,
         #[arg(long)]
@@ -608,7 +822,7 @@ enum Command {
         re_target_kind: Option<String>,
         #[arg(long, requires = "re_target_kind")]
         re_target_value: Option<String>,
-        #[arg(long)]
+        #[arg(long, default_value = "/tmp/social-firewall-chat-out")]
         out_dir: PathBuf,
     },
     /// Ingest a party-line message addressed to you.
@@ -617,7 +831,9 @@ enum Command {
         file: PathBuf,
     },
     /// Browse a group's party-line history.
+    #[command(visible_aliases = ["history", "log"])]
     ListPartyLine {
+        /// A canonical group ID or an exact local group name.
         #[arg(long)]
         group: String,
     },
@@ -683,108 +899,523 @@ enum Command {
 }
 
 fn parse_target_flag(s: &str) -> Result<(String, String)> {
-    let (kind, value) = s.split_once(':').with_context(|| format!("expected `<kind>:<value>`, got `{s}`"))?;
+    let (kind, value) = s
+        .split_once(':')
+        .with_context(|| format!("expected `<kind>:<value>`, got `{s}`"))?;
     Ok((kind.to_string(), value.to_string()))
 }
 
 fn main() -> Result<()> {
+    if cgi::is_cgi() {
+        cgi::run_cgi();
+        return Ok(());
+    }
     let cli = Cli::parse();
     let store = StateStore::open(&cli.db).context("opening state store")?;
 
     match cli.command {
         Command::InitIdentity { display_name } => init_identity(&store, display_name)?,
-        Command::AddFollow { federation, user, allow_weight, deny_weight, advisory, exclude, name, iroh_node_id } => {
-            add_follow(&store, &federation, &user, allow_weight, deny_weight, advisory, exclude, name, iroh_node_id)?
+        Command::SetIdentityName { name } => {
+            store.set_self_display_name(name.as_deref())?;
+            println!(
+                "identity nickname {}",
+                name.map(|n| format!("set to {n}"))
+                    .unwrap_or_else(|| "cleared".to_string())
+            );
         }
-        Command::SetFollowName { federation, user, name } => set_follow_name(&store, &federation, &user, name)?,
-        Command::SetFollowNodeId { federation, user, node_id } => set_follow_node_id(&store, &federation, &user, node_id)?,
-        Command::SetOverride { target_kind, target_value, stance, emergency, note, ttl_seconds } => {
-            set_override(&store, &target_kind, &target_value, &stance, emergency, note, ttl_seconds)?
+        Command::SetFederationName { name } => {
+            store.set_home_federation_display_name(name.as_deref())?;
+            println!(
+                "home federation nickname {}",
+                name.map(|n| format!("set to {n}"))
+                    .unwrap_or_else(|| "cleared".to_string())
+            );
         }
-        Command::PublishOpinion { target_kind, target_value, stance, reason_code, note, ttl_seconds, out } => {
-            publish_opinion(&store, &target_kind, &target_value, &stance, &reason_code, note, ttl_seconds, out)?
+        Command::ListFollows => list_follows(&store)?,
+        Command::ChatHelp => print_chat_help(),
+        Command::AddFollow {
+            federation,
+            user,
+            allow_weight,
+            deny_weight,
+            advisory,
+            exclude,
+            name,
+            iroh_node_id,
+        } => add_follow(
+            &store,
+            &federation,
+            &user,
+            allow_weight,
+            deny_weight,
+            advisory,
+            exclude,
+            name,
+            iroh_node_id,
+        )?,
+        Command::SetFollowName {
+            federation,
+            user,
+            name,
+        } => set_follow_name(&store, &federation, &user, name)?,
+        Command::SetFollowNodeId {
+            federation,
+            user,
+            node_id,
+        } => set_follow_node_id(&store, &federation, &user, node_id)?,
+        Command::SetNtfyTopic { url } => {
+            store.set_ntfy_topic_url(url.as_deref())?;
+            match url {
+                Some(url) => println!("ntfy notifications will be pushed to {url}"),
+                None => println!("ntfy push disabled"),
+            }
         }
+        Command::SetOverride {
+            target_kind,
+            target_value,
+            stance,
+            emergency,
+            note,
+            ttl_seconds,
+        } => set_override(
+            &store,
+            &target_kind,
+            &target_value,
+            &stance,
+            emergency,
+            note,
+            ttl_seconds,
+        )?,
+        Command::PublishOpinion {
+            target_kind,
+            target_value,
+            stance,
+            reason_code,
+            note,
+            ttl_seconds,
+            out,
+        } => publish_opinion(
+            &store,
+            &target_kind,
+            &target_value,
+            &stance,
+            &reason_code,
+            note,
+            ttl_seconds,
+            out,
+        )?,
         Command::IngestOpinion { file } => ingest_opinion(&store, &file)?,
-        Command::EvaluateTarget { target_kind, target_value, threshold } => {
-            evaluate_target(&store, &target_kind, &target_value, threshold)?
-        }
-        Command::Apply { threshold, protect_ip, scratch_dir, dry_run } => {
+        Command::EvaluateTarget {
+            target_kind,
+            target_value,
+            threshold,
+        } => evaluate_target(&store, &target_kind, &target_value, threshold)?,
+        Command::Apply {
+            threshold,
+            protect_ip,
+            scratch_dir,
+            dry_run,
+        } => {
             let mut protected = ProtectedDestinations::default().with_defaults();
             for ip in &protect_ip {
                 protected.add(ip).map_err(|e| anyhow::anyhow!(e))?;
             }
-            apply_all(&store, &SystemCommandRunner, protected, scratch_dir, threshold, dry_run, now_unix())?
+            apply_all(
+                &store,
+                &SystemCommandRunner,
+                protected,
+                scratch_dir,
+                threshold,
+                dry_run,
+                now_unix(),
+            )?;
+            profile::apply_dns(&store, dry_run)?;
+            if dry_run {
+                profile::route_preview(&store)?;
+            }
         }
-        Command::OfferTunnel { description, limitation, targets, tags, max_connections, max_bandwidth_kbps, visibility, recipient, in_response_to, out, out_dir } => {
-            let targets = targets.iter().map(|s| parse_target_flag(s)).collect::<Result<Vec<_>>>()?;
-            tunnel::offer_tunnel(&store, &description, limitation, &targets, tags, max_connections, max_bandwidth_kbps, &visibility, &recipient, in_response_to, out, out_dir)?
+        Command::OfferTunnel {
+            description,
+            limitation,
+            targets,
+            tags,
+            max_connections,
+            max_bandwidth_kbps,
+            visibility,
+            recipient,
+            in_response_to,
+            out,
+            out_dir,
+        } => {
+            let targets = targets
+                .iter()
+                .map(|s| parse_target_flag(s))
+                .collect::<Result<Vec<_>>>()?;
+            tunnel::offer_tunnel(
+                &store,
+                &description,
+                limitation,
+                &targets,
+                tags,
+                max_connections,
+                max_bandwidth_kbps,
+                &visibility,
+                &recipient,
+                in_response_to,
+                out,
+                out_dir,
+            )?
         }
-        Command::IngestTunnelAdvertisement { file } => tunnel::ingest_tunnel_advertisement(&store, &file)?,
+        Command::IngestTunnelAdvertisement { file } => {
+            tunnel::ingest_tunnel_advertisement(&store, &file)?
+        }
         Command::ListTunnels => tunnel::list_tunnels(&store)?,
-        Command::RequestService { description, targets, visibility, recipient, out, out_dir } => {
-            let targets = targets.iter().map(|s| parse_target_flag(s)).collect::<Result<Vec<_>>>()?;
-            tunnel::request_service(&store, &description, &targets, &visibility, &recipient, out, out_dir)?
+        Command::RequestService {
+            description,
+            targets,
+            visibility,
+            recipient,
+            out,
+            out_dir,
+        } => {
+            let targets = targets
+                .iter()
+                .map(|s| parse_target_flag(s))
+                .collect::<Result<Vec<_>>>()?;
+            tunnel::request_service(
+                &store,
+                &description,
+                &targets,
+                &visibility,
+                &recipient,
+                out,
+                out_dir,
+            )?
         }
-        Command::IngestTunnelServiceRequest { file } => tunnel::ingest_tunnel_service_request(&store, &file)?,
+        Command::IngestTunnelServiceRequest { file } => {
+            tunnel::ingest_tunnel_service_request(&store, &file)?
+        }
         Command::ListPendingServiceRequests => tunnel::list_pending_service_requests(&store)?,
-        Command::RequestTunnel { advertisement, out } => tunnel::request_tunnel(&store, &advertisement, out)?,
+        Command::RequestTunnel { advertisement, out } => {
+            tunnel::request_tunnel(&store, &advertisement, out)?
+        }
         Command::IngestTunnelRequest { file } => tunnel::ingest_tunnel_request(&store, &file)?,
         Command::ListPendingTunnelRequests => tunnel::list_pending_tunnel_requests(&store)?,
+        Command::Notify => {
+            let report = notify::notify_pending_items(&store)?;
+            println!("posted {} notification(s)", report.notifications_posted);
+        }
         Command::TunnelBalance => tunnel::tunnel_balance(&store)?,
-        Command::AcceptTunnelRequest { requester, sequence, out } => tunnel::accept_tunnel_request(&store, &requester, sequence, out)?,
+        Command::AcceptTunnelRequest {
+            requester,
+            sequence,
+            out,
+        } => tunnel::accept_tunnel_request(&store, &requester, sequence, out)?,
         Command::IngestTunnelAccept { file } => tunnel::ingest_tunnel_accept(&store, &file)?,
-        Command::SelectTunnel { advertisement, targets } => {
-            let targets = targets.iter().map(|s| parse_target_flag(s)).collect::<Result<Vec<_>>>()?;
+        Command::SelectTunnel {
+            advertisement,
+            targets,
+        } => {
+            let targets = targets
+                .iter()
+                .map(|s| parse_target_flag(s))
+                .collect::<Result<Vec<_>>>()?;
             tunnel::select_tunnel(&store, &advertisement, &targets)?
         }
-        Command::SetTunnelTrust { federation, user, user_name, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, exclude, tag_filter, min_reciprocity_ratio } => {
-            let target_user = resolve_user(&store, &federation, user.as_deref(), user_name.as_deref())?;
-            tunnel::set_tunnel_trust(&store, target_user, auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, exclude, tag_filter, min_reciprocity_ratio)?
+        Command::SetTunnelTrust {
+            federation,
+            user,
+            user_name,
+            auto_accept_requests,
+            auto_consume_advertisements,
+            auto_respond_to_service_requests,
+            exclude,
+            tag_filter,
+            min_reciprocity_ratio,
+        } => {
+            let target_user =
+                resolve_user(&store, &federation, user.as_deref(), user_name.as_deref())?;
+            tunnel::set_tunnel_trust(
+                &store,
+                target_user,
+                auto_accept_requests,
+                auto_consume_advertisements,
+                auto_respond_to_service_requests,
+                exclude,
+                tag_filter,
+                min_reciprocity_ratio,
+            )?
         }
-        Command::SyncTunnels { out_dir, interface_name, wg_scratch_dir, dnsmasq_dir, dry_run } => {
-            let wg_config = wg_tunnel::WgTunnelConfig { interface_name, scratch_dir: wg_scratch_dir, dnsmasq_dir, ..wg_tunnel::WgTunnelConfig::default() };
-            let report = tunnel::sync_tunnels(&store, &wg_tunnel::SystemCommandRunner, &out_dir, wg_config, dry_run)?;
+        Command::SyncTunnels {
+            out_dir,
+            interface_name,
+            wg_scratch_dir,
+            dnsmasq_dir,
+            dry_run,
+        } => {
+            let wg_config = wg_tunnel::WgTunnelConfig {
+                interface_name,
+                scratch_dir: wg_scratch_dir,
+                dnsmasq_dir,
+                ..wg_tunnel::WgTunnelConfig::default()
+            };
+            let report = tunnel::sync_tunnels(
+                &store,
+                &wg_tunnel::SystemCommandRunner,
+                &out_dir,
+                wg_config,
+                dry_run,
+            )?;
             println!(
                 "sync-tunnels: {} auto-response(s), {} auto-accept(s), {} auto-consume(s), {} peer(s) added, {} peer(s) removed",
                 report.auto_responses, report.auto_accepts, report.auto_consumes, report.peers_added, report.peers_removed
             );
         }
         Command::Listen => tunnel::listen(&store)?,
-        Command::PublishList { name, description, categories, entries_file, visibility, recipient, out, out_dir } => {
-            list::publish_list(&store, &name, &description, &categories, &entries_file, &visibility, &recipient, out, out_dir)?
-        }
+        Command::Sync => group::sync_outbox(&store)?,
+        Command::SyncGroup { group } => group::sync_group(&store, &group)?,
+        Command::PublishList {
+            name,
+            description,
+            categories,
+            entries_file,
+            visibility,
+            recipient,
+            out,
+            out_dir,
+        } => list::publish_list(
+            &store,
+            &name,
+            &description,
+            &categories,
+            &entries_file,
+            &visibility,
+            &recipient,
+            out,
+            out_dir,
+        )?,
         Command::IngestList { file } => list::ingest_list(&store, &file)?,
         Command::ListSubscribedLists => list::list_subscribed_lists(&store)?,
-        Command::SetFollowCategoryFilter { federation, user, user_name, category } => {
-            let target_user = resolve_user(&store, &federation, user.as_deref(), user_name.as_deref())?;
+        Command::PublishPolicy {
+            policy_id,
+            name,
+            description,
+            entries_file,
+            categories,
+            visibility,
+            out,
+        } => shared_policy::publish_policy(
+            &store,
+            &policy_id,
+            &name,
+            &description,
+            &entries_file,
+            &categories,
+            &visibility,
+            out,
+        )?,
+        Command::IngestPolicy { file } => shared_policy::ingest_policy(&store, &file)?,
+        Command::ListPolicies => shared_policy::list_policies(&store)?,
+        Command::VotePolicyEntry {
+            policy_id,
+            entry_id,
+            group,
+            stance,
+            reason_code,
+            note,
+            out,
+        } => shared_policy::vote_policy_entry(
+            &store,
+            &policy_id,
+            &entry_id,
+            &group,
+            &stance,
+            &reason_code,
+            note,
+            out,
+        )?,
+        Command::ExplainPolicyEntry {
+            policy_id,
+            entry_id,
+            group,
+        } => shared_policy::explain_policy_entry(&store, &policy_id, &entry_id, &group)?,
+        Command::IngestPolicyVote { file } => shared_policy::ingest_policy_vote(&store, &file)?,
+        Command::PublishFingerprintObservation {
+            group,
+            fingerprint_id,
+            revision,
+            signal_family,
+            evidence_digest,
+            confidence,
+            out,
+        } => fingerprint::publish_observation(
+            &store,
+            &group,
+            &fingerprint_id,
+            revision,
+            &signal_family,
+            &evidence_digest,
+            confidence,
+            out,
+        )?,
+        Command::PublishFingerprintComment {
+            group,
+            fingerprint_id,
+            revision,
+            body,
+            out,
+        } => fingerprint::publish_comment(&store, &group, &fingerprint_id, revision, &body, out)?,
+        Command::ListFingerprint {
+            group,
+            fingerprint_id,
+            revision,
+        } => fingerprint::list_fingerprint(&store, &group, &fingerprint_id, revision)?,
+        Command::IngestFingerprintObservation { file } => {
+            fingerprint::ingest_observation(&store, &file)?
+        }
+        Command::SetFingerprintKey { group, key_hex } => {
+            fingerprint::set_group_key(&store, &group, &key_hex)?
+        }
+        Command::DeriveFingerprintId { group, material_file } => {
+            fingerprint::derive_shared_id(&store, &group, &material_file)?
+        }
+        Command::CreateProfile { name, description } => {
+            profile::create(&store, &name, &description)?
+        }
+        Command::AddProfilePolicy {
+            profile_id,
+            policy_id,
+        } => profile::add_policy(&store, &profile_id, &policy_id)?,
+        Command::SelectProfile { profile_id } => profile::select(&store, &profile_id)?,
+        Command::ListProfiles => profile::list(&store)?,
+        Command::ListActivePolicies => profile::list_active_policies(&store)?,
+        Command::ListProfileEffects => profile::effects(&store)?,
+        Command::AddRouteProfile { name, table, interface, enabled, vpn } =>
+            profile::add_route_profile(&store, &name, table, &interface, enabled, vpn)?,
+        Command::ListRouteProfiles => profile::list_route_profiles(&store)?,
+        Command::PreviewRoutes => profile::route_preview(&store)?,
+        Command::SetFollowCategoryFilter {
+            federation,
+            user,
+            user_name,
+            category,
+        } => {
+            let target_user =
+                resolve_user(&store, &federation, user.as_deref(), user_name.as_deref())?;
             list::set_follow_category_filter(&store, target_user, category)?
         }
-        Command::ExplainEnforced { target_kind, target_value } => explain_enforced(&store, &target_kind, &target_value)?,
+        Command::ExplainEnforced {
+            target_kind,
+            target_value,
+        } => explain_enforced(&store, &target_kind, &target_value)?,
         Command::ListEnforcedDecisions => list_enforced_decisions(&store)?,
-        Command::CreateGroup { name, description, join_prompt, out } => group::create_group(&store, &name, &description, join_prompt, out)?,
+        Command::CreateGroup {
+            name,
+            description,
+            join_prompt,
+            out,
+        } => group::create_group(&store, &name, &description, join_prompt, out)?,
         Command::IngestGroup { file } => group::ingest_group(&store, &file)?,
         Command::ListGroups => group::list_groups(&store)?,
-        Command::RequestGroupJoin { group, answer, out } => group::request_group_join(&store, &group, answer, out)?,
-        Command::IngestGroupJoinRequest { file } => group::ingest_group_join_request(&store, &file)?,
-        Command::ListPendingGroupJoins { group } => group::list_pending_group_joins(&store, &group)?,
-        Command::GroupJoinTrackRecord { group } => group::group_join_track_record(&store, &group)?,
-        Command::ApproveGroupJoin { group, requester, sequence, voting, out } => group::approve_group_join(&store, &group, &requester, sequence, voting, out)?,
-        Command::RejectGroupJoin { requester, sequence } => group::reject_group_join(&store, &requester, sequence)?,
-        Command::BlockGroupUser { group, user, reason_code, note, out } => group::block_group_user(&store, &group, &user, &reason_code, note, out)?,
-        Command::UnblockGroupUser { group, user } => group::unblock_group_user(&store, &group, &user)?,
-        Command::ListBlockedGroupUsers { group } => group::list_blocked_group_users(&store, &group)?,
-        Command::IngestGroupBlockReport { file } => group::ingest_group_block_report(&store, &file)?,
-        Command::ListGroupBlockReports { group, user } => group::list_group_block_reports(&store, &group, &user)?,
-        Command::SetGroupJoinPrompt { group, join_prompt, out } => group::set_group_join_prompt(&store, &group, join_prompt, out)?,
-        Command::SetGroupPartyLineModeration { group, moderated, out } => group::set_group_party_line_moderation(&store, &group, moderated, out)?,
-        Command::SetGroupVoice { group, user, voiced, out } => group::set_group_voice(&store, &group, &user, voiced, out)?,
-        Command::SetGroupVotingRight { group, user, voting, out } => group::set_group_voting_right(&store, &group, &user, voting, out)?,
-        Command::CastGroupVote { group, target_kind, target_value, stance, reason_code, note, ttl_seconds, out } => {
-            group::cast_group_vote(&store, &group, &target_kind, &target_value, &stance, &reason_code, note, ttl_seconds, out)?
+        Command::RequestGroupJoin { group, answer, out } => {
+            group::request_group_join(&store, &group, answer, out)?
         }
+        Command::IngestGroupJoinRequest { file } => {
+            group::ingest_group_join_request(&store, &file)?
+        }
+        Command::ListPendingGroupJoins { group } => {
+            group::list_pending_group_joins(&store, &group)?
+        }
+        Command::GroupJoinTrackRecord { group } => group::group_join_track_record(&store, &group)?,
+        Command::ApproveGroupJoin {
+            group,
+            requester,
+            sequence,
+            voting,
+            out,
+        } => group::approve_group_join(&store, &group, &requester, sequence, voting, out)?,
+        Command::RejectGroupJoin {
+            requester,
+            sequence,
+        } => group::reject_group_join(&store, &requester, sequence)?,
+        Command::BlockGroupUser {
+            group,
+            user,
+            reason_code,
+            note,
+            out,
+        } => group::block_group_user(&store, &group, &user, &reason_code, note, out)?,
+        Command::UnblockGroupUser { group, user } => {
+            group::unblock_group_user(&store, &group, &user)?
+        }
+        Command::ListBlockedGroupUsers { group } => {
+            group::list_blocked_group_users(&store, &group)?
+        }
+        Command::IngestGroupBlockReport { file } => {
+            group::ingest_group_block_report(&store, &file)?
+        }
+        Command::ListGroupBlockReports { group, user } => {
+            group::list_group_block_reports(&store, &group, &user)?
+        }
+        Command::SetGroupJoinPrompt {
+            group,
+            join_prompt,
+            out,
+        } => group::set_group_join_prompt(&store, &group, join_prompt, out)?,
+        Command::SetGroupTopic { group, topic, out } => {
+            group::set_group_topic(&store, &group, topic, out)?
+        }
+        Command::SetGroupPartyLineModeration {
+            group,
+            moderated,
+            out,
+        } => group::set_group_party_line_moderation(&store, &group, moderated, out)?,
+        Command::SetGroupVoice {
+            group,
+            user,
+            voiced,
+            out,
+        } => group::set_group_voice(&store, &group, &user, voiced, out)?,
+        Command::SetGroupVotingRight {
+            group,
+            user,
+            voting,
+            out,
+        } => group::set_group_voting_right(&store, &group, &user, voting, out)?,
+        Command::CastGroupVote {
+            group,
+            target_kind,
+            target_value,
+            stance,
+            reason_code,
+            note,
+            ttl_seconds,
+            out,
+        } => group::cast_group_vote(
+            &store,
+            &group,
+            &target_kind,
+            &target_value,
+            &stance,
+            &reason_code,
+            note,
+            ttl_seconds,
+            out,
+        )?,
         Command::IngestGroupVote { file } => group::ingest_group_vote(&store, &file)?,
-        Command::SetGroupTrust { group, allow_weight, deny_weight, exclude } => group::set_group_trust(&store, &group, allow_weight, deny_weight, exclude)?,
-        Command::PublishPartyLine { group, body, re_target_kind, re_target_value, out_dir } => {
+        Command::SetGroupTrust {
+            group,
+            allow_weight,
+            deny_weight,
+            exclude,
+        } => group::set_group_trust(&store, &group, allow_weight, deny_weight, exclude)?,
+        Command::PublishPartyLine {
+            group,
+            body,
+            re_target_kind,
+            re_target_value,
+            out_dir,
+        } => {
             let in_reply_to = match (re_target_kind, re_target_value) {
                 (Some(kind), Some(value)) => Some((kind, value)),
                 _ => None,
@@ -793,20 +1424,47 @@ fn main() -> Result<()> {
         }
         Command::IngestPartyLine { file } => group::ingest_party_line(&store, &file)?,
         Command::ListPartyLine { group } => group::list_party_line(&store, &group)?,
-        Command::ExplainGroupVote { group, target_kind, target_value } => group::explain_group_vote(&store, &group, &target_kind, &target_value)?,
-        Command::PublishDeviceApproval { mac, stance, reason_code, note, label, ttl_seconds, out } => {
-            device::publish_device_approval(&store, &mac, &stance, &reason_code, note, label, ttl_seconds, out)?
-        }
+        Command::ExplainGroupVote {
+            group,
+            target_kind,
+            target_value,
+        } => group::explain_group_vote(&store, &group, &target_kind, &target_value)?,
+        Command::PublishDeviceApproval {
+            mac,
+            stance,
+            reason_code,
+            note,
+            label,
+            ttl_seconds,
+            out,
+        } => device::publish_device_approval(
+            &store,
+            &mac,
+            &stance,
+            &reason_code,
+            note,
+            label,
+            ttl_seconds,
+            out,
+        )?,
         Command::IngestDeviceApproval { file } => device::ingest_device_approval(&store, &file)?,
         Command::ListDeviceApprovals { mac } => device::list_device_approvals(&store, &mac)?,
-        Command::EvaluateDevice { mac, threshold } => device::evaluate_device(&store, &mac, threshold)?,
+        Command::EvaluateDevice { mac, threshold } => {
+            device::evaluate_device(&store, &mac, threshold)?
+        }
         Command::ServeDashboard { addr } => dashboard::serve(store, &addr)?,
     }
     Ok(())
 }
 
 fn print_contribution(c: &domain_types::Contribution) {
-    println!("  {} weight={:.2} stance={:?} reason={:?}", format_source(&c.source), c.weight, c.stance, c.reason.code);
+    println!(
+        "  {} weight={:.2} stance={:?} reason={:?}",
+        format_source(&c.source),
+        c.weight,
+        c.stance,
+        c.reason.code
+    );
 }
 
 fn explain_enforced(store: &StateStore, target_kind: &str, target_value: &str) -> Result<()> {
@@ -829,9 +1487,17 @@ fn list_enforced_decisions(store: &StateStore) -> Result<()> {
         println!("no enforced targets have any recorded contributors yet — run `sf apply` first");
         return Ok(());
     }
-    let mut by_target: std::collections::BTreeMap<String, Vec<domain_types::Contribution>> = std::collections::BTreeMap::new();
+    let mut by_target: std::collections::BTreeMap<String, Vec<domain_types::Contribution>> =
+        std::collections::BTreeMap::new();
     for (target, contribution) in all {
-        by_target.entry(format!("{} {}", target.kind_str(), target_value_str(&target))).or_default().push(contribution);
+        by_target
+            .entry(format!(
+                "{} {}",
+                target.kind_str(),
+                target_value_str(&target)
+            ))
+            .or_default()
+            .push(contribution);
     }
     for (target_label, contributing) in by_target {
         println!("{target_label}:");
@@ -864,6 +1530,29 @@ fn apply_all(
     let mut contributing_by_target = Vec::new();
     let mut skipped_no_signal = 0;
     let mut skipped_unenforceable_kind = 0;
+    let mut selected_policy_blocks = 0;
+
+    // Explicitly selected policy collections are local input. Only the
+    // firewall block action is materialized in this slice; other action
+    // families remain reported as not yet enforceable below.
+    for policy in store.list_active_shared_policies()? {
+        for policy_entry in policy.entries {
+            if let PolicyAction::Block = policy_entry.action {
+                selected_policy_blocks += 1;
+                if matches!(
+                    policy_entry.target,
+                    TargetSelector::Ip(_) | TargetSelector::Cidr(_)
+                ) {
+                    entries.push(PolicyEntry {
+                        target: policy_entry.target,
+                        decision: Decision::Deny,
+                    });
+                } else {
+                    skipped_unenforceable_kind += 1;
+                }
+            }
+        }
+    }
 
     for target in &targets {
         let local_overrides = store.get_local_overrides_for(target)?;
@@ -902,18 +1591,26 @@ fn apply_all(
         if !result.explanation.contributing.is_empty() {
             contributing_by_target.push((target.clone(), result.explanation.contributing.clone()));
         }
-        entries.push(PolicyEntry { target: target.clone(), decision: result.decision });
+        entries.push(PolicyEntry {
+            target: target.clone(),
+            decision: result.decision,
+        });
     }
 
     println!(
-        "evaluated {} target(s): {} to enforce, {} allow/no-decision, {} not yet enforceable (domain/service)",
+        "evaluated {} target(s): {} selected policy block(s), {} to enforce, {} allow/no-decision, {} not yet enforceable (domain/service or pending action backend)",
         targets.len(),
+        selected_policy_blocks,
         entries.len(),
         skipped_no_signal,
         skipped_unenforceable_kind
     );
 
-    let config = NftablesControllerConfig { protected, scratch_dir, ..NftablesControllerConfig::default() };
+    let config = NftablesControllerConfig {
+        protected,
+        scratch_dir,
+        ..NftablesControllerConfig::default()
+    };
     let ctrl = NftablesController::new(runner, store, config);
 
     if dry_run {
@@ -938,7 +1635,9 @@ fn apply_all(
             refresh_enforced_decision_contributors(store, &contributing_by_target)?;
         }
         ApplyResult::Rejected { reason } => bail!("policy rejected before enforcement: {reason}"),
-        ApplyResult::Failed { reason, rollback } => bail!("apply failed: {reason} (rollback: {rollback:?})"),
+        ApplyResult::Failed { reason, rollback } => {
+            bail!("apply failed: {reason} (rollback: {rollback:?})")
+        }
     }
     Ok(())
 }
@@ -951,7 +1650,10 @@ fn apply_all(
 /// identical while the underlying weighted inputs shift (a follow's
 /// weight changed, an opinion expired) without the Allow/Deny/Ask
 /// decision itself changing.
-fn refresh_enforced_decision_contributors(store: &StateStore, contributing_by_target: &[(TargetSelector, Vec<domain_types::Contribution>)]) -> Result<()> {
+fn refresh_enforced_decision_contributors(
+    store: &StateStore,
+    contributing_by_target: &[(TargetSelector, Vec<domain_types::Contribution>)],
+) -> Result<()> {
     store.clear_enforced_decision_contributors()?;
     for (target, contributing) in contributing_by_target {
         store.record_enforced_decision_contributors(target, contributing)?;
@@ -965,11 +1667,17 @@ fn init_identity(store: &StateStore, display_name: Option<String>) -> Result<()>
     }
     let kp = crypto::Keypair::generate();
     let pubkey = kp.public_key();
-    let federation_id = FederationId(crypto::hash(&[b"sf-genesis-v1".as_slice(), &pubkey.0].concat()));
+    let federation_id = FederationId(crypto::hash(
+        &[b"sf-genesis-v1".as_slice(), &pubkey.0].concat(),
+    ));
     let local_id = crypto::hash(&[b"sf-local-id-v1".as_slice(), &pubkey.0].concat());
-    let user = UserId { federation: federation_id, local_id };
+    let user = UserId {
+        federation: federation_id,
+        local_id,
+    };
 
     store.set_self_identity(user, pubkey, &kp.seed_bytes(), display_name.as_deref())?;
+    group::create_self_group(store, user, &pubkey)?;
 
     println!("identity created");
     println!("  federation : {}", federation_id.0);
@@ -994,7 +1702,10 @@ fn add_follow(
     let federation = FederationId(parse_hash32(federation)?);
     let local_id = parse_hash32(user)?;
     let rule = LocalTrustRule {
-        user: UserId { federation, local_id },
+        user: UserId {
+            federation,
+            local_id,
+        },
         allow_weight,
         deny_weight,
         advisory_only: advisory,
@@ -1010,31 +1721,113 @@ fn add_follow(
     Ok(())
 }
 
+fn list_follows(store: &StateStore) -> Result<()> {
+    let follows = store.list_follows()?;
+    if follows.is_empty() {
+        println!("no followed routers");
+        return Ok(());
+    }
+    for follow in follows {
+        let label = follow
+            .display_name
+            .unwrap_or_else(|| follow.user.local_id.to_string()[..8].to_string());
+        let mut flags = Vec::new();
+        if follow.advisory_only {
+            flags.push("advisory");
+        }
+        if follow.excluded {
+            flags.push("excluded");
+        }
+        let suffix = if flags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", flags.join(", "))
+        };
+        println!(
+            "{label} ({}@{}) allow={} deny={}{}",
+            follow.user.local_id.to_string()[..8].to_string(),
+            follow.user.federation.0.to_string()[..8].to_string(),
+            follow.allow_weight,
+            follow.deny_weight,
+            suffix
+        );
+    }
+    Ok(())
+}
+
+fn print_chat_help() {
+    println!("chat commands:");
+    println!("  /nick [name]       set or clear your nickname");
+    println!("  /join <group>      request to join a group");
+    println!("  /list              list known groups");
+    println!("  /names             list known groups and members");
+    println!("  /topic [text]      show or set this group's topic");
+    println!("  /msg <text>        send a party-line message");
+    println!("  /me <action>       send an IRC-style action");
+    println!("  /history           show this group's timeline");
+    println!("  /help              show this reference");
+    println!("  text               send text to this group");
+    println!();
+    println!("Full `sf` commands can also be entered after the leading slash.");
+}
+
 /// Relabels an already-followed user without touching their trust
 /// weights/exclude flag — `upsert_follow` requires the full row, so this
 /// reads the existing one first and bails with a clear error if it
 /// doesn't exist yet, rather than silently creating a zero-weight follow
 /// out of a rename command.
-fn set_follow_name(store: &StateStore, federation: &str, user: &str, name: Option<String>) -> Result<()> {
-    let target_user = UserId { federation: FederationId(parse_hash32(federation)?), local_id: parse_hash32(user)? };
-    let mut rule = store.get_follow(&target_user)?.context("not following this user yet — run `add-follow` first")?;
+fn set_follow_name(
+    store: &StateStore,
+    federation: &str,
+    user: &str,
+    name: Option<String>,
+) -> Result<()> {
+    let target_user = UserId {
+        federation: FederationId(parse_hash32(federation)?),
+        local_id: parse_hash32(user)?,
+    };
+    let mut rule = store
+        .get_follow(&target_user)?
+        .context("not following this user yet — run `add-follow` first")?;
     rule.display_name = name.clone();
     store.upsert_follow(&rule)?;
     match name {
-        Some(n) => println!("{}/{} is now labeled \"{n}\"", target_user.federation.0, target_user.local_id),
-        None => println!("label cleared for {}/{}", target_user.federation.0, target_user.local_id),
+        Some(n) => println!(
+            "{}/{} is now labeled \"{n}\"",
+            target_user.federation.0, target_user.local_id
+        ),
+        None => println!(
+            "label cleared for {}/{}",
+            target_user.federation.0, target_user.local_id
+        ),
     }
     Ok(())
 }
 
-fn set_follow_node_id(store: &StateStore, federation: &str, user: &str, node_id: Option<String>) -> Result<()> {
-    let target_user = UserId { federation: FederationId(parse_hash32(federation)?), local_id: parse_hash32(user)? };
-    let mut rule = store.get_follow(&target_user)?.context("not following this user yet — run `add-follow` first")?;
+fn set_follow_node_id(
+    store: &StateStore,
+    federation: &str,
+    user: &str,
+    node_id: Option<String>,
+) -> Result<()> {
+    let target_user = UserId {
+        federation: FederationId(parse_hash32(federation)?),
+        local_id: parse_hash32(user)?,
+    };
+    let mut rule = store
+        .get_follow(&target_user)?
+        .context("not following this user yet — run `add-follow` first")?;
     rule.iroh_node_id = node_id.clone();
     store.upsert_follow(&rule)?;
     match node_id {
-        Some(id) => println!("{}/{} is now reachable via Iroh node {id}", target_user.federation.0, target_user.local_id),
-        None => println!("Iroh node id cleared for {}/{}", target_user.federation.0, target_user.local_id),
+        Some(id) => println!(
+            "{}/{} is now reachable via Iroh node {id}",
+            target_user.federation.0, target_user.local_id
+        ),
+        None => println!(
+            "Iroh node id cleared for {}/{}",
+            target_user.federation.0, target_user.local_id
+        ),
     }
     Ok(())
 }
@@ -1043,14 +1836,27 @@ fn set_follow_node_id(store: &StateStore, federation: &str, user: &str, node_id:
 /// (mutually exclusive, `--user-name` requires an existing named follow
 /// in this federation) to a `UserId` — the shared lookup behind every
 /// command that accepts both forms.
-pub(crate) fn resolve_user(store: &StateStore, federation: &str, user: Option<&str>, user_name: Option<&str>) -> Result<UserId> {
+pub(crate) fn resolve_user(
+    store: &StateStore,
+    federation: &str,
+    user: Option<&str>,
+    user_name: Option<&str>,
+) -> Result<UserId> {
     let federation_id = FederationId(parse_hash32(federation)?);
     match (user, user_name) {
         (Some(_), Some(_)) => bail!("pass either --user or --user-name, not both"),
-        (Some(hex), None) => Ok(UserId { federation: federation_id, local_id: parse_hash32(hex)? }),
+        (Some(hex), None) => Ok(UserId {
+            federation: federation_id,
+            local_id: parse_hash32(hex)?,
+        }),
         (None, Some(name)) => store
             .resolve_user_by_name(&federation_id, name)?
-            .with_context(|| format!("no follow named \"{name}\" in federation {}", federation_id.0)),
+            .with_context(|| {
+                format!(
+                    "no follow named \"{name}\" in federation {}",
+                    federation_id.0
+                )
+            }),
         (None, None) => bail!("pass either --user or --user-name"),
     }
 }
@@ -1069,16 +1875,24 @@ fn set_override(
     let o = LocalOverride {
         target,
         stance: parse_stance(stance)?,
-        kind: if emergency { OverrideKind::Emergency } else { OverrideKind::Normal },
+        kind: if emergency {
+            OverrideKind::Emergency
+        } else {
+            OverrideKind::Normal
+        },
         note,
         created_at: now,
         expires_at: ttl_seconds.map(|s| now + s),
     };
     store.set_local_override(&o)?;
-    println!("local override set: {} {} -> {:?}", target_kind, target_value, o.stance);
+    println!(
+        "local override set: {} {} -> {:?}",
+        target_kind, target_value, o.stance
+    );
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_opinion(
     store: &StateStore,
     target_kind: &str,
@@ -1103,7 +1917,11 @@ fn publish_opinion(
         sequence,
         target,
         stance: parse_stance(stance)?,
-        reason: Reason { code: parse_reason_code(reason_code)?, note, evidence: vec![] },
+        reason: Reason {
+            code: parse_reason_code(reason_code)?,
+            note,
+            evidence: vec![],
+        },
         issued_at: now,
         expires_at: ttl_seconds.map(|s| now + s),
         supersedes: None,
@@ -1113,7 +1931,10 @@ fn publish_opinion(
     opinion.signature = kp.sign(crypto::contexts::POLICY_OPINION, &signing_bytes);
 
     store.append_own_opinion(&opinion)?;
-    println!("published opinion #{sequence}: {target_kind} {target_value} -> {:?}", opinion.stance);
+    println!(
+        "published opinion #{sequence}: {target_kind} {target_value} -> {:?}",
+        opinion.stance
+    );
 
     if let Some(path) = out {
         let pubkey = kp.public_key();
@@ -1126,12 +1947,18 @@ fn publish_opinion(
 }
 
 fn ingest_opinion(store: &StateStore, file: &PathBuf) -> Result<()> {
-    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let json: serde_json::Value = serde_json::from_str(&text)?;
     let (opinion, pubkey) = opinion_from_json(&json)?;
 
-    crypto::verify(&pubkey, crypto::contexts::POLICY_OPINION, &opinion.signing_bytes(), &opinion.signature)
-        .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
+    crypto::verify(
+        &pubkey,
+        crypto::contexts::POLICY_OPINION,
+        &opinion.signing_bytes(),
+        &opinion.signature,
+    )
+    .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
 
     store.ingest_opinion(&opinion)?;
     println!(
@@ -1141,7 +1968,12 @@ fn ingest_opinion(store: &StateStore, file: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn evaluate_target(store: &StateStore, target_kind: &str, target_value: &str, threshold: f64) -> Result<()> {
+fn evaluate_target(
+    store: &StateStore,
+    target_kind: &str,
+    target_value: &str,
+    threshold: f64,
+) -> Result<()> {
     let target = parse_target(target_kind, target_value)?;
     let now = now_unix();
 
@@ -1168,17 +2000,33 @@ fn evaluate_target(store: &StateStore, target_kind: &str, target_value: &str, th
     println!("target     : {target_kind} {target_value}");
     println!("decision   : {:?}", result.decision);
     println!("tier       : {:?}", result.explanation.tier);
-    println!("allow/deny : {:.2} / {:.2} (threshold {:.2})", result.explanation.allow_weight_total, result.explanation.deny_weight_total, result.explanation.threshold);
+    println!(
+        "allow/deny : {:.2} / {:.2} (threshold {:.2})",
+        result.explanation.allow_weight_total,
+        result.explanation.deny_weight_total,
+        result.explanation.threshold
+    );
     if !result.explanation.contributing.is_empty() {
         println!("contributing:");
         for c in &result.explanation.contributing {
-            println!("  {} weight={:.2} stance={:?} reason={:?}", format_source(&c.source), c.weight, c.stance, c.reason.code);
+            println!(
+                "  {} weight={:.2} stance={:?} reason={:?}",
+                format_source(&c.source),
+                c.weight,
+                c.stance,
+                c.reason.code
+            );
         }
     }
     if !result.explanation.ignored.is_empty() {
         println!("ignored:");
         for i in &result.explanation.ignored {
-            println!("  {} stance={:?} why={:?}", format_source(&i.source), i.stance, i.why);
+            println!(
+                "  {} stance={:?} why={:?}",
+                format_source(&i.source),
+                i.stance,
+                i.why
+            );
         }
     }
     Ok(())
@@ -1207,40 +2055,74 @@ fn opinion_to_json(o: &PolicyOpinion, pubkey: &PublicKeyBytes) -> serde_json::Va
 
 fn opinion_from_json(json: &serde_json::Value) -> Result<(PolicyOpinion, PublicKeyBytes)> {
     let get_str = |key: &str| -> Result<&str> {
-        json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing/invalid field `{key}`"))
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("missing/invalid field `{key}`"))
     };
     let federation = FederationId(parse_hash32(get_str("author_federation")?)?);
     let local_id = parse_hash32(get_str("author_local_id")?)?;
     let pubkey_bytes = hex::decode(get_str("author_pubkey")?)?;
-    let pubkey = PublicKeyBytes(pubkey_bytes.try_into().map_err(|_| anyhow::anyhow!("author_pubkey must be 32 bytes"))?);
+    let pubkey = PublicKeyBytes(
+        pubkey_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("author_pubkey must be 32 bytes"))?,
+    );
 
-    let sequence = json.get("sequence").and_then(|v| v.as_u64()).context("missing `sequence`")?;
+    let sequence = json
+        .get("sequence")
+        .and_then(|v| v.as_u64())
+        .context("missing `sequence`")?;
     let target = parse_target(get_str("target_kind")?, get_str("target_value")?)?;
     let stance = parse_stance(get_str("stance")?)?;
     let reason_code = parse_reason_code(get_str("reason_code")?)?;
-    let reason_note = json.get("reason_note").and_then(|v| v.as_str()).map(String::from);
+    let reason_note = json
+        .get("reason_note")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let reason_evidence = json
         .get("reason_evidence")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(parse_hash32).collect::<Result<Vec<_>>>())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(parse_hash32)
+                .collect::<Result<Vec<_>>>()
+        })
         .transpose()?
         .unwrap_or_default();
-    let issued_at = json.get("issued_at").and_then(|v| v.as_i64()).context("missing `issued_at`")?;
+    let issued_at = json
+        .get("issued_at")
+        .and_then(|v| v.as_i64())
+        .context("missing `issued_at`")?;
     let expires_at = json.get("expires_at").and_then(|v| v.as_i64());
     let supersedes_sequence = json.get("supersedes_sequence").and_then(|v| v.as_u64());
     let signature_bytes = hex::decode(get_str("signature")?)?;
-    let signature = SignatureBytes(signature_bytes.try_into().map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?);
+    let signature = SignatureBytes(
+        signature_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?,
+    );
 
-    let author = UserId { federation, local_id };
+    let author = UserId {
+        federation,
+        local_id,
+    };
     let opinion = PolicyOpinion {
         author,
         sequence,
         target,
         stance,
-        reason: Reason { code: reason_code, note: reason_note, evidence: reason_evidence },
+        reason: Reason {
+            code: reason_code,
+            note: reason_note,
+            evidence: reason_evidence,
+        },
         issued_at,
         expires_at,
-        supersedes: supersedes_sequence.map(|s| OpinionRef { author, sequence: s }),
+        supersedes: supersedes_sequence.map(|s| OpinionRef {
+            author,
+            sequence: s,
+        }),
         signature,
     };
     Ok((opinion, pubkey))
@@ -1320,13 +2202,17 @@ pub(crate) fn parse_target(kind: &str, value: &str) -> Result<TargetSelector> {
         "ip" => Ok(TargetSelector::Ip(value.to_string())),
         "cidr" => Ok(TargetSelector::Cidr(value.to_string())),
         "service" => Ok(TargetSelector::Service(value.to_string())),
-        other => bail!("invalid target kind `{other}` — expected domain|domain_suffix|ip|cidr|service"),
+        other => {
+            bail!("invalid target kind `{other}` — expected domain|domain_suffix|ip|cidr|service")
+        }
     }
 }
 
 pub(crate) fn parse_hash32(s: &str) -> Result<Hash32> {
     let bytes = hex::decode(s).with_context(|| format!("`{s}` is not valid hex"))?;
-    let arr: [u8; 32] = bytes.try_into().map_err(|_| anyhow::anyhow!("`{s}` must decode to exactly 32 bytes"))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("`{s}` must decode to exactly 32 bytes"))?;
     Ok(Hash32(arr))
 }
 
@@ -1349,51 +2235,136 @@ mod apply_all_tests {
     #[test]
     fn a_denied_ip_target_is_enforced() {
         let store = store();
-        store.set_local_override(&LocalOverride { target: TargetSelector::Ip("203.0.113.9".into()), stance: Stance::Deny, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None }).unwrap();
+        store
+            .set_local_override(&LocalOverride {
+                target: TargetSelector::Ip("203.0.113.9".into()),
+                stance: Stance::Deny,
+                kind: OverrideKind::Normal,
+                note: None,
+                created_at: 1,
+                expires_at: None,
+            })
+            .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
 
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 1000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            1000,
+        )
+        .unwrap();
 
-        assert!(runner.call_count() > 0, "an enforceable Deny target must actually reach nft");
-        assert!(store.get_applied_ruleset().unwrap().unwrap().ruleset_text.contains("203.0.113.9"));
+        assert!(
+            runner.call_count() > 0,
+            "an enforceable Deny target must actually reach nft"
+        );
+        assert!(store
+            .get_applied_ruleset()
+            .unwrap()
+            .unwrap()
+            .ruleset_text
+            .contains("203.0.113.9"));
     }
 
     #[test]
     fn a_denied_domain_target_is_skipped_not_rejected() {
         let store = store();
-        store.set_local_override(&LocalOverride { target: TargetSelector::Domain("ads.example".into()), stance: Stance::Deny, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None }).unwrap();
+        store
+            .set_local_override(&LocalOverride {
+                target: TargetSelector::Domain("ads.example".into()),
+                stance: Stance::Deny,
+                kind: OverrideKind::Normal,
+                note: None,
+                created_at: 1,
+                expires_at: None,
+            })
+            .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
 
         // Must succeed (not bail on CompileError::UnsupportedTarget) —
         // domain targets are filtered out before reaching nft-enforcer,
         // not passed through and rejected.
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 1000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            1000,
+        )
+        .unwrap();
     }
 
     #[test]
     fn an_allowed_target_is_never_compiled_into_a_deny_entry() {
         let store = store();
-        store.set_local_override(&LocalOverride { target: TargetSelector::Ip("203.0.113.9".into()), stance: Stance::Allow, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None }).unwrap();
+        store
+            .set_local_override(&LocalOverride {
+                target: TargetSelector::Ip("203.0.113.9".into()),
+                stance: Stance::Allow,
+                kind: OverrideKind::Normal,
+                note: None,
+                created_at: 1,
+                expires_at: None,
+            })
+            .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
 
         // The very first apply still establishes the (empty) table for
         // real, so this isn't a zero-nft-calls assertion — the meaningful
         // check is that the allowed address never ends up in a deny set.
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 1000).unwrap();
-        assert!(!store.get_applied_ruleset().unwrap().unwrap().ruleset_text.contains("203.0.113.9"));
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            1000,
+        )
+        .unwrap();
+        assert!(!store
+            .get_applied_ruleset()
+            .unwrap()
+            .unwrap()
+            .ruleset_text
+            .contains("203.0.113.9"));
     }
 
     #[test]
     fn dry_run_never_touches_the_runner() {
         let store = store();
-        store.set_local_override(&LocalOverride { target: TargetSelector::Ip("203.0.113.9".into()), stance: Stance::Deny, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None }).unwrap();
+        store
+            .set_local_override(&LocalOverride {
+                target: TargetSelector::Ip("203.0.113.9".into()),
+                stance: Stance::Deny,
+                kind: OverrideKind::Normal,
+                note: None,
+                created_at: 1,
+                expires_at: None,
+            })
+            .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
 
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, true, 1000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            true,
+            1000,
+        )
+        .unwrap();
 
         assert_eq!(runner.call_count(), 0, "dry-run must never call nft");
         assert!(store.get_applied_ruleset().unwrap().is_none());
@@ -1402,29 +2373,80 @@ mod apply_all_tests {
     #[test]
     fn reapplying_unchanged_state_is_a_no_op() {
         let store = store();
-        store.set_local_override(&LocalOverride { target: TargetSelector::Ip("203.0.113.9".into()), stance: Stance::Deny, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None }).unwrap();
+        store
+            .set_local_override(&LocalOverride {
+                target: TargetSelector::Ip("203.0.113.9".into()),
+                stance: Stance::Deny,
+                kind: OverrideKind::Normal,
+                note: None,
+                created_at: 1,
+                expires_at: None,
+            })
+            .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
 
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 1000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            1000,
+        )
+        .unwrap();
         let calls_after_first = runner.call_count();
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 2000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            2000,
+        )
+        .unwrap();
 
-        assert_eq!(runner.call_count(), calls_after_first, "identical state must not issue further nft calls on a second run");
+        assert_eq!(
+            runner.call_count(),
+            calls_after_first,
+            "identical state must not issue further nft calls on a second run"
+        );
     }
 
     #[test]
     fn apply_records_contributors_for_a_trust_weighted_enforced_target() {
         let store = store();
-        let alice = UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([2; 32]) };
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        let alice = UserId {
+            federation: FederationId(Hash32([1; 32])),
+            local_id: Hash32([2; 32]),
+        };
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: alice,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         store
             .ingest_opinion(&PolicyOpinion {
                 author: alice,
                 sequence: 0,
                 target: TargetSelector::Ip("203.0.113.9".into()),
                 stance: Stance::Deny,
-                reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] },
+                reason: Reason {
+                    code: ReasonCode::Malware,
+                    note: None,
+                    evidence: vec![],
+                },
                 issued_at: 0,
                 expires_at: None,
                 supersedes: None,
@@ -1434,9 +2456,20 @@ mod apply_all_tests {
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
 
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 1000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            1000,
+        )
+        .unwrap();
 
-        let contributing = store.enforced_decision_contributors_for(&TargetSelector::Ip("203.0.113.9".into())).unwrap();
+        let contributing = store
+            .enforced_decision_contributors_for(&TargetSelector::Ip("203.0.113.9".into()))
+            .unwrap();
         assert_eq!(contributing.len(), 1);
         assert_eq!(contributing[0].source, StatementAuthor::User(alice));
         assert_eq!(contributing[0].stance, Stance::Deny);
@@ -1449,27 +2482,68 @@ mod apply_all_tests {
         // doesn't need anyone else's agreement, so there's nothing to
         // attribute.
         let store = store();
-        store.set_local_override(&LocalOverride { target: TargetSelector::Ip("203.0.113.9".into()), stance: Stance::Deny, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None }).unwrap();
+        store
+            .set_local_override(&LocalOverride {
+                target: TargetSelector::Ip("203.0.113.9".into()),
+                stance: Stance::Deny,
+                kind: OverrideKind::Normal,
+                note: None,
+                created_at: 1,
+                expires_at: None,
+            })
+            .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
 
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 1000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            1000,
+        )
+        .unwrap();
 
-        assert!(store.enforced_decision_contributors_for(&TargetSelector::Ip("203.0.113.9".into())).unwrap().is_empty());
+        assert!(store
+            .enforced_decision_contributors_for(&TargetSelector::Ip("203.0.113.9".into()))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn apply_dry_run_never_touches_the_contributor_snapshot() {
         let store = store();
-        let alice = UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([2; 32]) };
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        let alice = UserId {
+            federation: FederationId(Hash32([1; 32])),
+            local_id: Hash32([2; 32]),
+        };
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: alice,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         store
             .ingest_opinion(&PolicyOpinion {
                 author: alice,
                 sequence: 0,
                 target: TargetSelector::Ip("203.0.113.9".into()),
                 stance: Stance::Deny,
-                reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] },
+                reason: Reason {
+                    code: ReasonCode::Malware,
+                    note: None,
+                    evidence: vec![],
+                },
                 issued_at: 0,
                 expires_at: None,
                 supersedes: None,
@@ -1479,24 +2553,62 @@ mod apply_all_tests {
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
 
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, true, 1000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            true,
+            1000,
+        )
+        .unwrap();
 
-        assert!(store.enforced_decision_contributors_for(&TargetSelector::Ip("203.0.113.9".into())).unwrap().is_empty(), "dry-run must never persist the contributor snapshot");
+        assert!(
+            store
+                .enforced_decision_contributors_for(&TargetSelector::Ip("203.0.113.9".into()))
+                .unwrap()
+                .is_empty(),
+            "dry-run must never persist the contributor snapshot"
+        );
     }
 
     #[test]
     fn apply_refreshes_contributors_even_when_the_enforced_ruleset_digest_is_unchanged() {
         let store = store();
-        let alice = UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([2; 32]) };
-        let bob = UserId { federation: FederationId(Hash32([3; 32])), local_id: Hash32([4; 32]) };
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        let alice = UserId {
+            federation: FederationId(Hash32([1; 32])),
+            local_id: Hash32([2; 32]),
+        };
+        let bob = UserId {
+            federation: FederationId(Hash32([3; 32])),
+            local_id: Hash32([4; 32]),
+        };
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: alice,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         store
             .ingest_opinion(&PolicyOpinion {
                 author: alice,
                 sequence: 0,
                 target: TargetSelector::Ip("203.0.113.9".into()),
                 stance: Stance::Deny,
-                reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] },
+                reason: Reason {
+                    code: ReasonCode::Malware,
+                    note: None,
+                    evidence: vec![],
+                },
                 issued_at: 0,
                 expires_at: None,
                 supersedes: None,
@@ -1505,30 +2617,71 @@ mod apply_all_tests {
             .unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let dir = tempfile::tempdir().unwrap();
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 1000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            1000,
+        )
+        .unwrap();
 
         // A second, agreeing contributor joins — the Deny decision stays
         // exactly the same (still crosses threshold, still Deny), so the
         // compiled nft digest is unchanged and `apply` reports `NoChange`
         // — but the set of *who* justified it has grown, and that must
         // still be reflected.
-        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: bob,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         store
             .ingest_opinion(&PolicyOpinion {
                 author: bob,
                 sequence: 0,
                 target: TargetSelector::Ip("203.0.113.9".into()),
                 stance: Stance::Deny,
-                reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] },
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
                 issued_at: 0,
                 expires_at: None,
                 supersedes: None,
                 signature: SignatureBytes([0; 64]),
             })
             .unwrap();
-        apply_all(&store, &runner, ProtectedDestinations::default().with_defaults(), dir.path().to_path_buf(), 1.0, false, 2000).unwrap();
+        apply_all(
+            &store,
+            &runner,
+            ProtectedDestinations::default().with_defaults(),
+            dir.path().to_path_buf(),
+            1.0,
+            false,
+            2000,
+        )
+        .unwrap();
 
-        let contributing = store.enforced_decision_contributors_for(&TargetSelector::Ip("203.0.113.9".into())).unwrap();
-        assert_eq!(contributing.len(), 2, "a NoChange apply must still refresh who currently contributes, not just skip it");
+        let contributing = store
+            .enforced_decision_contributors_for(&TargetSelector::Ip("203.0.113.9".into()))
+            .unwrap();
+        assert_eq!(
+            contributing.len(),
+            2,
+            "a NoChange apply must still refresh who currently contributes, not just skip it"
+        );
     }
 }

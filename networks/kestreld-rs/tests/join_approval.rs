@@ -12,7 +12,6 @@ use axum::Form;
 use cucumber::{given, then, when, World};
 use std::path::PathBuf;
 
-use kestreld::data::files;
 use kestreld::routes::approve_join::{self, JoinForm};
 use kestreld::state::AppState;
 
@@ -101,7 +100,10 @@ async fn submit(world: &mut JoinApprovalWorld, net: &str, action: &str, label: &
     let state = AppState::new_once(world.base_dir.clone(), world.split_routing_dir.clone()).await;
     let mut headers = HeaderMap::new();
     if !origin.is_empty() {
-        headers.insert(ORIGIN, HeaderValue::from_str(origin).expect("valid origin header"));
+        headers.insert(
+            ORIGIN,
+            HeaderValue::from_str(origin).expect("valid origin header"),
+        );
     }
     let form = JoinForm {
         net: Some(net.to_string()),
@@ -109,7 +111,11 @@ async fn submit(world: &mut JoinApprovalWorld, net: &str, action: &str, label: &
         mac: Some(world.current_mac.clone()),
         host: Some(String::new()),
         action: Some(action.to_string()),
-        label: if label.is_empty() { None } else { Some(label.to_string()) },
+        label: if label.is_empty() {
+            None
+        } else {
+            Some(label.to_string())
+        },
         redirect: None,
         dhcp_options: None,
         dhcp_vendor: None,
@@ -117,13 +123,23 @@ async fn submit(world: &mut JoinApprovalWorld, net: &str, action: &str, label: &
         identity_id: None,
         mdns_name: None,
         mdns_model: None,
+        browser_cookie: None,
+        http_headers: None,
     };
-    let result = approve_join::post(State(state), headers, Form(form)).await.0;
+    let result = approve_join::post(State(state), headers, Form(form))
+        .await
+        .0;
     world.last_ok = result.ok;
     world.last_error = result.error;
 }
 
-async fn submit_with_mdns(world: &mut JoinApprovalWorld, net: &str, label: &str, mdns_name: &str, mdns_model: &str) {
+async fn submit_with_mdns(
+    world: &mut JoinApprovalWorld,
+    net: &str,
+    label: &str,
+    mdns_name: &str,
+    mdns_model: &str,
+) {
     let state = AppState::new_once(world.base_dir.clone(), world.split_routing_dir.clone()).await;
     let form = JoinForm {
         net: Some(net.to_string()),
@@ -139,8 +155,12 @@ async fn submit_with_mdns(world: &mut JoinApprovalWorld, net: &str, label: &str,
         identity_id: None,
         mdns_name: Some(mdns_name.to_string()),
         mdns_model: Some(mdns_model.to_string()),
+        browser_cookie: None,
+        http_headers: None,
     };
-    let result = approve_join::post(State(state), HeaderMap::new(), Form(form)).await.0;
+    let result = approve_join::post(State(state), HeaderMap::new(), Form(form))
+        .await
+        .0;
     world.last_ok = result.ok;
     world.last_error = result.error;
 }
@@ -161,8 +181,12 @@ async fn submit_set_label(world: &mut JoinApprovalWorld, net: &str, new_label: &
         identity_id: None,
         mdns_name: None,
         mdns_model: None,
+        browser_cookie: None,
+        http_headers: None,
     };
-    let result = approve_join::post(State(state), HeaderMap::new(), Form(form)).await.0;
+    let result = approve_join::post(State(state), HeaderMap::new(), Form(form))
+        .await
+        .0;
     world.last_ok = result.ok;
     world.last_error = result.error;
 }
@@ -180,21 +204,31 @@ async fn network_installed(world: &mut JoinApprovalWorld, net: String) {
         other => panic!("no fixture notify.conf for network {other:?}"),
     };
     let path = world.base_dir.join(format!("{net}-notify.conf"));
-    tokio::fs::write(&path, conf).await.expect("write notify.conf");
+    tokio::fs::write(&path, conf)
+        .await
+        .expect("write notify.conf");
 }
 
 #[given(expr = "a device {string} at {string} is pending join on {string}")]
 async fn device_pending(world: &mut JoinApprovalWorld, mac: String, ip: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-join-pending"));
-    files::file_append(&path, &format!("{mac} {ip}")).await.expect("seed pending entry");
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    store
+        .join_pending_set(&net, &mac, &ip)
+        .await
+        .expect("seed pending entry");
     world.current_mac = mac;
     world.current_ip = ip;
 }
 
 #[given(expr = "{string} was already labeled {string} on {string}")]
 async fn device_prelabeled(world: &mut JoinApprovalWorld, mac: String, label: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-device-labels"));
-    files::file_upsert_by_mac(&path, &mac, &format!("{mac}\t{label}"))
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    store
+        .set_label(&net, &mac, &label)
         .await
         .expect("seed existing label");
 }
@@ -205,7 +239,12 @@ async fn approve(world: &mut JoinApprovalWorld, net: String, label: String) {
 }
 
 #[when(expr = "the device is approved on {string} with label {string} from origin {string}")]
-async fn approve_from_origin(world: &mut JoinApprovalWorld, net: String, label: String, origin: String) {
+async fn approve_from_origin(
+    world: &mut JoinApprovalWorld,
+    net: String,
+    label: String,
+    origin: String,
+) {
     submit(world, &net, "approve", &label, &origin).await;
 }
 
@@ -214,9 +253,19 @@ async fn deny(world: &mut JoinApprovalWorld, net: String) {
     submit(world, &net, "deny", "", "").await;
 }
 
-#[given(expr = "the device is approved on {string} with label {string} and mDNS name {string} model {string}")]
-#[when(expr = "the device is approved on {string} with label {string} and mDNS name {string} model {string}")]
-async fn approve_with_mdns(world: &mut JoinApprovalWorld, net: String, label: String, mdns_name: String, mdns_model: String) {
+#[given(
+    expr = "the device is approved on {string} with label {string} and mDNS name {string} model {string}"
+)]
+#[when(
+    expr = "the device is approved on {string} with label {string} and mDNS name {string} model {string}"
+)]
+async fn approve_with_mdns(
+    world: &mut JoinApprovalWorld,
+    net: String,
+    label: String,
+    mdns_name: String,
+    mdns_model: String,
+) {
     submit_with_mdns(world, &net, &label, &mdns_name, &mdns_model).await;
 }
 
@@ -237,98 +286,167 @@ async fn bulk_approve(world: &mut JoinApprovalWorld, net: String) {
         identity_id: None,
         mdns_name: None,
         mdns_model: None,
+        browser_cookie: None,
+        http_headers: None,
     };
-    let result = approve_join::post(State(state), HeaderMap::new(), Form(form)).await.0;
+    let result = approve_join::post(State(state), HeaderMap::new(), Form(form))
+        .await
+        .0;
     world.last_ok = result.ok;
     world.last_error = result.error;
 }
 
 #[then("the request succeeds")]
 async fn request_succeeds(world: &mut JoinApprovalWorld) {
-    assert!(world.last_ok, "expected success, got error: {:?}", world.last_error);
+    assert!(
+        world.last_ok,
+        "expected success, got error: {:?}",
+        world.last_error
+    );
 }
 
 #[then(expr = "the request is rejected with error {string}")]
 async fn request_rejected(world: &mut JoinApprovalWorld, expected: String) {
-    assert!(!world.last_ok, "expected the request to be rejected but it succeeded");
+    assert!(
+        !world.last_ok,
+        "expected the request to be rejected but it succeeded"
+    );
     assert_eq!(world.last_error.as_deref(), Some(expected.as_str()));
 }
 
 #[then(expr = "{string} is approved on {string}")]
 async fn mac_is_approved(world: &mut JoinApprovalWorld, mac: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-join-approved"));
-    let lines = files::read_lines(&path).await;
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let approved = store
+        .join_approved_list(&net)
+        .await
+        .expect("read join_approved");
     assert!(
-        lines.iter().any(|l| l.eq_ignore_ascii_case(&mac)),
-        "{mac} not found in {path:?}: {lines:?}"
+        approved.iter().any(|m| m.eq_ignore_ascii_case(&mac)),
+        "{mac} not found in join_approved for {net}: {approved:?}"
     );
 }
 
 #[then(expr = "{string} is denied on {string}")]
 async fn mac_is_denied(world: &mut JoinApprovalWorld, mac: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-join-denied"));
-    let lines = files::read_lines(&path).await;
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let denied = store
+        .join_denied_list(&net)
+        .await
+        .expect("read join_denied");
     assert!(
-        lines.iter().any(|l| l.eq_ignore_ascii_case(&mac)),
-        "{mac} not found in {path:?}: {lines:?}"
+        denied.iter().any(|m| m.eq_ignore_ascii_case(&mac)),
+        "{mac} not found in join_denied for {net}: {denied:?}"
     );
 }
 
 #[then(expr = "{string} is no longer pending on {string}")]
 async fn mac_not_pending(world: &mut JoinApprovalWorld, mac: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-join-pending"));
-    let pending = files::read_pending(&path).await;
-    assert!(!pending.contains_key(&mac.to_lowercase()), "{mac} is still pending in {path:?}");
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let pending = store
+        .join_pending_map(&net)
+        .await
+        .expect("read join_pending");
+    assert!(
+        !pending.contains_key(&mac.to_lowercase()),
+        "{mac} is still pending on {net}"
+    );
 }
 
 #[then(expr = "{string} is still pending on {string}")]
 async fn mac_still_pending(world: &mut JoinApprovalWorld, mac: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-join-pending"));
-    let pending = files::read_pending(&path).await;
-    assert!(pending.contains_key(&mac.to_lowercase()), "{mac} missing from {path:?}");
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let pending = store
+        .join_pending_map(&net)
+        .await
+        .expect("read join_pending");
+    assert!(
+        pending.contains_key(&mac.to_lowercase()),
+        "{mac} missing from pending on {net}"
+    );
 }
 
 #[then(expr = "{string} is labeled {string} on {string}")]
 async fn mac_labeled(world: &mut JoinApprovalWorld, mac: String, label: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-device-labels"));
-    let labels = files::read_labels(&path).await;
-    assert_eq!(labels.get(&mac.to_lowercase()).map(String::as_str), Some(label.as_str()));
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let got = store
+        .get_label(&net, &mac.to_lowercase())
+        .await
+        .expect("read label");
+    assert_eq!(got.as_deref(), Some(label.as_str()));
 }
 
-// `kestreld::cmd::append_join_history` writes the same 11-field row layout
-// as the shell tooling (`_lib.sh:_join_history_add`): ts, human-readable
-// "when", action, mac, ip4, ip6, hostname, actor, actor_ip4, actor_ip6,
-// actor_mac. `action` is column 2 and `mac` is column 3.
 #[then(expr = "a join history entry {string} exists for {string} on {string}")]
-async fn history_entry_exists(world: &mut JoinApprovalWorld, action: String, mac: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-join-history"));
-    let rows = files::read_join_history(&path).await;
+async fn history_entry_exists(
+    world: &mut JoinApprovalWorld,
+    action: String,
+    mac: String,
+    net: String,
+) {
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let rows = store
+        .recent_join_history(&net, 5000)
+        .await
+        .expect("read join_history");
     assert!(
-        rows.iter().any(|r| r.get(2).map(String::as_str) == Some(action.as_str())
-            && r.get(3).map(|m| m.eq_ignore_ascii_case(&mac)).unwrap_or(false)),
+        rows.iter()
+            .any(|r| r.action == action && r.mac.eq_ignore_ascii_case(&mac)),
         "no {action:?} history row for {mac} in {rows:?}"
     );
 }
 
 #[then(expr = "{string} has its IP tracked for device control on {string}")]
 async fn ip_tracked(world: &mut JoinApprovalWorld, mac: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-device-ips"));
-    let map = files::read_mac_ip_map(&path).await;
-    assert!(map.contains_key(&mac.to_lowercase()), "{mac} not tracked in {path:?}");
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let map = store.all_device_ips(&net).await.expect("read device_ips");
+    assert!(
+        map.contains_key(&mac.to_lowercase()),
+        "{mac} not tracked for device control on {net}"
+    );
 }
 
 #[then(expr = "{string} has no IP tracked for device control on {string}")]
 async fn ip_not_tracked(world: &mut JoinApprovalWorld, mac: String, net: String) {
-    let path = world.base_dir.join(format!("{net}-device-ips"));
-    let map = files::read_mac_ip_map(&path).await;
-    assert!(!map.contains_key(&mac.to_lowercase()), "{mac} unexpectedly tracked in {path:?}");
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let map = store.all_device_ips(&net).await.expect("read device_ips");
+    assert!(
+        !map.contains_key(&mac.to_lowercase()),
+        "{mac} unexpectedly tracked for device control on {net}"
+    );
 }
 
-#[then(expr = "the {string} fingerprint registry has an entry for {string} with mDNS name {string}")]
-async fn fingerprint_entry_has_mdns_name(world: &mut JoinApprovalWorld, net: String, label: String, mdns_name: String) {
-    let path = world.base_dir.join(format!("{net}-device-fingerprints"));
-    let records = kestreld::data::fingerprint::read_registry(&path).await;
-    let record = records.iter().find(|r| r.label == label)
+#[then(
+    expr = "the {string} fingerprint registry has an entry for {string} with mDNS name {string}"
+)]
+async fn fingerprint_entry_has_mdns_name(
+    world: &mut JoinApprovalWorld,
+    net: String,
+    label: String,
+    mdns_name: String,
+) {
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let records = kestreld::data::fingerprint::read_registry(&store, &net).await;
+    let record = records
+        .iter()
+        .find(|r| r.label == label)
         .unwrap_or_else(|| panic!("no fingerprint entry for {label:?} in {records:?}"));
     assert_eq!(record.mdns_name, mdns_name);
     assert!(record.macs.contains(&world.current_mac));
@@ -336,9 +454,14 @@ async fn fingerprint_entry_has_mdns_name(world: &mut JoinApprovalWorld, net: Str
 
 #[then(expr = "the {string} fingerprint registry has no entry for {string}")]
 async fn fingerprint_entry_absent(world: &mut JoinApprovalWorld, net: String, label: String) {
-    let path = world.base_dir.join(format!("{net}-device-fingerprints"));
-    let records = kestreld::data::fingerprint::read_registry(&path).await;
-    assert!(!records.iter().any(|r| r.label == label), "unexpected fingerprint entry for {label:?} in {records:?}");
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let records = kestreld::data::fingerprint::read_registry(&store, &net).await;
+    assert!(
+        !records.iter().any(|r| r.label == label),
+        "unexpected fingerprint entry for {label:?} in {records:?}"
+    );
 }
 
 #[tokio::main]

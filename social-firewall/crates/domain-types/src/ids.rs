@@ -50,8 +50,8 @@ impl CanonicalEncode for SignatureBytes {
 
 /// Derived from a hash of the federation's genesis (initial validator set
 /// + chain parameters) — never chosen, never registered anywhere, so two
-/// independently-run federations can never collide or impersonate each
-/// other, even by accident.
+///   independently-run federations can never collide or impersonate each
+///   other, even by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FederationId(pub Hash32);
 
@@ -94,7 +94,10 @@ mod tests {
 
     #[test]
     fn user_id_encodes_federation_then_local_id() {
-        let uid = UserId { federation: FederationId(Hash32([1u8; 32])), local_id: Hash32([2u8; 32]) };
+        let uid = UserId {
+            federation: FederationId(Hash32([1u8; 32])),
+            local_id: Hash32([2u8; 32]),
+        };
         let out = encode(&uid);
         assert_eq!(out.len(), 64);
         assert_eq!(&out[0..32], &[1u8; 32]);

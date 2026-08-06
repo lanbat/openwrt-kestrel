@@ -1,5 +1,5 @@
 use crate::envelope::Envelope;
-use crate::transport::{PeerTransport, TransportError};
+use crate::transport::{Dispatch, PeerTransport, TransportError};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 /// Peer address → that peer's inbox sender. Named rather than spelled
 /// out inline so the struct field below stays readable (and clippy's
 /// `type_complexity` stays quiet).
-type PeerInboxes = HashMap<String, Sender<(String, Envelope)>>;
+type PeerInboxes =
+    HashMap<String, Sender<(String, Envelope, Sender<Result<Option<Envelope>, String>>)>>;
+type Inbound = (String, Envelope, Sender<Result<Option<Envelope>, String>>);
 
 /// An in-memory `PeerTransport` for tests — no network, no async
 /// runtime. `pair()` wires two instances to each other so a test can
@@ -18,7 +20,7 @@ type PeerInboxes = HashMap<String, Sender<(String, Envelope)>>;
 /// routine testing).
 pub struct FakeTransport {
     my_address: String,
-    inbox: Arc<Mutex<Receiver<(String, Envelope)>>>,
+    inbox: Arc<Mutex<Receiver<Inbound>>>,
     peers: Arc<Mutex<PeerInboxes>>,
 }
 
@@ -43,12 +45,51 @@ impl FakeTransport {
 impl PeerTransport for FakeTransport {
     fn send(&self, to: &str, envelope: &Envelope) -> Result<(), TransportError> {
         let peers = self.peers.lock().unwrap();
-        let sender = peers.get(to).ok_or_else(|| TransportError::Unreachable(to.to_string()))?;
-        sender.send((self.my_address.clone(), envelope.clone())).map_err(|_| TransportError::Closed)
+        let sender = peers
+            .get(to)
+            .ok_or_else(|| TransportError::Unreachable(to.to_string()))?;
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        sender
+            .send((self.my_address.clone(), envelope.clone(), ack_tx))
+            .map_err(|_| TransportError::Closed)?;
+        match ack_rx.recv().map_err(|_| TransportError::Closed)? {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => Err(TransportError::Other(
+                "peer returned a response to a send".into(),
+            )),
+            Err(e) => Err(TransportError::ApplicationRejected(e)),
+        }
     }
 
-    fn recv(&self) -> Result<(String, Envelope), TransportError> {
-        self.inbox.lock().unwrap().recv().map_err(|_| TransportError::Closed)
+    fn request(&self, to: &str, envelope: &Envelope) -> Result<Envelope, TransportError> {
+        let peers = self.peers.lock().unwrap();
+        let sender = peers
+            .get(to)
+            .ok_or_else(|| TransportError::Unreachable(to.to_string()))?;
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        sender
+            .send((self.my_address.clone(), envelope.clone(), ack_tx))
+            .map_err(|_| TransportError::Closed)?;
+        match ack_rx.recv().map_err(|_| TransportError::Closed)? {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => Err(TransportError::Other("peer returned no response".into())),
+            Err(e) => Err(TransportError::ApplicationRejected(e)),
+        }
+    }
+
+    fn recv_and_dispatch(&self, dispatch: &Dispatch<'_>) -> Result<(), TransportError> {
+        let (from, envelope, ack) = self
+            .inbox
+            .lock()
+            .unwrap()
+            .recv()
+            .map_err(|_| TransportError::Closed)?;
+        let result = dispatch(&from, &envelope);
+        ack.send(result.clone())
+            .map_err(|_| TransportError::Closed)?;
+        result
+            .map(|_| ())
+            .map_err(TransportError::ApplicationRejected)
     }
 }
 
@@ -63,20 +104,69 @@ mod tests {
     #[test]
     fn two_fake_transports_exchange_an_envelope() {
         let (a, b) = FakeTransport::pair();
-        let envelope = Envelope { kind: StatementKind::TunnelConnectionRequest, payload: b"hello".to_vec() };
+        let envelope = Envelope {
+            kind: StatementKind::TunnelConnectionRequest,
+            payload: b"hello".to_vec(),
+        };
 
-        a.send("peer-b", &envelope).unwrap();
-
-        let (from, received) = b.recv().unwrap();
-        assert_eq!(from, "peer-a");
-        assert_eq!(received, envelope);
+        std::thread::scope(|s| {
+            s.spawn(|| a.send("peer-b", &envelope).unwrap());
+            b.recv_and_dispatch(&|from, received| {
+                assert_eq!(from, "peer-a");
+                assert_eq!(received, &envelope);
+                Ok(None)
+            })
+            .unwrap();
+        });
     }
 
     #[test]
     fn sending_to_an_unknown_peer_is_a_typed_error_not_a_panic() {
         let (a, _b) = FakeTransport::pair();
-        let envelope = Envelope { kind: StatementKind::TunnelConnectionAccept, payload: b"x".to_vec() };
+        let envelope = Envelope {
+            kind: StatementKind::TunnelConnectionAccept,
+            payload: b"x".to_vec(),
+        };
         let err = a.send("nobody", &envelope).unwrap_err();
         assert!(matches!(err, TransportError::Unreachable(_)));
+    }
+
+    #[test]
+    fn rejected_dispatch_is_reported_to_sender() {
+        let (a, b) = FakeTransport::pair();
+        let envelope = Envelope {
+            kind: StatementKind::Group,
+            payload: b"x".to_vec(),
+        };
+        std::thread::scope(|s| {
+            let send = s.spawn(|| a.send("peer-b", &envelope));
+            b.recv_and_dispatch(&|_, _| Err("bad signature".to_string()))
+                .unwrap_err();
+            assert!(
+                matches!(send.join().unwrap(), Err(TransportError::ApplicationRejected(message)) if message == "bad signature")
+            );
+        });
+    }
+
+    #[test]
+    fn request_returns_the_application_response_after_dispatch() {
+        let (a, b) = FakeTransport::pair();
+        let request = Envelope {
+            kind: StatementKind::SyncGroupRequest,
+            payload: b"request".to_vec(),
+        };
+        let response = Envelope {
+            kind: StatementKind::SyncGroupResponse,
+            payload: b"response".to_vec(),
+        };
+        std::thread::scope(|s| {
+            let request_thread = s.spawn(|| a.request("peer-b", &request));
+            b.recv_and_dispatch(&|_, received| {
+                assert_eq!(received, &request);
+                Ok(Some(response.clone()))
+            })
+            .unwrap();
+            assert_eq!(request_thread.join().unwrap().unwrap(), response);
+        });
     }
 }

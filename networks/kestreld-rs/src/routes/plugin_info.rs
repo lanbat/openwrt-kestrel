@@ -6,8 +6,8 @@
 //! itself never talks to the live `PluginManager`, which only exists
 //! inside the long-running daemon process, not this one-shot CGI request.
 
-use axum::{extract::Query, response::Html};
 use askama::Template;
+use axum::{extract::Query, response::Html};
 use serde::Deserialize;
 
 use crate::data::files;

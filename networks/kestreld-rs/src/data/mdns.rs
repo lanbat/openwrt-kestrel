@@ -195,11 +195,15 @@ fn parse_one_packet(buf: &[u8], out: &mut Records) {
 
     let mut pos = 12;
     for _ in 0..qdcount {
-        let Some((_, next)) = decode_name(buf, pos) else { return };
+        let Some((_, next)) = decode_name(buf, pos) else {
+            return;
+        };
         pos = next + 4; // QTYPE + QCLASS
     }
     for _ in 0..(ancount + nscount + arcount) {
-        let Some(next) = parse_one_record(buf, pos, out) else { return };
+        let Some(next) = parse_one_record(buf, pos, out) else {
+            return;
+        };
         pos = next;
     }
 }
@@ -262,7 +266,12 @@ fn parse_one_record(buf: &[u8], pos: usize, out: &mut Records) -> Option<usize> 
         1 => {
             // A: 4-byte IPv4 address.
             if rdlength == 4 {
-                let ip = Ipv4Addr::new(buf[rdata_start], buf[rdata_start + 1], buf[rdata_start + 2], buf[rdata_start + 3]);
+                let ip = Ipv4Addr::new(
+                    buf[rdata_start],
+                    buf[rdata_start + 1],
+                    buf[rdata_start + 2],
+                    buf[rdata_start + 3],
+                );
                 out.a.insert(name, ip);
             }
         }
@@ -279,8 +288,16 @@ fn correlate(records: &Records, target: Ipv4Addr) -> Option<MdnsInfo> {
         if *ip != target {
             return None;
         }
-        let model = records.txt.get(instance).and_then(|kv| kv.get("model")).cloned().unwrap_or_default();
-        let name = instance.strip_suffix(&format!(".{SERVICE}")).unwrap_or(instance).to_string();
+        let model = records
+            .txt
+            .get(instance)
+            .and_then(|kv| kv.get("model"))
+            .cloned()
+            .unwrap_or_default();
+        let name = instance
+            .strip_suffix(&format!(".{SERVICE}"))
+            .unwrap_or(instance)
+            .to_string();
         Some(MdnsInfo { name, model })
     })
 }
@@ -358,8 +375,8 @@ mod tests {
         // PTR record: _device-info._tcp.local -> instance
         buf.extend_from_slice(&service_name);
         buf.extend_from_slice(&12u16.to_be_bytes()); // TYPE PTR
-        buf.extend_from_slice(&1u16.to_be_bytes());  // CLASS IN
-        buf.extend_from_slice(&0u32.to_be_bytes());  // TTL
+        buf.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+        buf.extend_from_slice(&0u32.to_be_bytes()); // TTL
         buf.extend_from_slice(&(instance_name.len() as u16).to_be_bytes());
         buf.extend_from_slice(&instance_name);
 

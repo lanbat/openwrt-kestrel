@@ -1,11 +1,13 @@
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
 
-use crate::routes::{approve_access, approve_join, device, identity, network, plugin_info, qr, rotate_password};
+use crate::routes::{
+    approve_access, approve_join, device, identity, network, plugin_info, qr, rotate_password,
+};
 use crate::state::AppState;
 
 const BASE_DIR: &str = "/etc/kestrel/networks";
@@ -33,74 +35,110 @@ pub async fn run() {
         }
 
         ("/cgi-bin/device", "GET") => {
-            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let q = match parse_urlencoded(&query) {
+                Ok(q) => q,
+                Err(e) => return respond_400(&format!("Invalid query: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = device::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
         ("/cgi-bin/device", "POST") => {
-            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
-            let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
+            let q = match parse_urlencoded(&query) {
+                Ok(q) => q,
+                Err(e) => return respond_400(&format!("Invalid query: {e}")),
+            };
+            let form = match parse_urlencoded(&read_body()) {
+                Ok(f) => f,
+                Err(e) => return respond_400(&format!("Invalid form: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let json = device::post(State(state), cgi_headers(), Query(q), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/network", "GET") => {
-            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let q = match parse_urlencoded(&query) {
+                Ok(q) => q,
+                Err(e) => return respond_400(&format!("Invalid query: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = network::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
 
         ("/cgi-bin/identity", "GET") => {
-            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let q = match parse_urlencoded(&query) {
+                Ok(q) => q,
+                Err(e) => return respond_400(&format!("Invalid query: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = identity::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
 
         ("/cgi-bin/plugin_info", "GET") => {
-            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let q = match parse_urlencoded(&query) {
+                Ok(q) => q,
+                Err(e) => return respond_400(&format!("Invalid query: {e}")),
+            };
             let html = plugin_info::get(Query(q)).await;
             respond_html(html.0);
         }
 
         ("/cgi-bin/qr", "GET") => {
-            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let q = match parse_urlencoded(&query) {
+                Ok(q) => q,
+                Err(e) => return respond_400(&format!("Invalid query: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let resp = qr::get(State(state), Query(q)).await;
             respond_raw(resp);
         }
 
         ("/cgi-bin/approve-access", "GET") => {
-            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let q = match parse_urlencoded(&query) {
+                Ok(q) => q,
+                Err(e) => return respond_400(&format!("Invalid query: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let html = approve_access::get(State(state), Query(q)).await;
             respond_html(html.0);
         }
         ("/cgi-bin/approve-access", "POST") => {
-            let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
+            let form = match parse_urlencoded(&read_body()) {
+                Ok(f) => f,
+                Err(e) => return respond_400(&format!("Invalid form: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let json = approve_access::post(State(state), cgi_headers(), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/approve-join", "GET") => {
-            let q = match parse_urlencoded(&query) { Ok(q) => q, Err(e) => return respond_400(&format!("Invalid query: {e}")) };
+            let q = match parse_urlencoded(&query) {
+                Ok(q) => q,
+                Err(e) => return respond_400(&format!("Invalid query: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
-            let html = approve_join::get(State(state), Query(q)).await;
+            let html = approve_join::get(State(state), Query(q), cgi_headers()).await;
             respond_html(html.0);
         }
         ("/cgi-bin/approve-join", "POST") => {
-            let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
+            let form = match parse_urlencoded(&read_body()) {
+                Ok(f) => f,
+                Err(e) => return respond_400(&format!("Invalid form: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let json = approve_join::post(State(state), cgi_headers(), Form(form)).await;
             respond_json(&json.0);
         }
 
         ("/cgi-bin/rotate-password", "POST") => {
-            let form = match parse_urlencoded(&read_body()) { Ok(f) => f, Err(e) => return respond_400(&format!("Invalid form: {e}")) };
+            let form = match parse_urlencoded(&read_body()) {
+                Ok(f) => f,
+                Err(e) => return respond_400(&format!("Invalid form: {e}")),
+            };
             let state = AppState::new_once(base_dir, split_routing_dir).await;
             let json = rotate_password::post(State(state), Form(form)).await;
             respond_json(&json.0);
@@ -110,11 +148,15 @@ pub async fn run() {
     }
 }
 
-async fn status_html(base_dir: &PathBuf, split_routing_dir: &PathBuf) -> String {
+async fn status_html(base_dir: &Path, split_routing_dir: &Path) -> String {
     if let Some(cached) = read_cache(CACHE_STATUS) {
         return cached;
     }
-    let snap = crate::state::build_snapshot(base_dir, split_routing_dir).await;
+    let store = match crate::db::Store::open(base_dir).await {
+        Ok(s) => s,
+        Err(e) => return format!("<h1>Internal error</h1><p>{e}</p>"),
+    };
+    let snap = crate::state::build_snapshot(base_dir, split_routing_dir, &store).await;
     let html = crate::routes::status::render(&snap).await;
     write_cache(CACHE_STATUS, &html);
     html
@@ -127,7 +169,11 @@ fn read_cache(path: &str) -> Option<String> {
         .and_then(|t| t.elapsed().ok())
         .map(|d| d.as_secs())
         .unwrap_or(u64::MAX);
-    if age < CACHE_TTL { std::fs::read_to_string(path).ok() } else { None }
+    if age < CACHE_TTL {
+        std::fs::read_to_string(path).ok()
+    } else {
+        None
+    }
 }
 
 fn write_cache(path: &str, html: &str) {
@@ -164,14 +210,21 @@ fn read_body() -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-/// Build a HeaderMap from the CGI env vars the route handlers actually read
-/// (Origin/Referer for the same-LAN check, X-Forwarded-For for audit logging).
+/// Build a HeaderMap from the CGI environment, including the request signals
+/// used by the fingerprint suggestion flow.
 fn cgi_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (env_name, header_name) in [
         ("HTTP_ORIGIN", "origin"),
         ("HTTP_REFERER", "referer"),
         ("HTTP_X_FORWARDED_FOR", "x-forwarded-for"),
+        ("HTTP_COOKIE", "cookie"),
+        ("HTTP_USER_AGENT", "user-agent"),
+        ("HTTP_ACCEPT_LANGUAGE", "accept-language"),
+        ("HTTP_ACCEPT_ENCODING", "accept-encoding"),
+        ("HTTP_SEC_CH_UA", "sec-ch-ua"),
+        ("HTTP_SEC_CH_UA_MOBILE", "sec-ch-ua-mobile"),
+        ("HTTP_SEC_CH_UA_PLATFORM", "sec-ch-ua-platform"),
     ] {
         if let Ok(val) = std::env::var(env_name) {
             if let Ok(value) = HeaderValue::from_str(&val) {
@@ -183,19 +236,43 @@ fn cgi_headers() -> HeaderMap {
 }
 
 fn respond_html(body: String) {
-    print!("Status: 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{body}");
+    print!(
+        "Status: 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{}\r\n{body}",
+        identity_cookie_header()
+    );
 }
 
 fn respond_json<T: serde::Serialize>(value: &T) {
     let body = serde_json::to_string(value).unwrap_or_else(|_| "{\"ok\":false}".to_string());
-    print!("Status: 200 OK\r\nContent-Type: application/json\r\n\r\n{body}");
+    print!(
+        "Status: 200 OK\r\nContent-Type: application/json\r\n{}\r\n{body}",
+        identity_cookie_header()
+    );
+}
+
+fn identity_cookie_header() -> String {
+    let token = std::env::var("HTTP_COOKIE")
+        .ok()
+        .and_then(|v| crate::data::fingerprint_signals::parse_cookie(&v, "kestrel_identity"))
+        .or_else(crate::data::fingerprint_signals::generate_cookie_token)
+        .unwrap_or_default();
+    if token.is_empty() {
+        String::new()
+    } else {
+        format!("Set-Cookie: kestrel_identity={token}; Max-Age=31536000; Path=/; Secure; HttpOnly; SameSite=Lax\r\n")
+    }
 }
 
 /// Print a fully-formed axum response (used by /cgi-bin/qr, which sets its
 /// own status code and headers for SVG/error bodies) as raw CGI output.
 fn respond_raw(resp: axum::http::Response<String>) {
     let status = resp.status();
-    let mut head = format!("Status: {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or(""));
+    let mut head = format!(
+        "Status: {} {}\r\n",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+    );
+    head.push_str(&identity_cookie_header());
     for (name, value) in resp.headers() {
         if let Ok(v) = value.to_str() {
             head.push_str(name.as_str());
@@ -209,11 +286,17 @@ fn respond_raw(resp: axum::http::Response<String>) {
 }
 
 fn respond_400(msg: &str) {
-    print!("Status: 400 Bad Request\r\nContent-Type: text/plain\r\n\r\n{msg}");
+    print!(
+        "Status: 400 Bad Request\r\nContent-Type: text/plain\r\n{}\r\n{msg}",
+        identity_cookie_header()
+    );
 }
 
 fn respond_404() {
-    print!("Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot found");
+    print!(
+        "Status: 404 Not Found\r\nContent-Type: text/plain\r\n{}\r\nNot found",
+        identity_cookie_header()
+    );
 }
 
 #[cfg(test)]
@@ -242,5 +325,4 @@ mod tests {
         let q: DeviceQuery = parse_urlencoded("net=%zz").unwrap();
         assert_eq!(q.net.as_deref(), Some("%zz"));
     }
-
 }

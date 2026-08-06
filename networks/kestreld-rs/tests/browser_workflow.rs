@@ -62,7 +62,9 @@ struct BrowserWorld {
 
 impl std::fmt::Debug for BrowserWorld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BrowserWorld").field("base_url", &self.base_url).finish()
+        f.debug_struct("BrowserWorld")
+            .field("base_url", &self.base_url)
+            .finish()
     }
 }
 
@@ -114,13 +116,17 @@ impl BrowserWorld {
 async fn network_installed(world: &mut BrowserWorld, net: String) {
     assert_eq!(net, "guest", "this suite only ships a guest.conf fixture");
     let path = world.base_dir.join(format!("{net}-notify.conf"));
-    tokio::fs::write(&path, GUEST_CONF).await.expect("write notify.conf");
+    tokio::fs::write(&path, GUEST_CONF)
+        .await
+        .expect("write notify.conf");
 }
 
 #[given(expr = "a device {string} at {string} is pending join on {string}")]
 async fn device_pending(world: &mut BrowserWorld, mac: String, ip: String, net: String) {
     let path = world.base_dir.join(format!("{net}-join-pending"));
-    files::file_append(&path, &format!("{mac} {ip}")).await.expect("seed pending entry");
+    files::file_append(&path, &format!("{mac} {ip}"))
+        .await
+        .expect("seed pending entry");
 
     // The device table only ever renders rows that have a DHCP lease (see
     // `data::dhcp::fetch`, hardcoded to `/tmp/dhcp.leases` — there's no
@@ -128,18 +134,25 @@ async fn device_pending(world: &mut BrowserWorld, mac: String, ip: String, net: 
     // this one fixture has to go through a real, fixed, global system
     // path rather than our isolated tempdir).
     let expiry = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 86400;
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 86400;
     files::file_append(
         std::path::Path::new("/tmp/dhcp.leases"),
         &format!("{expiry} {mac} {ip} browser-test-device *"),
-    ).await.expect("seed dhcp lease");
+    )
+    .await
+    .expect("seed dhcp lease");
 
     world.current_mac = mac;
 }
 
 #[given(expr = "a VPN tier {string} is configured with fwmark {string}")]
 async fn vpn_tier_configured(world: &mut BrowserWorld, name: String, fwmark: String) {
-    tokio::fs::create_dir_all(&world.split_routing_dir).await.expect("create split-routing dir");
+    tokio::fs::create_dir_all(&world.split_routing_dir)
+        .await
+        .expect("create split-routing dir");
     let conf = format!("VPN_IFACE=mv_{name}\nROUTE_TABLE=100\nFWMARK={fwmark}\n");
     let path = world.split_routing_dir.join(format!("vpn-{name}.conf"));
     tokio::fs::write(&path, conf).await.expect("write vpn conf");
@@ -148,31 +161,48 @@ async fn vpn_tier_configured(world: &mut BrowserWorld, name: String, fwmark: Str
 #[when("I open the dashboard in a browser")]
 async fn open_dashboard(world: &mut BrowserWorld) {
     let url = format!("{}/cgi-bin/status", world.ensure_server_started().await);
-    world.client.goto(&url).await.expect("navigate to dashboard");
+    world
+        .client
+        .goto(&url)
+        .await
+        .expect("navigate to dashboard");
 }
 
 #[when(expr = "I open the device page for {string} on {string} in a browser")]
 async fn open_device_page(world: &mut BrowserWorld, mac: String, net: String) {
-    let url = format!("{}/cgi-bin/device?net={net}&mac={mac}", world.ensure_server_started().await);
-    world.client.goto(&url).await.expect("navigate to device page");
+    let url = format!(
+        "{}/cgi-bin/device?net={net}&mac={mac}",
+        world.ensure_server_started().await
+    );
+    world
+        .client
+        .goto(&url)
+        .await
+        .expect("navigate to device page");
     world.current_mac = mac;
 }
 
 #[when(expr = "I approve domain {string} routed via {string}")]
 async fn approve_domain_via_browser(world: &mut BrowserWorld, domain: String, route: String) {
-    let domain_input = world.client
-        .wait().for_element(Locator::Css("form#domain-form input[name=domain]"))
+    let domain_input = world
+        .client
+        .wait()
+        .for_element(Locator::Css("form#domain-form input[name=domain]"))
         .await
         .expect("find the domain input");
     domain_input.send_keys(&domain).await.expect("type domain");
 
-    let route_option = world.client
-        .find(Locator::XPath(&format!("//form[@id='domain-form']//select[@name='route']/option[@value='{route}']")))
+    let route_option = world
+        .client
+        .find(Locator::XPath(&format!(
+            "//form[@id='domain-form']//select[@name='route']/option[@value='{route}']"
+        )))
         .await
         .expect("find the route option");
     route_option.click().await.expect("select route option");
 
-    let allow_button = world.client
+    let allow_button = world
+        .client
         .find(Locator::Css("form#domain-form button"))
         .await
         .expect("find the Allow button");
@@ -185,13 +215,16 @@ async fn approve_domain_via_browser(world: &mut BrowserWorld, domain: String, ro
 async fn approve_via_browser(world: &mut BrowserWorld, label: String) {
     // Exactly one pending device exists on this page, so an unscoped
     // selector for the approve-form is unambiguous.
-    let label_input = world.client
-        .wait().for_element(Locator::Css("form.approve-form input[name=label]"))
+    let label_input = world
+        .client
+        .wait()
+        .for_element(Locator::Css("form.approve-form input[name=label]"))
         .await
         .expect("find the approve form's label field");
     label_input.send_keys(&label).await.expect("type label");
 
-    let approve_button = world.client
+    let approve_button = world
+        .client
         .find(Locator::Css("form.approve-form button.btn-ok"))
         .await
         .expect("find the Approve button");
@@ -215,8 +248,12 @@ async fn wait_for_badge(world: &mut BrowserWorld, want: &str, tries: u32) -> Str
     for _ in 0..tries {
         let url = format!("{}/cgi-bin/status", world.ensure_server_started().await);
         world.client.goto(&url).await.expect("reload dashboard");
-        let badge = world.client
-            .wait().for_element(Locator::Css(".badge-approved, .badge-pending, .badge-denied"))
+        let badge = world
+            .client
+            .wait()
+            .for_element(Locator::Css(
+                ".badge-approved, .badge-pending, .badge-denied",
+            ))
             .await
             .expect("find a join-state badge");
         last = badge.text().await.expect("badge text");
@@ -231,7 +268,11 @@ async fn wait_for_badge(world: &mut BrowserWorld, want: &str, tries: u32) -> Str
 #[then(expr = "the dashboard shows that device as {string}")]
 async fn shows_state(world: &mut BrowserWorld, state: String) {
     let text = wait_for_badge(world, &state, 8).await;
-    assert_eq!(text, state, "device {} is not shown as {state:?}", world.current_mac);
+    assert_eq!(
+        text, state,
+        "device {} is not shown as {state:?}",
+        world.current_mac
+    );
 }
 
 #[then(expr = "the rules table shows domain {string} routed via {string}")]
@@ -245,7 +286,10 @@ async fn rules_table_shows_route(world: &mut BrowserWorld, domain: String, route
     let mut row_text = None;
     for _ in 0..8 {
         let base_url = world.ensure_server_started().await.to_string();
-        let url = format!("{base_url}/cgi-bin/device?net=guest&mac={}", world.current_mac);
+        let url = format!(
+            "{base_url}/cgi-bin/device?net=guest&mac={}",
+            world.current_mac
+        );
         world.client.goto(&url).await.expect("reload device page");
         if let Ok(el) = world.client.find(Locator::XPath(&xpath)).await {
             row_text = Some(el.text().await.expect("row text"));
@@ -253,7 +297,8 @@ async fn rules_table_shows_route(world: &mut BrowserWorld, domain: String, route
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    let row_text = row_text.unwrap_or_else(|| panic!("no rules row for domain {domain:?} appeared after polling"));
+    let row_text = row_text
+        .unwrap_or_else(|| panic!("no rules row for domain {domain:?} appeared after polling"));
     assert!(
         row_text.contains(&route),
         "expected the rules row for {domain:?} to show route {route:?}, got: {row_text:?}"
@@ -263,7 +308,8 @@ async fn rules_table_shows_route(world: &mut BrowserWorld, domain: String, route
 #[tokio::main]
 async fn main() {
     let mut gecko = tokio::process::Command::new("geckodriver")
-        .arg("--port").arg("4444")
+        .arg("--port")
+        .arg("4444")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -272,7 +318,10 @@ async fn main() {
     // Poll until geckodriver's HTTP endpoint actually accepts connections
     // instead of guessing a fixed startup delay.
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect("127.0.0.1:4444").await.is_ok() {
+        if tokio::net::TcpStream::connect("127.0.0.1:4444")
+            .await
+            .is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

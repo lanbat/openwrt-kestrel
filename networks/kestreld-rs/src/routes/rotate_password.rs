@@ -26,52 +26,80 @@ pub async fn post(
 ) -> Json<ApiResult> {
     let net = form.net.as_deref().unwrap_or("");
     if net.is_empty() || !net.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Json(ApiResult { ok: false, error: Some("Invalid network".into()) });
+        return Json(ApiResult {
+            ok: false,
+            error: Some("Invalid network".into()),
+        });
     }
 
     let snap = state.snap().await;
     let conf = match snap.net_confs.iter().find(|c| c.iface == net) {
         Some(c) => c,
-        None => return Json(ApiResult { ok: false, error: Some("Network not found".into()) }),
+        None => {
+            return Json(ApiResult {
+                ok: false,
+                error: Some("Network not found".into()),
+            })
+        }
     };
 
     if !conf.rotate_password {
-        return Json(ApiResult { ok: false, error: Some("rotate_password not enabled".into()) });
+        return Json(ApiResult {
+            ok: false,
+            error: Some("rotate_password not enabled".into()),
+        });
     }
 
     // Verify wireless section exists
-    let uci_check = silent(Command::new("uci")
-        .args(["-q", "get", &format!("wireless.{net}")]))
-        .status().await;
+    let uci_check = silent(Command::new("uci").args(["-q", "get", &format!("wireless.{net}")]))
+        .status()
+        .await;
     if !uci_check.map(|s| s.success()).unwrap_or(false) {
-        return Json(ApiResult { ok: false, error: Some("Wireless section not found".into()) });
+        return Json(ApiResult {
+            ok: false,
+            error: Some("Wireless section not found".into()),
+        });
     }
 
     // Generate 20-char alphanumeric password from /dev/urandom
     let newpw = gen_password(20).await;
 
     // Set key in UCI
-    let _ = silent(Command::new("uci")
-        .args(["set", &format!("wireless.{net}.key={newpw}")]))
-        .status().await;
+    let _ = silent(Command::new("uci").args(["set", &format!("wireless.{net}.key={newpw}")]))
+        .status()
+        .await;
     // Also set extra interface if it exists
-    let _ = silent(Command::new("uci")
-        .args(["set", &format!("wireless.{net}_extra.key={newpw}")]))
-        .status().await;
-    let _ = silent(Command::new("uci").args(["commit", "wireless"])).status().await;
+    let _ = silent(Command::new("uci").args(["set", &format!("wireless.{net}_extra.key={newpw}")]))
+        .status()
+        .await;
+    let _ = silent(Command::new("uci").args(["commit", "wireless"]))
+        .status()
+        .await;
 
-    // Prune join files: keep only MACs that have labels
-    let base_dir = &state.base_dir;
-    let labels = crate::data::files::read_labels(&base_dir.join(format!("{net}-device-labels"))).await;
-    let approved_path = base_dir.join(format!("{net}-join-approved"));
-    let content = tokio::fs::read_to_string(&approved_path).await.unwrap_or_default();
-    let kept: String = content.lines()
-        .filter(|l| labels.contains_key(&l.trim().to_lowercase()))
-        .flat_map(|l| [l, "\n"])
-        .collect();
-    let _ = tokio::fs::write(&approved_path, kept).await;
-    let _ = tokio::fs::remove_file(base_dir.join(format!("{net}-join-pending"))).await;
-    let _ = tokio::fs::remove_file(base_dir.join(format!("{net}-join-denied"))).await;
+    // Prune join state: keep only MACs that have labels
+    let labels = state.store.all_labels(net).await.unwrap_or_default();
+    for mac in state
+        .store
+        .join_approved_list(net)
+        .await
+        .unwrap_or_default()
+    {
+        if !labels.contains_key(&mac) {
+            let _ = state.store.join_approved_remove(net, &mac).await;
+        }
+    }
+    for mac in state
+        .store
+        .join_pending_map(net)
+        .await
+        .unwrap_or_default()
+        .into_keys()
+    {
+        let _ = state.store.join_pending_remove(net, &mac).await;
+    }
+    for mac in state.store.join_denied_list(net).await.unwrap_or_default() {
+        let _ = state.store.join_denied_remove(net, &mac).await;
+    }
 
     // Patch live hostapd configs and reload via ubus, 5s from now so this
     // response reaches the client before their own WiFi session drops.
@@ -98,14 +126,19 @@ pub async fn post(
             "default",
             "key",
             &format!("New WiFi password for {}: {}", conf.iface, newpw),
-        ).await;
+        )
+        .await;
     }
 
-    Json(ApiResult { ok: true, error: None })
+    Json(ApiResult {
+        ok: true,
+        error: None,
+    })
 }
 
 async fn gen_password(len: usize) -> String {
-    let mut f = tokio::fs::File::open("/dev/urandom").await
+    let mut f = tokio::fs::File::open("/dev/urandom")
+        .await
         .expect("open /dev/urandom");
     let charset: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut buf = vec![0u8; len * 4];
@@ -131,13 +164,19 @@ pub const ROTATE_APPLY_ARG: &str = "--rotate-apply";
 /// `apply_password_change` and deletes the temp file. Fire-and-forget:
 /// this function returns as soon as the child is spawned.
 async fn spawn_delayed_apply(iface: &str, newpw: &str) -> std::io::Result<()> {
-    let pwfile = std::env::temp_dir().join(format!("kestreld-rotate-{iface}-{}.pw", std::process::id()));
+    let pwfile =
+        std::env::temp_dir().join(format!("kestreld-rotate-{iface}-{}.pw", std::process::id()));
     tokio::fs::write(&pwfile, newpw).await?;
 
     let exe = std::env::current_exe()?;
-    silent(Command::new(exe).arg(ROTATE_APPLY_ARG).arg(iface).arg(&pwfile))
-        .stdin(Stdio::null())
-        .spawn()?;
+    silent(
+        Command::new(exe)
+            .arg(ROTATE_APPLY_ARG)
+            .arg(iface)
+            .arg(&pwfile),
+    )
+    .stdin(Stdio::null())
+    .spawn()?;
     Ok(())
 }
 
@@ -160,15 +199,20 @@ async fn apply_password_change(iface: &str, newpw: &str) {
     while let Ok(Some(entry)) = dir.next_entry().await {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("hostapd-") || !name.ends_with(".conf") { continue; }
+        if !name.starts_with("hostapd-") || !name.ends_with(".conf") {
+            continue;
+        }
         let path = entry.path();
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(_) => continue,
         };
-        if !content.contains(&format!("bridge=br-{iface}")) { continue; }
+        if !content.contains(&format!("bridge=br-{iface}")) {
+            continue;
+        }
         // Patch wpa_passphrase
-        let patched: String = content.lines()
+        let patched: String = content
+            .lines()
             .map(|l| {
                 if l.starts_with("wpa_passphrase=") {
                     format!("wpa_passphrase={newpw}")
@@ -180,17 +224,25 @@ async fn apply_password_change(iface: &str, newpw: &str) {
             .collect();
         let _ = tokio::fs::write(&path, &patched).await;
         // Reload via ubus
-        let phy = path.file_stem()
+        let phy = path
+            .file_stem()
             .map(|s| s.to_string_lossy().replace("hostapd-", ""))
             .unwrap_or_default();
         if !phy.is_empty() {
             let prev = path.with_extension("prev");
             let _ = tokio::fs::write(&prev, &patched).await;
-            let _ = silent(Command::new("ubus")
-                .args(["call", "hostapd", "config_set",
-                    &format!("{{\"phy\":\"{phy}\",\"radio\":-1,\"config\":\"{}\",\"prev_config\":\"{}\"}}",
-                        path.display(), prev.display())]))
-                .status().await;
+            let _ = silent(Command::new("ubus").args([
+                "call",
+                "hostapd",
+                "config_set",
+                &format!(
+                    "{{\"phy\":\"{phy}\",\"radio\":-1,\"config\":\"{}\",\"prev_config\":\"{}\"}}",
+                    path.display(),
+                    prev.display()
+                ),
+            ]))
+            .status()
+            .await;
         }
     }
 }

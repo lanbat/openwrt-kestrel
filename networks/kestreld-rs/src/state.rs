@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::data::{banip, dhcp, dns, files, ipsec_peers, iw, logs, neigh, nft, openvpn, system, vpn, wg};
+use crate::data::{
+    banip, dhcp, dns, files, ipsec_peers, iw, logs, neigh, nft, openvpn, system, vpn, wg,
+};
+use crate::db::{DeviceRule as DbDeviceRule, JoinHistoryRow, Store};
 
 pub struct Snapshot {
     pub at: Instant,
@@ -75,17 +78,35 @@ pub struct AppState {
     pub base_dir: PathBuf,
     pub split_routing_dir: PathBuf,
     pub oui: HashMap<String, String>,
+    /// SQLite-backed replacement for `data::files`'s flat-file reads —
+    /// see `db`'s module doc. Opening this here is a hard dependency: if
+    /// `kestrel.sqlite` can't be opened (disk full, permissions), the
+    /// whole process fails fast rather than silently degrading to empty
+    /// data, the same tradeoff `main.rs` already makes for a failed TCP
+    /// bind. Note this does NOT run the flat-file migration itself —
+    /// that only ever happens via the explicit `kestreld --migrate-storage`
+    /// subcommand, invoked once by `install.sh` during upgrade (see
+    /// `migrate`'s module doc for why an in-process auto-trigger here
+    /// would be unsafe before every read call site is Store-backed).
+    pub store: Store,
 }
 
 impl AppState {
     async fn build(base_dir: PathBuf, split_routing_dir: PathBuf) -> Arc<Self> {
-        let snap = build_snapshot(&base_dir, &split_routing_dir).await;
-        let oui = files::read_oui(&base_dir.join("oui.txt")).await;
+        let store = Store::open(&base_dir).await.unwrap_or_else(|e| {
+            panic!(
+                "failed to open {}: {e}",
+                base_dir.join("kestrel.sqlite").display()
+            )
+        });
+        let snap = build_snapshot(&base_dir, &split_routing_dir, &store).await;
+        let oui = store.all_oui().await.unwrap_or_default();
         Arc::new(Self {
             snapshot: RwLock::new(Arc::new(snap)),
             base_dir,
             split_routing_dir,
             oui,
+            store,
         })
     }
 
@@ -97,7 +118,9 @@ impl AppState {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                let snap = build_snapshot(&state2.base_dir, &state2.split_routing_dir).await;
+                let snap =
+                    build_snapshot(&state2.base_dir, &state2.split_routing_dir, &state2.store)
+                        .await;
                 *state2.snapshot.write().await = Arc::new(snap);
             }
         });
@@ -116,7 +139,7 @@ impl AppState {
     }
 }
 
-pub async fn build_snapshot(base_dir: &Path, split_routing_dir: &Path) -> Snapshot {
+pub async fn build_snapshot(base_dir: &Path, split_routing_dir: &Path, store: &Store) -> Snapshot {
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -163,35 +186,32 @@ pub async fn build_snapshot(base_dir: &Path, split_routing_dir: &Path) -> Snapsh
     for conf in &net_confs {
         let iface = &conf.iface;
 
-        let label_path = base_dir.join(format!("{iface}-device-labels"));
-        labels.insert(iface.clone(), files::read_labels(&label_path).await);
+        labels.insert(
+            iface.clone(),
+            store.all_labels(iface).await.unwrap_or_default(),
+        );
 
         if conf.join_approval {
-            let app_path = base_dir.join(format!("{iface}-join-approved"));
-            let den_path = base_dir.join(format!("{iface}-join-denied"));
-            let pen_path = base_dir.join(format!("{iface}-join-pending"));
-            let hist_path = base_dir.join(format!("{iface}-join-history"));
-
-            let approved: Vec<String> = files::read_lines(&app_path)
-                .await
-                .into_iter()
-                .map(|s| s.trim().to_lowercase())
-                .collect();
-            let denied: Vec<String> = files::read_lines(&den_path)
-                .await
-                .into_iter()
-                .map(|s| s.trim().to_lowercase())
-                .collect();
-            let pending_raw = files::read_pending(&pen_path).await;
+            let approved = store.join_approved_list(iface).await.unwrap_or_default();
+            let denied = store.join_denied_list(iface).await.unwrap_or_default();
+            let pending_raw = store.join_pending_map(iface).await.unwrap_or_default();
 
             join_approved.insert(iface.clone(), approved);
             join_denied.insert(iface.clone(), denied);
             join_pending.insert(iface.clone(), pending_raw);
 
-            let mut hist = files::read_join_history(&hist_path).await;
-            hist.reverse();
-            hist.truncate(20);
-            join_history.insert(iface.clone(), hist);
+            // Already newest-first, capped at 20 by the query itself —
+            // see `Store::recent_join_history` — unlike the old flat-file
+            // read this replaces, which had to reverse+truncate a
+            // whole-file read by hand.
+            let hist = store
+                .recent_join_history(iface, 20)
+                .await
+                .unwrap_or_default();
+            join_history.insert(
+                iface.clone(),
+                hist.into_iter().map(join_history_row_to_columns).collect(),
+            );
         }
 
         // WiFi key + SSID via uci
@@ -212,25 +232,56 @@ pub async fn build_snapshot(base_dir: &Path, split_routing_dir: &Path) -> Snapsh
         net_traffic.insert(iface.clone(), (wlan, down, up));
 
         // Per-device byte counters
-        dev_bytes4.insert(iface.clone(), nft_state.device_bytes(&format!("{iface}_device_bytes")));
-        dev_bytes6.insert(iface.clone(), nft_state.device_bytes(&format!("{iface}_device_bytes6")));
+        dev_bytes4.insert(
+            iface.clone(),
+            nft_state.device_bytes(&format!("{iface}_device_bytes")),
+        );
+        dev_bytes6.insert(
+            iface.clone(),
+            nft_state.device_bytes(&format!("{iface}_device_bytes6")),
+        );
 
         // Device control state
         if conf.device_control {
-            device_ips.insert(iface.clone(),
-                files::read_mac_ip_map(&base_dir.join(format!("{iface}-device-ips"))).await);
-            device_ip6s.insert(iface.clone(),
-                files::read_mac_ip_map(&base_dir.join(format!("{iface}-device-ip6s"))).await);
-            device_limits.insert(iface.clone(),
-                files::read_device_limits(&base_dir.join(format!("{iface}-device-limits"))).await);
-            device_rules.insert(iface.clone(),
-                files::read_device_rules(&base_dir.join(format!("{iface}-device-rules"))).await);
+            device_ips.insert(
+                iface.clone(),
+                store.all_device_ips(iface).await.unwrap_or_default(),
+            );
+            device_ip6s.insert(
+                iface.clone(),
+                store.all_device_ip6s(iface).await.unwrap_or_default(),
+            );
+            device_limits.insert(
+                iface.clone(),
+                store.all_device_limits(iface).await.unwrap_or_default(),
+            );
+            let rules = store.list_device_rules(iface).await.unwrap_or_default();
+            device_rules.insert(
+                iface.clone(),
+                rules.into_iter().map(db_rule_to_files_rule).collect(),
+            );
         }
-        join_approved_ips.insert(iface.clone(),
-            files::read_mac_ip_map(&base_dir.join(format!("{iface}-join-approved-ips"))).await);
+        // Correctly space-separated (see `Store::join_approved_ips_map` /
+        // `migrate`'s module doc) — the flat-file read this replaces used
+        // `read_mac_ip_map` (tab-separated) against a space-separated
+        // file, so this map was silently always empty before the
+        // migration importer fixed the read path.
+        join_approved_ips.insert(
+            iface.clone(),
+            store.join_approved_ips_map(iface).await.unwrap_or_default(),
+        );
         if conf.join_approval {
-            allowed_macs.insert(iface.clone(),
-                files::read_allowed_macs(&base_dir.join(format!("{iface}-allowed-macs"))).await);
+            // Deliberately still a direct flat-file read, NOT `Store` —
+            // `{iface}-allowed-macs` is a hand-edited admin config file
+            // (see its own `install.sh`-seeded header comment), never
+            // written by kestreld itself, and read directly by the real
+            // enforcement path (`51-{iface}-macfilter` hotplug script).
+            // Importing it into `Store` once and reading it back from
+            // there would show stale data forever after any hand edit —
+            // this file is the same kind of "stays flat, out of scope"
+            // config as `{iface}-notify.conf`, not migrated runtime state.
+            let path = base_dir.join(format!("{iface}-allowed-macs"));
+            allowed_macs.insert(iface.clone(), files::read_allowed_macs(&path).await);
         }
     }
 
@@ -296,7 +347,18 @@ pub async fn build_snapshot(base_dir: &Path, split_routing_dir: &Path) -> Snapsh
 }
 
 async fn fetch_ipv6_prefixes(iface: &str) -> Vec<String> {
-    let out = run_cmd("ip", &["-6", "addr", "show", &format!("br-{iface}"), "scope", "global"]).await;
+    let out = run_cmd(
+        "ip",
+        &[
+            "-6",
+            "addr",
+            "show",
+            &format!("br-{iface}"),
+            "scope",
+            "global",
+        ],
+    )
+    .await;
     out.lines()
         .filter_map(|l| {
             let t = l.trim();
@@ -342,6 +404,39 @@ async fn wlan_iface_for(iface: &str) -> String {
         }
     }
     String::new()
+}
+
+fn db_rule_to_files_rule(r: DbDeviceRule) -> files::DeviceRule {
+    files::DeviceRule {
+        mac: r.mac,
+        dst: r.dst,
+        action: r.action,
+        port: r.port,
+        proto: r.proto,
+        route: r.route,
+    }
+}
+
+/// Back to the original 11-column shape (`ts, when, action, mac, ip4,
+/// ip6, hostname, actor, actor_ip4, actor_ip6, actor_mac`) that
+/// `routes::status`/`routes::device`/`routes::approve_join` already parse
+/// by fixed column index — keeps this Phase-C swap contained to
+/// `state.rs` alone, with zero call-site changes elsewhere (that's
+/// Phase D's job).
+fn join_history_row_to_columns(r: JoinHistoryRow) -> Vec<String> {
+    vec![
+        r.ts.to_string(),
+        r.when_str,
+        r.action,
+        r.mac,
+        r.ip4,
+        r.ip6,
+        r.hostname,
+        r.actor,
+        r.actor_ip4,
+        r.actor_ip6,
+        r.actor_mac,
+    ]
 }
 
 async fn run_cmd(cmd: &str, args: &[&str]) -> String {

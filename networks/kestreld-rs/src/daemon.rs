@@ -54,6 +54,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::data::{dhcp, dns_answers, files, logs};
+use crate::db::Store;
+use crate::packet_observer;
 use crate::plugins::{DeviceApprovedNotifier, Event, PluginManager, RustPlugin};
 use crate::{bandwidth_check, check_access_log, check_vpn, check_wan, observation};
 
@@ -82,22 +84,48 @@ pub async fn run(base_dir: PathBuf, split_routing_dir: PathBuf) -> i32 {
     // below. See `plugins.rs`'s module doc for why these are two
     // different mechanisms.
     let rust_plugins: Vec<Arc<dyn RustPlugin>> = vec![Arc::new(DeviceApprovedNotifier)];
-    let plugins = Arc::new(PluginManager::discover(Path::new(PLUGINS_DIR), base_dir.clone(), split_routing_dir.clone(), rust_plugins).await);
+    // Shared across every task below (and given to PluginManager for its
+    // own PluginContexts) — Store's own internal mutex already serializes
+    // access, so one connection per process (not per task) is both
+    // correct and lighter on SQLite's WAL/locking than N.
+    let store = Arc::new(Store::open(&base_dir).await.unwrap_or_else(|e| {
+        panic!(
+            "daemon: failed to open {}: {e}",
+            base_dir.join("kestrel.sqlite").display()
+        )
+    }));
+    let plugins = Arc::new(
+        PluginManager::discover(
+            Path::new(PLUGINS_DIR),
+            base_dir.clone(),
+            split_routing_dir.clone(),
+            store.clone(),
+            rust_plugins,
+        )
+        .await,
+    );
 
     let log_task = {
         let base_dir = base_dir.clone();
         let plugins = plugins.clone();
-        tokio::spawn(async move { follow_log(&base_dir, &plugins).await })
+        let store = store.clone();
+        tokio::spawn(async move { follow_log(&base_dir, &plugins, &store).await })
     };
     let wan_task = {
         let base_dir = base_dir.clone();
         let plugins = plugins.clone();
+        let store = store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(WAN_VPN_INTERVAL);
             loop {
                 interval.tick().await;
-                if let (_, Some(up)) = check_wan::run_and_report(&base_dir).await {
-                    plugins.broadcast(&Event::WanStateChanged { iface: "wan".to_string(), up }).await;
+                if let (_, Some(up)) = check_wan::run_and_report(&base_dir, &store).await {
+                    plugins
+                        .broadcast(&Event::WanStateChanged {
+                            iface: "wan".to_string(),
+                            up,
+                        })
+                        .await;
                 }
             }
         })
@@ -106,13 +134,17 @@ pub async fn run(base_dir: PathBuf, split_routing_dir: PathBuf) -> i32 {
         let base_dir = base_dir.clone();
         let split_routing_dir = split_routing_dir.clone();
         let plugins = plugins.clone();
+        let store = store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(WAN_VPN_INTERVAL);
             loop {
                 interval.tick().await;
-                let (_, changed) = check_vpn::run_and_report(&base_dir, &split_routing_dir).await;
+                let (_, changed) =
+                    check_vpn::run_and_report(&base_dir, &split_routing_dir, &store).await;
                 for (tier, up) in changed {
-                    plugins.broadcast(&Event::VpnStateChanged { tier, up }).await;
+                    plugins
+                        .broadcast(&Event::VpnStateChanged { tier, up })
+                        .await;
                 }
             }
         })
@@ -120,13 +152,16 @@ pub async fn run(base_dir: PathBuf, split_routing_dir: PathBuf) -> i32 {
     let bw_task = {
         let base_dir = base_dir.clone();
         let plugins = plugins.clone();
+        let store = store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(BANDWIDTH_INTERVAL);
             loop {
                 interval.tick().await;
-                let (_, crossed) = bandwidth_check::run_and_report(&base_dir).await;
+                let (_, crossed) = bandwidth_check::run_and_report(&base_dir, &store).await;
                 for (mac, bytes) in crossed {
-                    plugins.broadcast(&Event::BandwidthThresholdCrossed { mac, bytes }).await;
+                    plugins
+                        .broadcast(&Event::BandwidthThresholdCrossed { mac, bytes })
+                        .await;
                 }
             }
         })
@@ -135,11 +170,13 @@ pub async fn run(base_dir: PathBuf, split_routing_dir: PathBuf) -> i32 {
         let base_dir = base_dir.clone();
         let split_routing_dir = split_routing_dir.clone();
         let plugins = plugins.clone();
+        let store = store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(OBSERVE_INTERVAL);
             loop {
                 interval.tick().await;
-                observation::materialize_expired(&base_dir, &split_routing_dir, &plugins).await;
+                observation::materialize_expired(&base_dir, &split_routing_dir, &store, &plugins)
+                    .await;
             }
         })
     };
@@ -153,6 +190,11 @@ pub async fn run(base_dir: PathBuf, split_routing_dir: PathBuf) -> i32 {
             }
         })
     };
+    let packet_task = {
+        let base_dir = base_dir.clone();
+        let store = store.clone();
+        tokio::spawn(async move { packet_observer::run_if_enabled(&base_dir, store).await })
+    };
 
     // All six loop forever by construction and should never resolve;
     // whichever one does first (only possible via a panic) ends the
@@ -164,13 +206,12 @@ pub async fn run(base_dir: PathBuf, split_routing_dir: PathBuf) -> i32 {
         result = bw_task  => eprintln!("bandwidth-check task ended unexpectedly: {result:?}"),
         result = observe_task => eprintln!("observation-materialize task ended unexpectedly: {result:?}"),
         result = plugin_rescan_task => eprintln!("plugin-rescan task ended unexpectedly: {result:?}"),
+        result = packet_task => eprintln!("packet observer ended unexpectedly: {result:?}"),
     }
     1
 }
 
-async fn follow_log(base_dir: &Path, plugins: &PluginManager) {
-    let seen_path = base_dir.join("notified-attempts");
-
+async fn follow_log(base_dir: &Path, plugins: &PluginManager, store: &Store) {
     loop {
         let mut child = match Command::new("logread")
             .arg("-f")
@@ -198,21 +239,31 @@ async fn follow_log(base_dir: &Path, plugins: &PluginManager) {
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     if line.contains("EXTNET-DENY") {
-                        check_access_log::handle_deny(&line, base_dir, &seen_path).await;
+                        check_access_log::handle_deny(&line, base_dir, store).await;
                     } else if line.contains("EXTNET-2LAN") {
-                        check_access_log::handle_2lan(&line, base_dir, &seen_path).await;
+                        check_access_log::handle_2lan(&line, base_dir, store).await;
                     } else if line.contains("-NEW:") {
-                        handle_new(&line, base_dir, plugins).await;
-                    } else if let Some((id, src, domain, qtype)) = logs::parse_dns_query_line(&line) {
+                        handle_new(&line, plugins, store).await;
+                    } else if let Some((id, src, domain, qtype)) = logs::parse_dns_query_line(&line)
+                    {
                         let now = now_secs();
-                        pending_dns.retain(|_, (_, _, ts)| now.saturating_sub(*ts) < DNS_PAIR_TIMEOUT.as_secs());
-                        pending_dns.insert(id.to_string(), (src.to_string(), domain.to_string(), now));
+                        pending_dns.retain(|_, (_, _, ts)| {
+                            now.saturating_sub(*ts) < DNS_PAIR_TIMEOUT.as_secs()
+                        });
+                        pending_dns
+                            .insert(id.to_string(), (src.to_string(), domain.to_string(), now));
                         if let Some(mac) = resolve_mac(src).await {
-                            plugins.broadcast(&Event::DnsQuery { mac, domain: domain.to_string(), qtype: qtype.to_string() }).await;
+                            plugins
+                                .broadcast(&Event::DnsQuery {
+                                    mac,
+                                    domain: domain.to_string(),
+                                    qtype: qtype.to_string(),
+                                })
+                                .await;
                         }
                     } else if let Some((id, ip)) = logs::parse_dns_reply_line(&line) {
                         if let Some((src, domain, _)) = pending_dns.remove(id) {
-                            handle_dns_answer(base_dir, &src, &domain, ip, plugins).await;
+                            handle_dns_answer(base_dir, &src, &domain, ip, plugins, store).await;
                         }
                     }
                 }
@@ -237,7 +288,11 @@ fn extract_iface_new(line: &str) -> Option<&str> {
     let after_extnet = line.split("EXTNET-").nth(1)?;
     let end = after_extnet.find("-NEW:")?;
     let iface = &after_extnet[..end];
-    if iface.is_empty() { None } else { Some(iface) }
+    if iface.is_empty() {
+        None
+    } else {
+        Some(iface)
+    }
 }
 
 /// Resolves a source IP to its MAC via a fresh DHCP lease lookup — the
@@ -251,59 +306,105 @@ async fn resolve_mac(src: &str) -> Option<String> {
 /// Populates a device's pending-connections file for a newly seen
 /// blocked connection attempt, and records it in the same persistent
 /// history `check_access_log`'s DENY/2LAN handlers write to.
-async fn handle_new(line: &str, base_dir: &Path, plugins: &PluginManager) {
-    let Some(iface) = extract_iface_new(line) else { return };
-    let Some(fields) = crate::data::logs::parse_nf_fields(line) else { return };
-    let (src, dst, proto, port) = (fields.src, fields.dst, fields.proto.to_lowercase(), fields.dpt);
+async fn handle_new(line: &str, plugins: &PluginManager, store: &Store) {
+    let Some(iface) = extract_iface_new(line) else {
+        return;
+    };
+    let Some(fields) = crate::data::logs::parse_nf_fields(line) else {
+        return;
+    };
+    let (src, dst, proto, port) = (
+        fields.src,
+        fields.dst,
+        fields.proto.to_lowercase(),
+        fields.dpt,
+    );
     if src.is_empty() || dst.is_empty() || proto.is_empty() || port.is_empty() {
         return;
     }
 
     let leases = dhcp::fetch().await;
-    let Some(mac) = leases.iter().find(|l| l.ip == src).map(|l| l.mac.clone()) else { return };
-    let mac_n = mac.replace(':', "");
+    let Some(mac) = leases.iter().find(|l| l.ip == src).map(|l| l.mac.clone()) else {
+        return;
+    };
 
-    plugins.broadcast(&Event::NewConnection { mac: mac.clone(), dst: dst.to_string(), port: port.to_string(), proto: proto.clone() }).await;
+    plugins
+        .broadcast(&Event::NewConnection {
+            mac: mac.clone(),
+            dst: dst.to_string(),
+            port: port.to_string(),
+            proto: proto.clone(),
+        })
+        .await;
 
     // Skip if an explicit allow/deny rule already covers this
     // destination for this device — it's not "pending" anymore, it's
     // already decided (matches the original shell CGI's same check
     // against its rules file before appending to pending).
-    let rules_path = base_dir.join(format!("{iface}-device-rules"));
-    let rules = files::read_device_rules(&rules_path).await;
+    let rules = store.list_device_rules(iface).await.unwrap_or_default();
     if rules.iter().any(|r| r.mac == mac && r.dst == dst) {
         return;
     }
 
-    let pending_path = base_dir.join(format!("{iface}-pending-{mac_n}"));
-    let existing = files::read_pending_conns(&pending_path).await;
-    if existing.iter().any(|p| p.dst == dst && p.port == port && p.proto == proto) {
+    let existing = store
+        .list_pending_connections(iface, &mac)
+        .await
+        .unwrap_or_default();
+    if existing
+        .iter()
+        .any(|p| p.dst == dst && p.port == port && p.proto == proto)
+    {
         return;
     }
 
     let now = now_secs();
-    let _ = files::file_append(&pending_path, &format!("{dst}\t{port}\t{proto}\t{now}")).await;
+    let _ = store
+        .add_pending_connection(iface, &mac, dst, &port, &proto, now as i64)
+        .await;
 
-    check_access_log::append_history(base_dir, iface, "new", src, dst, &port, &proto).await;
+    check_access_log::append_history(store, iface, "new", src, dst, &port, &proto).await;
 }
 
 /// Persists a resolved DNS answer (`domain` -> `ip`) for the device at
 /// `src`, so a later IP-only connection to `ip` can be attributed back to
 /// `domain` — see `data::dns_answers::correlate`.
-async fn handle_dns_answer(base_dir: &Path, src: &str, domain: &str, ip: &str, plugins: &PluginManager) {
+async fn handle_dns_answer(
+    base_dir: &Path,
+    src: &str,
+    domain: &str,
+    ip: &str,
+    plugins: &PluginManager,
+    store: &Store,
+) {
     let leases = dhcp::fetch().await;
-    let Some(mac) = leases.iter().find(|l| l.ip == src).map(|l| l.mac.clone()) else { return };
-    let mac_n = mac.replace(':', "");
+    let Some(mac) = leases.iter().find(|l| l.ip == src).map(|l| l.mac.clone()) else {
+        return;
+    };
 
     let confs = files::read_all_network_confs(base_dir).await;
-    let Some(iface) = files::iface_for_ip(&confs, src) else { return };
+    let Some(iface) = files::iface_for_ip(&confs, src) else {
+        return;
+    };
 
-    let path = base_dir.join(format!("{iface}-dns-answers-{mac_n}"));
     let now = now_secs();
-    let _ = files::file_append(&path, &format!("{now}\t{domain}\t{ip}")).await;
-    let _ = dns_answers::prune_and_read(&path, now.saturating_sub(dns_answers::RETENTION_SECS)).await;
+    let _ = store
+        .add_dns_answer(&iface, &mac, now as i64, domain, ip)
+        .await;
+    let _ = store
+        .prune_dns_answers(
+            &iface,
+            &mac,
+            now.saturating_sub(dns_answers::RETENTION_SECS) as i64,
+        )
+        .await;
 
-    plugins.broadcast(&Event::DnsAnswer { mac, domain: domain.to_string(), ip: ip.to_string() }).await;
+    plugins
+        .broadcast(&Event::DnsAnswer {
+            mac,
+            domain: domain.to_string(),
+            ip: ip.to_string(),
+        })
+        .await;
 }
 
 #[cfg(test)]

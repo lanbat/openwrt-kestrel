@@ -50,18 +50,26 @@ pub fn parse_dns_queries<'a>(lines: &'a [String], src_ip: &str) -> Vec<(&'a str,
     lines
         .iter()
         .filter_map(|line| {
-            if !line.contains("query[") { return None; }
+            if !line.contains("query[") {
+                return None;
+            }
             let from_suffix = format!("from {src_ip}");
-            if !line.ends_with(&from_suffix) { return None; }
+            if !line.ends_with(&from_suffix) {
+                return None;
+            }
             // Extract query type and domain
             let qi = line.find("query[")?;
             let rest = &line[qi + 6..];
             let close = rest.find(']')?;
             let qtype = &rest[..close];
-            if qtype != "A" && qtype != "AAAA" { return None; }
+            if qtype != "A" && qtype != "AAAA" {
+                return None;
+            }
             let after = rest[close + 1..].trim();
             let domain = after.split_whitespace().next()?;
-            if domain.ends_with(".arpa") { return None; }
+            if domain.ends_with(".arpa") {
+                return None;
+            }
             Some((domain, &line[qi + 6..qi + 6 + close]))
         })
         .collect()
@@ -137,7 +145,12 @@ pub fn parse_nf_fields(line: &str) -> Option<NfFields<'_>> {
     if src.is_empty() || dst.is_empty() || proto.is_empty() {
         return None;
     }
-    Some(NfFields { src, dst, proto, dpt })
+    Some(NfFields {
+        src,
+        dst,
+        proto,
+        dpt,
+    })
 }
 
 #[cfg(test)]
@@ -199,7 +212,9 @@ mod tests {
 
     #[test]
     fn grep_returns_empty_when_no_match() {
-        let log = LogData { lines: vec!["unrelated line".to_string()] };
+        let log = LogData {
+            lines: vec!["unrelated line".to_string()],
+        };
         assert!(log.grep("EXTNET-DENY-guest:").is_empty());
     }
 
@@ -209,13 +224,19 @@ mod tests {
     fn dns_query_line_extracts_id_src_domain() {
         let line = "Mon Jan  1 12:34:56 2024 daemon.info dnsmasq[1234]: \
                      15 192.168.1.50/54321 query[A] example.com from 192.168.1.50";
-        assert_eq!(parse_dns_query_line(line), Some(("15", "192.168.1.50", "example.com", "A")));
+        assert_eq!(
+            parse_dns_query_line(line),
+            Some(("15", "192.168.1.50", "example.com", "A"))
+        );
     }
 
     #[test]
     fn dns_query_line_accepts_aaaa() {
         let line = "... dnsmasq[1]: 7 10.0.0.5/1 query[AAAA] example.com from 10.0.0.5";
-        assert_eq!(parse_dns_query_line(line), Some(("7", "10.0.0.5", "example.com", "AAAA")));
+        assert_eq!(
+            parse_dns_query_line(line),
+            Some(("7", "10.0.0.5", "example.com", "AAAA"))
+        );
     }
 
     #[test]

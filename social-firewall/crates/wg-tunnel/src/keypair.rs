@@ -16,14 +16,18 @@ pub struct WgKeypair {
 
 impl WgKeypair {
     pub fn generate() -> Self {
-        Self { secret_key: SecretKey::generate(&mut OsRng) }
+        Self {
+            secret_key: SecretKey::generate(&mut OsRng),
+        }
     }
 
     /// Reconstructs a keypair from raw seed bytes previously returned by
     /// `seed_bytes` — same at-rest-storage caveat as `crypto::Keypair`'s
     /// own `from_seed`: callers are responsible for keeping these secret.
     pub fn from_seed(seed: &[u8; 32]) -> Self {
-        Self { secret_key: SecretKey::from_bytes(*seed) }
+        Self {
+            secret_key: SecretKey::from_bytes(*seed),
+        }
     }
 
     pub fn seed_bytes(&self) -> [u8; 32] {

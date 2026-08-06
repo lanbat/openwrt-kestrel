@@ -27,7 +27,11 @@ const OPENPHISH_FEED_URL: &str = "https://openphish.com/feed.txt";
 
 async fn fetch(url: &str, timeout_secs: &str) -> Option<String> {
     let (ok, out) = cmd::run("curl", &["-sf", "--max-time", timeout_secs, url]).await;
-    if ok { Some(out) } else { None }
+    if ok {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Parses a `/etc/hosts`-style hostfile: `#`-comments and blank lines
@@ -42,7 +46,11 @@ fn parse_hostfile(body: &str) -> Vec<String> {
             let mut fields = line.split_whitespace();
             let _ip = fields.next()?;
             let domain = fields.next()?;
-            if domain.is_empty() { None } else { Some(domain.to_lowercase()) }
+            if domain.is_empty() {
+                None
+            } else {
+                Some(domain.to_lowercase())
+            }
         })
         .collect()
 }
@@ -51,11 +59,19 @@ fn parse_hostfile(body: &str) -> Vec<String> {
 /// the scheme, takes everything up to the first `/`/`?`/`#`, strips any
 /// userinfo (`user@`) and port (`:N`).
 fn extract_host(url: &str) -> Option<String> {
-    let rest = url.trim().split_once("://").map(|(_, r)| r).unwrap_or(url.trim());
+    let rest = url
+        .trim()
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(url.trim());
     let host = rest.split(['/', '?', '#']).next()?;
     let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
     let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
-    if host.is_empty() { None } else { Some(host.to_lowercase()) }
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
+    }
 }
 
 /// Runs the full update; returns the process exit code (0 at least one
@@ -64,14 +80,43 @@ fn extract_host(url: &str) -> Option<String> {
 pub async fn run(base_dir: &Path) -> i32 {
     println!("Updating domain threat-intel feeds...");
 
-    let mut entries: Vec<(String, &str)> = Vec::new();
+    let store = match crate::db::Store::open(base_dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            println!("ERROR: failed to open kestrel.sqlite: {e}");
+            return 1;
+        }
+    };
+
+    // Replaced per-feed rather than as one combined write — unlike the
+    // flat file this replaced (a single whole-file overwrite every run,
+    // which silently dropped a *failed* source's previously-fetched
+    // domains the moment any other source succeeded), each feed's rows
+    // are only touched when that specific fetch succeeds. A source that
+    // fails this round keeps whatever it fetched last time, matching
+    // this module's own "best-effort per-source" doc comment more
+    // faithfully than the old implementation actually did.
     let mut ok_count = 0;
 
     match fetch(URLHAUS_HOSTFILE_URL, "60").await {
         Some(body) => {
             println!("  urlhaus hostfile : ok");
             ok_count += 1;
-            entries.extend(parse_hostfile(&body).into_iter().map(|d| (d, "urlhaus")));
+            let mut seen = HashSet::new();
+            let domains: Vec<String> = parse_hostfile(&body)
+                .into_iter()
+                .filter(|d| seen.insert(d.clone()))
+                .collect();
+            let count = domains.len();
+            if store
+                .replace_threat_feed("urlhaus", &domains)
+                .await
+                .is_err()
+            {
+                println!("ERROR: failed to write urlhaus feed");
+            } else {
+                println!("    {count} domains");
+            }
         }
         None => println!("  urlhaus hostfile : failed"),
     }
@@ -80,7 +125,22 @@ pub async fn run(base_dir: &Path) -> i32 {
         Some(body) => {
             println!("  openphish feed   : ok");
             ok_count += 1;
-            entries.extend(body.lines().filter_map(extract_host).map(|d| (d, "openphish")));
+            let mut seen = HashSet::new();
+            let domains: Vec<String> = body
+                .lines()
+                .filter_map(extract_host)
+                .filter(|d| seen.insert(d.clone()))
+                .collect();
+            let count = domains.len();
+            if store
+                .replace_threat_feed("openphish", &domains)
+                .await
+                .is_err()
+            {
+                println!("ERROR: failed to write openphish feed");
+            } else {
+                println!("    {count} domains");
+            }
         }
         None => println!("  openphish feed   : failed"),
     }
@@ -90,17 +150,6 @@ pub async fn run(base_dir: &Path) -> i32 {
         return 1;
     }
 
-    let mut seen = HashSet::new();
-    let deduped: Vec<(String, &str)> = entries.into_iter().filter(|e| seen.insert(e.clone())).collect();
-
-    let out_path = base_dir.join("threat-domains.txt");
-    let content: String = deduped.iter().map(|(d, f)| format!("{d}\t{f}\n")).collect();
-    if tokio::fs::write(&out_path, &content).await.is_err() {
-        println!("ERROR: failed to write {}", out_path.display());
-        return 1;
-    }
-
-    println!("Done: {} entries", deduped.len());
     0
 }
 
@@ -111,7 +160,10 @@ mod tests {
     #[test]
     fn parses_hostfile_skipping_comments_and_blanks() {
         let body = "# Abuse.ch URLhaus\n#\n\n127.0.0.1 evil.example.com\n127.0.0.1 bad.example\n";
-        assert_eq!(parse_hostfile(body), vec!["evil.example.com", "bad.example"]);
+        assert_eq!(
+            parse_hostfile(body),
+            vec!["evil.example.com", "bad.example"]
+        );
     }
 
     #[test]
@@ -128,27 +180,42 @@ mod tests {
 
     #[test]
     fn extract_host_strips_scheme_and_path() {
-        assert_eq!(extract_host("https://evil.example.com/phish/login"), Some("evil.example.com".to_string()));
+        assert_eq!(
+            extract_host("https://evil.example.com/phish/login"),
+            Some("evil.example.com".to_string())
+        );
     }
 
     #[test]
     fn extract_host_strips_port_and_query() {
-        assert_eq!(extract_host("http://evil.example.com:8080/x?y=1"), Some("evil.example.com".to_string()));
+        assert_eq!(
+            extract_host("http://evil.example.com:8080/x?y=1"),
+            Some("evil.example.com".to_string())
+        );
     }
 
     #[test]
     fn extract_host_strips_userinfo() {
-        assert_eq!(extract_host("https://user:pass@evil.example.com/"), Some("evil.example.com".to_string()));
+        assert_eq!(
+            extract_host("https://user:pass@evil.example.com/"),
+            Some("evil.example.com".to_string())
+        );
     }
 
     #[test]
     fn extract_host_lowercases() {
-        assert_eq!(extract_host("https://EVIL.EXAMPLE.COM/"), Some("evil.example.com".to_string()));
+        assert_eq!(
+            extract_host("https://EVIL.EXAMPLE.COM/"),
+            Some("evil.example.com".to_string())
+        );
     }
 
     #[test]
     fn extract_host_handles_bare_host_without_scheme() {
-        assert_eq!(extract_host("evil.example.com/path"), Some("evil.example.com".to_string()));
+        assert_eq!(
+            extract_host("evil.example.com/path"),
+            Some("evil.example.com".to_string())
+        );
     }
 }
 
@@ -164,7 +231,11 @@ mod network_tests {
         let dir = tempfile::tempdir().unwrap();
         let code = run(dir.path()).await;
         assert_eq!(code, 0);
-        let contents = tokio::fs::read_to_string(dir.path().join("threat-domains.txt")).await.unwrap();
-        assert!(contents.lines().count() > 100, "expected a substantial feed, got {} lines", contents.lines().count());
+        let store = crate::db::Store::open(dir.path()).await.unwrap();
+        let count = store.count_threat_domains().await.unwrap();
+        assert!(
+            count > 100,
+            "expected a substantial feed, got {count} entries"
+        );
     }
 }

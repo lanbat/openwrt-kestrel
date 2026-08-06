@@ -60,9 +60,13 @@ fn classify(target: &TargetSelector) -> Result<Destination, CompileError> {
                 Err(CompileError::InvalidCidr(s.clone()))
             }
         }
-        TargetSelector::Domain(s) | TargetSelector::DomainSuffix(s) => Ok(Destination::Hostname(s.clone())),
+        TargetSelector::Domain(s) | TargetSelector::DomainSuffix(s) => {
+            Ok(Destination::Hostname(s.clone()))
+        }
         TargetSelector::Service(s) => Err(CompileError::UnsupportedTarget(format!("service:{s}"))),
-        TargetSelector::ProtoPort { .. } => Err(CompileError::UnsupportedTarget("proto_port".into())),
+        TargetSelector::ProtoPort { .. } => {
+            Err(CompileError::UnsupportedTarget("proto_port".into()))
+        }
     }
 }
 
@@ -93,7 +97,10 @@ impl CompiledFirewallPolicy {
     }
 }
 
-pub fn compile(entries: &[PolicyEntry], protected: &ProtectedDestinations) -> Result<CompiledFirewallPolicy, CompileError> {
+pub fn compile(
+    entries: &[PolicyEntry],
+    protected: &ProtectedDestinations,
+) -> Result<CompiledFirewallPolicy, CompileError> {
     let mut deny_v4 = Vec::new();
     let mut deny_v6 = Vec::new();
     let mut quarantine_v4 = Vec::new();
@@ -104,7 +111,10 @@ pub fn compile(entries: &[PolicyEntry], protected: &ProtectedDestinations) -> Re
 
     for entry in entries {
         let action = EnforcementAction::from(entry.decision);
-        if matches!(action, EnforcementAction::Allow | EnforcementAction::NoOpinion) {
+        if matches!(
+            action,
+            EnforcementAction::Allow | EnforcementAction::NoOpinion
+        ) {
             continue;
         }
 
@@ -165,18 +175,44 @@ pub fn compile(entries: &[PolicyEntry], protected: &ProtectedDestinations) -> Re
         }
     }
 
-    for bucket in [&mut deny_v4, &mut deny_v6, &mut quarantine_v4, &mut quarantine_v6, &mut skipped_hostnames, &mut skipped_protected] {
+    for bucket in [
+        &mut deny_v4,
+        &mut deny_v6,
+        &mut quarantine_v4,
+        &mut quarantine_v6,
+        &mut skipped_hostnames,
+        &mut skipped_protected,
+    ] {
         bucket.sort();
         bucket.dedup();
     }
 
-    let script = render_script(&deny_v4, &deny_v6, &quarantine_v4, &quarantine_v6, protected);
+    let script = render_script(
+        &deny_v4,
+        &deny_v6,
+        &quarantine_v4,
+        &quarantine_v6,
+        protected,
+    );
     let digest = blake3::hash(script.as_bytes()).to_hex().to_string();
 
-    Ok(CompiledFirewallPolicy { deny_v4, deny_v6, quarantine_v4, quarantine_v6, skipped_hostnames, skipped_protected, script, digest })
+    Ok(CompiledFirewallPolicy {
+        deny_v4,
+        deny_v6,
+        quarantine_v4,
+        quarantine_v6,
+        skipped_hostnames,
+        skipped_protected,
+        script,
+        digest,
+    })
 }
 
-fn record(seen: &mut HashMap<String, EnforcementAction>, key: String, action: EnforcementAction) -> Result<(), CompileError> {
+fn record(
+    seen: &mut HashMap<String, EnforcementAction>,
+    key: String,
+    action: EnforcementAction,
+) -> Result<(), CompileError> {
     match seen.get(&key) {
         Some(existing) if *existing != action => Err(CompileError::Conflict(key)),
         _ => {
@@ -197,34 +233,52 @@ fn set_block(name: &str, family: &str, elements: &[String]) -> String {
     }
 }
 
-fn render_script(deny_v4: &[String], deny_v6: &[String], quarantine_v4: &[String], quarantine_v6: &[String], protected: &ProtectedDestinations) -> String {
+fn render_script(
+    deny_v4: &[String],
+    deny_v6: &[String],
+    quarantine_v4: &[String],
+    quarantine_v6: &[String],
+    protected: &ProtectedDestinations,
+) -> String {
     let mut protected_accept_lines = Vec::new();
     let mut v4_addrs = protected.v4_addrs.clone();
     v4_addrs.sort();
     for a in v4_addrs {
-        protected_accept_lines.push(format!("        ip daddr {a} accept comment \"social-firewall:protected\""));
+        protected_accept_lines.push(format!(
+            "        ip daddr {a} accept comment \"social-firewall:protected\""
+        ));
     }
     let mut v4_nets = protected.v4_nets.clone();
     v4_nets.sort_by_key(|n| (n.addr(), n.prefix_len()));
     for n in v4_nets {
-        protected_accept_lines.push(format!("        ip daddr {n} accept comment \"social-firewall:protected\""));
+        protected_accept_lines.push(format!(
+            "        ip daddr {n} accept comment \"social-firewall:protected\""
+        ));
     }
     let mut v6_addrs = protected.v6_addrs.clone();
     v6_addrs.sort();
     for a in v6_addrs {
-        protected_accept_lines.push(format!("        ip6 daddr {a} accept comment \"social-firewall:protected\""));
+        protected_accept_lines.push(format!(
+            "        ip6 daddr {a} accept comment \"social-firewall:protected\""
+        ));
     }
     let mut v6_nets = protected.v6_nets.clone();
     v6_nets.sort_by_key(|n| (n.addr(), n.prefix_len()));
     for n in v6_nets {
-        protected_accept_lines.push(format!("        ip6 daddr {n} accept comment \"social-firewall:protected\""));
+        protected_accept_lines.push(format!(
+            "        ip6 daddr {n} accept comment \"social-firewall:protected\""
+        ));
     }
 
     let deny_v4_set = set_block("deny_v4", "ipv4_addr", deny_v4);
     let deny_v6_set = set_block("deny_v6", "ipv6_addr", deny_v6);
     let quarantine_v4_set = set_block("quarantine_v4", "ipv4_addr", quarantine_v4);
     let quarantine_v6_set = set_block("quarantine_v6", "ipv6_addr", quarantine_v6);
-    let protected_lines = if protected_accept_lines.is_empty() { String::new() } else { format!("{}\n", protected_accept_lines.join("\n")) };
+    let protected_lines = if protected_accept_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", protected_accept_lines.join("\n"))
+    };
 
     let mut out = String::new();
     out.push_str(&format!("add table inet {NFT_TABLE}\n"));
@@ -244,10 +298,14 @@ fn render_script(deny_v4: &[String], deny_v6: &[String], quarantine_v4: &[String
     // current elements, so removals actually take effect instead of
     // accumulating forever.
     for name in ["deny_v4", "quarantine_v4"] {
-        out.push_str(&format!("add set inet {NFT_TABLE} {name} {{ type ipv4_addr; flags interval; }}\n"));
+        out.push_str(&format!(
+            "add set inet {NFT_TABLE} {name} {{ type ipv4_addr; flags interval; }}\n"
+        ));
     }
     for name in ["deny_v6", "quarantine_v6"] {
-        out.push_str(&format!("add set inet {NFT_TABLE} {name} {{ type ipv6_addr; flags interval; }}\n"));
+        out.push_str(&format!(
+            "add set inet {NFT_TABLE} {name} {{ type ipv6_addr; flags interval; }}\n"
+        ));
     }
     for name in ["deny_v4", "deny_v6", "quarantine_v4", "quarantine_v6"] {
         out.push_str(&format!("flush set inet {NFT_TABLE} {name}\n"));
@@ -263,8 +321,12 @@ fn render_script(deny_v4: &[String], deny_v6: &[String], quarantine_v4: &[String
     out.push_str(&protected_lines);
     out.push_str("        ip daddr @deny_v4 counter drop comment \"social-firewall:deny\"\n");
     out.push_str("        ip6 daddr @deny_v6 counter drop comment \"social-firewall:deny\"\n");
-    out.push_str("        ip daddr @quarantine_v4 counter drop comment \"social-firewall:quarantine\"\n");
-    out.push_str("        ip6 daddr @quarantine_v6 counter drop comment \"social-firewall:quarantine\"\n");
+    out.push_str(
+        "        ip daddr @quarantine_v4 counter drop comment \"social-firewall:quarantine\"\n",
+    );
+    out.push_str(
+        "        ip6 daddr @quarantine_v6 counter drop comment \"social-firewall:quarantine\"\n",
+    );
     out.push_str("    }\n");
     out.push_str("}\n");
     out
@@ -291,23 +353,48 @@ mod tests {
         // clearing mechanism. `add set` (idempotent, safe whether or not
         // the set already exists) followed by an explicit `flush set` for
         // each of the four sets is what actually makes removal work.
-        let entries = vec![entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)];
+        let entries = vec![entry(
+            TargetSelector::Ip("203.0.113.9".into()),
+            Decision::Deny,
+        )];
         let compiled = compile(&entries, &no_protection()).unwrap();
         for name in ["deny_v4", "deny_v6", "quarantine_v4", "quarantine_v6"] {
-            assert!(compiled.script.contains(&format!("add set inet {NFT_TABLE} {name} ")), "missing `add set` for {name}");
-            assert!(compiled.script.contains(&format!("flush set inet {NFT_TABLE} {name}\n")), "missing `flush set` for {name}");
+            assert!(
+                compiled
+                    .script
+                    .contains(&format!("add set inet {NFT_TABLE} {name} ")),
+                "missing `add set` for {name}"
+            );
+            assert!(
+                compiled
+                    .script
+                    .contains(&format!("flush set inet {NFT_TABLE} {name}\n")),
+                "missing `flush set` for {name}"
+            );
         }
         // The `flush set` calls must precede the `table { ... }` block that
         // redeclares elements, or the ordering guarantee is meaningless.
         let flush_set_pos = compiled.script.find("flush set").unwrap();
-        let table_block_pos = compiled.script.find(&format!("table inet {NFT_TABLE} {{")).unwrap();
-        assert!(flush_set_pos < table_block_pos, "flush set must run before the table block redeclares elements");
+        let table_block_pos = compiled
+            .script
+            .find(&format!("table inet {NFT_TABLE} {{"))
+            .unwrap();
+        assert!(
+            flush_set_pos < table_block_pos,
+            "flush set must run before the table block redeclares elements"
+        );
     }
 
     #[test]
     fn compile_is_deterministic_regardless_of_input_order() {
-        let a = vec![entry(TargetSelector::Ip("1.1.1.1".into()), Decision::Deny), entry(TargetSelector::Ip("2.2.2.2".into()), Decision::Deny)];
-        let b = vec![entry(TargetSelector::Ip("2.2.2.2".into()), Decision::Deny), entry(TargetSelector::Ip("1.1.1.1".into()), Decision::Deny)];
+        let a = vec![
+            entry(TargetSelector::Ip("1.1.1.1".into()), Decision::Deny),
+            entry(TargetSelector::Ip("2.2.2.2".into()), Decision::Deny),
+        ];
+        let b = vec![
+            entry(TargetSelector::Ip("2.2.2.2".into()), Decision::Deny),
+            entry(TargetSelector::Ip("1.1.1.1".into()), Decision::Deny),
+        ];
         let compiled_a = compile(&a, &no_protection()).unwrap();
         let compiled_b = compile(&b, &no_protection()).unwrap();
         assert_eq!(compiled_a.script, compiled_b.script);
@@ -334,7 +421,10 @@ mod tests {
 
     #[test]
     fn hostname_targets_are_recorded_but_never_enforced() {
-        let entries = vec![entry(TargetSelector::Domain("ads.example".into()), Decision::Deny)];
+        let entries = vec![entry(
+            TargetSelector::Domain("ads.example".into()),
+            Decision::Deny,
+        )];
         let compiled = compile(&entries, &no_protection()).unwrap();
         assert!(compiled.deny_v4.is_empty() && compiled.deny_v6.is_empty());
         assert_eq!(compiled.skipped_hostnames, vec!["ads.example".to_string()]);
@@ -362,14 +452,23 @@ mod tests {
 
     #[test]
     fn invalid_cidr_is_rejected() {
-        let entries = vec![entry(TargetSelector::Cidr("not-a-cidr".into()), Decision::Deny)];
-        assert!(matches!(compile(&entries, &no_protection()), Err(CompileError::InvalidCidr(_))));
+        let entries = vec![entry(
+            TargetSelector::Cidr("not-a-cidr".into()),
+            Decision::Deny,
+        )];
+        assert!(matches!(
+            compile(&entries, &no_protection()),
+            Err(CompileError::InvalidCidr(_))
+        ));
     }
 
     #[test]
     fn service_and_proto_port_targets_are_rejected_as_unsupported() {
         let entries = vec![entry(TargetSelector::Service("ssh".into()), Decision::Deny)];
-        assert!(matches!(compile(&entries, &no_protection()), Err(CompileError::UnsupportedTarget(_))));
+        assert!(matches!(
+            compile(&entries, &no_protection()),
+            Err(CompileError::UnsupportedTarget(_))
+        ));
     }
 
     #[test]

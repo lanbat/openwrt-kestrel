@@ -17,10 +17,16 @@ use std::time::Duration;
 /// `nftset=/domain/family#table#set` directive shape
 /// `split-routing/install.sh`'s own `dns()` function already generates,
 /// just pointed at this crate's own table/set names instead of `fw4`'s.
-pub fn dnsmasq_conf_snippet(domains: &[String], fwmark_set_v4: &str, fwmark_set_v6: &str) -> String {
+pub fn dnsmasq_conf_snippet(
+    domains: &[String],
+    fwmark_set_v4: &str,
+    fwmark_set_v6: &str,
+) -> String {
     let mut out = String::new();
     for d in domains {
-        out.push_str(&format!("nftset=/{d}/4#inet#{NFT_TABLE}#{fwmark_set_v4},6#inet#{NFT_TABLE}#{fwmark_set_v6}\n"));
+        out.push_str(&format!(
+            "nftset=/{d}/4#inet#{NFT_TABLE}#{fwmark_set_v4},6#inet#{NFT_TABLE}#{fwmark_set_v6}\n"
+        ));
     }
     out
 }
@@ -56,7 +62,13 @@ pub fn dnsmasq_conf_snippet(domains: &[String], fwmark_set_v4: &str, fwmark_set_
 /// history), just applied here to a *chain* instead. Flushing only this
 /// peer's own chain, never a shared one, is what keeps that safe to do
 /// on every call without disturbing any other peer's already-live rules.
-pub fn compile_mark_script(peer_short_id: &str, fwmark: i64, static_addrs: &[String], max_connections: Option<u32>, max_bandwidth_kbps: Option<u64>) -> CompiledMarkScript {
+pub fn compile_mark_script(
+    peer_short_id: &str,
+    fwmark: i64,
+    static_addrs: &[String],
+    max_connections: Option<u32>,
+    max_bandwidth_kbps: Option<u64>,
+) -> CompiledMarkScript {
     let set_v4 = format!("tunnel_{peer_short_id}_v4");
     let set_v6 = format!("tunnel_{peer_short_id}_v6");
     let static_set_v4 = format!("tunnel_{peer_short_id}_static_v4");
@@ -67,27 +79,48 @@ pub fn compile_mark_script(peer_short_id: &str, fwmark: i64, static_addrs: &[Str
     script.push_str(&format!("add table inet {NFT_TABLE}\n"));
     script.push_str(&format!("add set inet {NFT_TABLE} {set_v4} {{ type ipv4_addr; flags dynamic,timeout; timeout 24h; }}\n"));
     script.push_str(&format!("add set inet {NFT_TABLE} {set_v6} {{ type ipv6_addr; flags dynamic,timeout; timeout 24h; }}\n"));
-    script.push_str(&format!("add set inet {NFT_TABLE} {static_set_v4} {{ type ipv4_addr; flags interval; }}\n"));
-    script.push_str(&format!("add set inet {NFT_TABLE} {static_set_v6} {{ type ipv6_addr; flags interval; }}\n"));
+    script.push_str(&format!(
+        "add set inet {NFT_TABLE} {static_set_v4} {{ type ipv4_addr; flags interval; }}\n"
+    ));
+    script.push_str(&format!(
+        "add set inet {NFT_TABLE} {static_set_v6} {{ type ipv6_addr; flags interval; }}\n"
+    ));
 
     // IPv6 addresses/CIDRs always contain a `:`; IPv4 never do — cheap,
     // reliable enough discriminator without a full address parser.
-    let (v6_static, v4_static): (Vec<&str>, Vec<&str>) = static_addrs.iter().map(String::as_str).partition(|a| a.contains(':'));
+    let (v6_static, v4_static): (Vec<&str>, Vec<&str>) = static_addrs
+        .iter()
+        .map(String::as_str)
+        .partition(|a| a.contains(':'));
     script.push_str(&format!("flush set inet {NFT_TABLE} {static_set_v4}\n"));
     if !v4_static.is_empty() {
-        script.push_str(&format!("add element inet {NFT_TABLE} {static_set_v4} {{ {} }}\n", v4_static.join(", ")));
+        script.push_str(&format!(
+            "add element inet {NFT_TABLE} {static_set_v4} {{ {} }}\n",
+            v4_static.join(", ")
+        ));
     }
     script.push_str(&format!("flush set inet {NFT_TABLE} {static_set_v6}\n"));
     if !v6_static.is_empty() {
-        script.push_str(&format!("add element inet {NFT_TABLE} {static_set_v6} {{ {} }}\n", v6_static.join(", ")));
+        script.push_str(&format!(
+            "add element inet {NFT_TABLE} {static_set_v6} {{ {} }}\n",
+            v6_static.join(", ")
+        ));
     }
 
     script.push_str(&format!("add chain inet {NFT_TABLE} {chain} {{ type filter hook prerouting priority mangle; policy accept; }}\n"));
     script.push_str(&format!("flush chain inet {NFT_TABLE} {chain}\n"));
-    script.push_str(&format!("add rule inet {NFT_TABLE} {chain} ip daddr @{set_v4} meta mark set {fwmark}\n"));
-    script.push_str(&format!("add rule inet {NFT_TABLE} {chain} ip6 daddr @{set_v6} meta mark set {fwmark}\n"));
-    script.push_str(&format!("add rule inet {NFT_TABLE} {chain} ip daddr @{static_set_v4} meta mark set {fwmark}\n"));
-    script.push_str(&format!("add rule inet {NFT_TABLE} {chain} ip6 daddr @{static_set_v6} meta mark set {fwmark}\n"));
+    script.push_str(&format!(
+        "add rule inet {NFT_TABLE} {chain} ip daddr @{set_v4} meta mark set {fwmark}\n"
+    ));
+    script.push_str(&format!(
+        "add rule inet {NFT_TABLE} {chain} ip6 daddr @{set_v6} meta mark set {fwmark}\n"
+    ));
+    script.push_str(&format!(
+        "add rule inet {NFT_TABLE} {chain} ip daddr @{static_set_v4} meta mark set {fwmark}\n"
+    ));
+    script.push_str(&format!(
+        "add rule inet {NFT_TABLE} {chain} ip6 daddr @{static_set_v6} meta mark set {fwmark}\n"
+    ));
 
     // Gates on the fwmark just set above, not on the destination sets
     // directly — one rule each regardless of how many sets/domains feed
@@ -97,7 +130,9 @@ pub fn compile_mark_script(peer_short_id: &str, fwmark: i64, static_addrs: &[Str
     // own traffic — the provider has no local enforcement point for
     // someone else's outbound rate/connection count.
     if let Some(max_conn) = max_connections {
-        script.push_str(&format!("add rule inet {NFT_TABLE} {chain} meta mark {fwmark} ct count over {max_conn} drop\n"));
+        script.push_str(&format!(
+            "add rule inet {NFT_TABLE} {chain} meta mark {fwmark} ct count over {max_conn} drop\n"
+        ));
     }
     if let Some(max_kbps) = max_bandwidth_kbps {
         // nft's `limit rate` speaks bytes/second, not bits — this
@@ -109,7 +144,13 @@ pub fn compile_mark_script(peer_short_id: &str, fwmark: i64, static_addrs: &[Str
         script.push_str(&format!("add rule inet {NFT_TABLE} {chain} meta mark {fwmark} limit rate over {bytes_per_second} bytes/second drop\n"));
     }
 
-    CompiledMarkScript { script, set_v4, set_v6, static_set_v4, static_set_v6 }
+    CompiledMarkScript {
+        script,
+        set_v4,
+        set_v6,
+        static_set_v4,
+        static_set_v6,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,24 +178,73 @@ pub struct CompiledMarkScript {
 /// correctly and then silently fall through to the normal default
 /// route, since nothing told the kernel's IPv6 routing tables to send
 /// that mark to this tunnel.
-pub fn apply_policy_route(runner: &dyn CommandRunner, fwmark: i64, route_table: i64, interface_name: &str, timeout: Duration) -> Result<(), String> {
+pub fn apply_policy_route(
+    runner: &dyn CommandRunner,
+    fwmark: i64,
+    route_table: i64,
+    interface_name: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     let fwmark_str = format!("{fwmark:#x}");
     let table_str = route_table.to_string();
 
     for family in ["-4", "-6"] {
         loop {
-            let out = runner.run("ip", &[family, "rule", "del", "fwmark", &fwmark_str, "lookup", &table_str], timeout);
+            let out = runner.run(
+                "ip",
+                &[
+                    family,
+                    "rule",
+                    "del",
+                    "fwmark",
+                    &fwmark_str,
+                    "lookup",
+                    &table_str,
+                ],
+                timeout,
+            );
             if !out.success {
                 break;
             }
         }
-        let add_rule = runner.run("ip", &[family, "rule", "add", "fwmark", &fwmark_str, "lookup", &table_str], timeout);
+        let add_rule = runner.run(
+            "ip",
+            &[
+                family,
+                "rule",
+                "add",
+                "fwmark",
+                &fwmark_str,
+                "lookup",
+                &table_str,
+            ],
+            timeout,
+        );
         if !add_rule.success {
-            return Err(format!("failed to add ip {family} rule: {}", add_rule.stderr));
+            return Err(format!(
+                "failed to add ip {family} rule: {}",
+                add_rule.stderr
+            ));
         }
-        let add_route = runner.run("ip", &[family, "route", "replace", "default", "dev", interface_name, "table", &table_str], timeout);
+        let add_route = runner.run(
+            "ip",
+            &[
+                family,
+                "route",
+                "replace",
+                "default",
+                "dev",
+                interface_name,
+                "table",
+                &table_str,
+            ],
+            timeout,
+        );
         if !add_route.success {
-            return Err(format!("failed to add ip {family} route: {}", add_route.stderr));
+            return Err(format!(
+                "failed to add ip {family} route: {}",
+                add_route.stderr
+            ));
         }
     }
     Ok(())
@@ -167,14 +257,22 @@ mod tests {
 
     #[test]
     fn dnsmasq_snippet_targets_this_crates_own_table_not_fw4() {
-        let snippet = dnsmasq_conf_snippet(&["example.com".to_string()], "tunnel_ab12_v4", "tunnel_ab12_v6");
+        let snippet = dnsmasq_conf_snippet(
+            &["example.com".to_string()],
+            "tunnel_ab12_v4",
+            "tunnel_ab12_v6",
+        );
         assert!(snippet.contains(&format!("#inet#{NFT_TABLE}#tunnel_ab12_v4")));
         assert!(!snippet.contains("#fw4#"));
     }
 
     #[test]
     fn dnsmasq_snippet_has_one_line_per_domain() {
-        let snippet = dnsmasq_conf_snippet(&["a.example".to_string(), "b.example".to_string()], "v4set", "v6set");
+        let snippet = dnsmasq_conf_snippet(
+            &["a.example".to_string(), "b.example".to_string()],
+            "v4set",
+            "v6set",
+        );
         assert_eq!(snippet.lines().count(), 2);
     }
 
@@ -189,7 +287,10 @@ mod tests {
     #[test]
     fn compile_mark_script_uses_add_not_create_for_idempotency() {
         let compiled = compile_mark_script("ab12", 0x1000, &[], None, None);
-        assert!(!compiled.script.contains("create "), "must use idempotent `add`, not strict `create`, so a second apply doesn't error");
+        assert!(
+            !compiled.script.contains("create "),
+            "must use idempotent `add`, not strict `create`, so a second apply doesn't error"
+        );
     }
 
     #[test]
@@ -206,7 +307,10 @@ mod tests {
         // never-flushed chain would accumulate a duplicate pair of mark
         // rules on every reconcile pass. Every call must flush first.
         let compiled = compile_mark_script("ab12", 0x1000, &[], None, None);
-        assert!(compiled.script.contains("flush chain inet"), "must flush this peer's own chain before re-adding its rules");
+        assert!(
+            compiled.script.contains("flush chain inet"),
+            "must flush this peer's own chain before re-adding its rules"
+        );
     }
 
     #[test]
@@ -215,18 +319,35 @@ mod tests {
         let b = compile_mark_script("cd34", 0x2000, &[], None, None);
         assert!(a.script.contains("mark_chain_ab12"));
         assert!(b.script.contains("mark_chain_cd34"));
-        assert!(!a.script.contains("mark_chain_cd34"), "one peer's script must never reference another peer's chain");
+        assert!(
+            !a.script.contains("mark_chain_cd34"),
+            "one peer's script must never reference another peer's chain"
+        );
     }
 
     #[test]
     fn compile_mark_script_populates_the_static_set_from_ipv4_and_ipv6_addresses() {
-        let compiled = compile_mark_script("ab12", 0x1000, &["10.0.0.0/8".to_string(), "203.0.113.5".to_string(), "2001:db8::/32".to_string()], None, None);
+        let compiled = compile_mark_script(
+            "ab12",
+            0x1000,
+            &[
+                "10.0.0.0/8".to_string(),
+                "203.0.113.5".to_string(),
+                "2001:db8::/32".to_string(),
+            ],
+            None,
+            None,
+        );
         assert!(compiled.script.contains("10.0.0.0/8"));
         assert!(compiled.script.contains("203.0.113.5"));
         assert!(compiled.script.contains("2001:db8::/32"));
         // The IPv6 address must land in the v6 static set's `add
         // element`, not get miscategorized into the v4 one.
-        let static_v6_line = compiled.script.lines().find(|l| l.contains(&compiled.static_set_v6) && l.starts_with("add element")).unwrap();
+        let static_v6_line = compiled
+            .script
+            .lines()
+            .find(|l| l.contains(&compiled.static_set_v6) && l.starts_with("add element"))
+            .unwrap();
         assert!(static_v6_line.contains("2001:db8::/32"));
     }
 
@@ -237,8 +358,14 @@ mod tests {
         // the flush must run unconditionally, whether or not there's
         // anything to add afterward.
         let compiled = compile_mark_script("ab12", 0x1000, &[], None, None);
-        assert!(compiled.script.contains(&format!("flush set inet {NFT_TABLE} {}", compiled.static_set_v4)));
-        assert!(compiled.script.contains(&format!("flush set inet {NFT_TABLE} {}", compiled.static_set_v6)));
+        assert!(compiled.script.contains(&format!(
+            "flush set inet {NFT_TABLE} {}",
+            compiled.static_set_v4
+        )));
+        assert!(compiled.script.contains(&format!(
+            "flush set inet {NFT_TABLE} {}",
+            compiled.static_set_v6
+        )));
     }
 
     #[test]
@@ -251,21 +378,35 @@ mod tests {
     #[test]
     fn compile_mark_script_emits_a_connection_cap_gated_on_this_peers_own_fwmark() {
         let compiled = compile_mark_script("ab12", 0x1000, &[], Some(50), None);
-        assert!(compiled.script.contains("meta mark 4096 ct count over 50 drop"), "script was:\n{}", compiled.script);
+        assert!(
+            compiled
+                .script
+                .contains("meta mark 4096 ct count over 50 drop"),
+            "script was:\n{}",
+            compiled.script
+        );
     }
 
     #[test]
     fn compile_mark_script_converts_kbit_per_second_to_bytes_per_second_for_nft() {
         // 8000 kbit/s = 1_000_000 bytes/second.
         let compiled = compile_mark_script("ab12", 0x1000, &[], None, Some(8000));
-        assert!(compiled.script.contains("meta mark 4096 limit rate over 1000000 bytes/second drop"), "script was:\n{}", compiled.script);
+        assert!(
+            compiled
+                .script
+                .contains("meta mark 4096 limit rate over 1000000 bytes/second drop"),
+            "script was:\n{}",
+            compiled.script
+        );
     }
 
     #[test]
     fn compile_mark_script_can_apply_both_limits_at_once() {
         let compiled = compile_mark_script("ab12", 0x1000, &[], Some(50), Some(8000));
         assert!(compiled.script.contains("ct count over 50 drop"));
-        assert!(compiled.script.contains("limit rate over 1000000 bytes/second drop"));
+        assert!(compiled
+            .script
+            .contains("limit rate over 1000000 bytes/second drop"));
     }
 
     /// Queues a one-shot failure for the *first* `ip <family> rule del`
@@ -276,8 +417,18 @@ mod tests {
     /// succeeds. Needed by every test below that doesn't itself fail
     /// fast on an earlier call.
     fn fail_both_families_first_del(runner: &FakeCommandRunner) {
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"del".to_string())
+        });
     }
 
     #[test]
@@ -287,8 +438,12 @@ mod tests {
         apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).unwrap();
 
         let calls = runner.calls();
-        assert!(calls.iter().any(|(p, a)| p == "ip" && a.contains(&"rule".to_string()) && a.contains(&"add".to_string())));
-        assert!(calls.iter().any(|(p, a)| p == "ip" && a.contains(&"route".to_string()) && a.contains(&"replace".to_string())));
+        assert!(calls.iter().any(|(p, a)| p == "ip"
+            && a.contains(&"rule".to_string())
+            && a.contains(&"add".to_string())));
+        assert!(calls.iter().any(|(p, a)| p == "ip"
+            && a.contains(&"route".to_string())
+            && a.contains(&"replace".to_string())));
     }
 
     /// Every social-firewall tunnel is dual-stack — a mark-only-one-family
@@ -303,7 +458,14 @@ mod tests {
         apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).unwrap();
 
         let calls = runner.calls();
-        let has = |family: &str, verb: &str, action: &str| calls.iter().any(|(p, a)| p == "ip" && a.contains(&family.to_string()) && a.contains(&verb.to_string()) && a.contains(&action.to_string()));
+        let has = |family: &str, verb: &str, action: &str| {
+            calls.iter().any(|(p, a)| {
+                p == "ip"
+                    && a.contains(&family.to_string())
+                    && a.contains(&verb.to_string())
+                    && a.contains(&action.to_string())
+            })
+        };
         assert!(has("-4", "rule", "add"), "missing IPv4 rule add");
         assert!(has("-6", "rule", "add"), "missing IPv6 rule add");
         assert!(has("-4", "route", "replace"), "missing IPv4 route replace");
@@ -313,21 +475,42 @@ mod tests {
     #[test]
     fn apply_policy_route_fails_when_ip_rule_add_fails() {
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"rule".to_string()) && a.contains(&"del".to_string()));
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"rule".to_string()) && a.contains(&"add".to_string()));
-        assert!(apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).is_err());
+        runner.fail_next_matching(|p, a| {
+            p == "ip" && a.contains(&"rule".to_string()) && a.contains(&"del".to_string())
+        });
+        runner.fail_next_matching(|p, a| {
+            p == "ip" && a.contains(&"rule".to_string()) && a.contains(&"add".to_string())
+        });
+        assert!(
+            apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).is_err()
+        );
     }
 
     #[test]
     fn apply_policy_route_fails_when_ipv6_leg_fails_even_if_ipv4_succeeded() {
         let runner = FakeCommandRunner::new_all_success();
         fail_both_families_first_del(&runner);
-        runner.fail_next_matching(|p, a| p == "ip" && a.contains(&"-6".to_string()) && a.contains(&"rule".to_string()) && a.contains(&"add".to_string()));
-        let err = apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1)).unwrap_err();
-        assert!(err.contains("-6"), "error should identify which family failed, got: {err}");
+        runner.fail_next_matching(|p, a| {
+            p == "ip"
+                && a.contains(&"-6".to_string())
+                && a.contains(&"rule".to_string())
+                && a.contains(&"add".to_string())
+        });
+        let err = apply_policy_route(&runner, 0x1000, 200, "sf_tun0", Duration::from_secs(1))
+            .unwrap_err();
+        assert!(
+            err.contains("-6"),
+            "error should identify which family failed, got: {err}"
+        );
 
         // The IPv4 leg must have completed fully before IPv6 failed.
         let calls = runner.calls();
-        assert!(calls.iter().any(|(p, a)| p == "ip" && a.contains(&"-4".to_string()) && a.contains(&"route".to_string()) && a.contains(&"replace".to_string())), "IPv4 leg should have completed before the IPv6 failure was hit");
+        assert!(
+            calls.iter().any(|(p, a)| p == "ip"
+                && a.contains(&"-4".to_string())
+                && a.contains(&"route".to_string())
+                && a.contains(&"replace".to_string())),
+            "IPv4 leg should have completed before the IPv6 failure was hit"
+        );
     }
 }

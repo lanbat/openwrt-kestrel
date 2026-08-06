@@ -26,9 +26,9 @@
 
 use domain_types::{
     Contribution, Decision, DecisionTier, EffectivePolicyDecision, Explanation,
-    FederationStatement, FederationTrustRule, GroupId, GroupTrustRule, IgnoredInput,
-    IgnoredReason, LocalOverride, LocalTrustRule, PolicyOpinion, Reason, ReasonCode,
-    SharedRuleEntry, Stance, StatementAuthor, TargetSelector, Timestamp, UserId,
+    FederationStatement, FederationTrustRule, GroupId, GroupTrustRule, IgnoredInput, IgnoredReason,
+    LocalOverride, LocalTrustRule, PolicyOpinion, Reason, ReasonCode, SharedRuleEntry, Stance,
+    StatementAuthor, TargetSelector, Timestamp, UserId,
 };
 
 pub struct PolicyInputs<'a> {
@@ -198,15 +198,27 @@ fn evaluate_trust_weighted(inputs: &PolicyInputs) -> EffectivePolicyDecision {
         // list's entries are already filtered out before they ever reach
         // this crate (see `StateStore::list_entries_for`'s own doc).
         let Some(rule) = rule else {
-            ignored.push(IgnoredInput { source: StatementAuthor::User(*author), stance: entry.stance, why: IgnoredReason::NoTrustWeight });
+            ignored.push(IgnoredInput {
+                source: StatementAuthor::User(*author),
+                stance: entry.stance,
+                why: IgnoredReason::NoTrustWeight,
+            });
             continue;
         };
         if rule.excluded || rule.is_expired(inputs.now) {
-            ignored.push(IgnoredInput { source: StatementAuthor::User(*author), stance: entry.stance, why: IgnoredReason::Excluded });
+            ignored.push(IgnoredInput {
+                source: StatementAuthor::User(*author),
+                stance: entry.stance,
+                why: IgnoredReason::Excluded,
+            });
             continue;
         }
         if rule.advisory_only {
-            ignored.push(IgnoredInput { source: StatementAuthor::User(*author), stance: entry.stance, why: IgnoredReason::AdvisoryOnly });
+            ignored.push(IgnoredInput {
+                source: StatementAuthor::User(*author),
+                stance: entry.stance,
+                why: IgnoredReason::AdvisoryOnly,
+            });
             continue;
         }
         // The one dimension standalone opinions never have: if this
@@ -216,7 +228,11 @@ fn evaluate_trust_weighted(inputs: &PolicyInputs) -> EffectivePolicyDecision {
         // means every subscribed list from this person counts, unchanged.
         if let Some(filter) = &rule.category_filter {
             if !categories.iter().any(|c| c == filter) {
-                ignored.push(IgnoredInput { source: StatementAuthor::User(*author), stance: entry.stance, why: IgnoredReason::CategoryFiltered });
+                ignored.push(IgnoredInput {
+                    source: StatementAuthor::User(*author),
+                    stance: entry.stance,
+                    why: IgnoredReason::CategoryFiltered,
+                });
                 continue;
             }
         }
@@ -231,7 +247,12 @@ fn evaluate_trust_weighted(inputs: &PolicyInputs) -> EffectivePolicyDecision {
             Stance::Deny => deny_weight_total += weight,
             Stance::Ask => {}
         }
-        contributing.push(Contribution { source: StatementAuthor::User(*author), stance: entry.stance, weight, reason: entry.reason.clone() });
+        contributing.push(Contribution {
+            source: StatementAuthor::User(*author),
+            stance: entry.stance,
+            weight,
+            reason: entry.reason.clone(),
+        });
     }
 
     // Groups are pre-filtered by the caller (`excluded`/expiry already
@@ -253,7 +274,13 @@ fn evaluate_trust_weighted(inputs: &PolicyInputs) -> EffectivePolicyDecision {
             source: StatementAuthor::Group(*group_id),
             stance: *stance,
             weight,
-            reason: Reason { code: ReasonCode::Other, note: Some(format!("{allow_votes} allow vote(s), {deny_votes} deny vote(s)")), evidence: vec![] },
+            reason: Reason {
+                code: ReasonCode::Other,
+                note: Some(format!(
+                    "{allow_votes} allow vote(s), {deny_votes} deny vote(s)"
+                )),
+                evidence: vec![],
+            },
         });
     }
 
@@ -337,16 +364,25 @@ fn evaluate_trust_weighted(inputs: &PolicyInputs) -> EffectivePolicyDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain_types::{FederationId, Hash32, OverrideKind, Reason, ReasonCode, SignatureBytes, UserId};
+    use domain_types::{
+        FederationId, Hash32, OverrideKind, Reason, ReasonCode, SignatureBytes, UserId,
+    };
 
     fn fed(n: u8) -> FederationId {
         FederationId(Hash32([n; 32]))
     }
     fn user(fed_n: u8, local_n: u8) -> UserId {
-        UserId { federation: fed(fed_n), local_id: Hash32([local_n; 32]) }
+        UserId {
+            federation: fed(fed_n),
+            local_id: Hash32([local_n; 32]),
+        }
     }
     fn reason(code: ReasonCode) -> Reason {
-        Reason { code, note: None, evidence: vec![] }
+        Reason {
+            code,
+            note: None,
+            evidence: vec![],
+        }
     }
     fn opinion(author: UserId, seq: u64, target: &TargetSelector, stance: Stance) -> PolicyOpinion {
         PolicyOpinion {
@@ -386,8 +422,14 @@ mod tests {
         let alice = user(1, 1);
         let dave = user(1, 2);
         let opinions = vec![
-            (opinion(alice, 1, &target(), Stance::Deny), Some(trust(alice, 0.6, 1.0))),
-            (opinion(dave, 1, &target(), Stance::Allow), Some(trust(dave, 0.4, 0.4))),
+            (
+                opinion(alice, 1, &target(), Stance::Deny),
+                Some(trust(alice, 0.6, 1.0)),
+            ),
+            (
+                opinion(dave, 1, &target(), Stance::Allow),
+                Some(trust(dave, 0.4, 0.4)),
+            ),
         ];
         let inputs = PolicyInputs {
             target: target(),
@@ -410,8 +452,14 @@ mod tests {
         let alice = user(1, 1);
         let dave = user(1, 2);
         let opinions = vec![
-            (opinion(alice, 1, &target(), Stance::Deny), Some(trust(alice, 0.6, 0.6))),
-            (opinion(dave, 1, &target(), Stance::Allow), Some(trust(dave, 0.4, 0.4))),
+            (
+                opinion(alice, 1, &target(), Stance::Deny),
+                Some(trust(alice, 0.6, 0.6)),
+            ),
+            (
+                opinion(dave, 1, &target(), Stance::Allow),
+                Some(trust(dave, 0.4, 0.4)),
+            ),
         ];
         let inputs = PolicyInputs {
             target: target(),
@@ -425,7 +473,11 @@ mod tests {
             now: 1000,
         };
         let result = evaluate(&inputs);
-        assert_eq!(result.decision, Decision::Ask, "neither side crossed threshold — must not silently pick the larger one");
+        assert_eq!(
+            result.decision,
+            Decision::Ask,
+            "neither side crossed threshold — must not silently pick the larger one"
+        );
     }
 
     #[test]
@@ -450,8 +502,14 @@ mod tests {
         let alice = user(1, 1);
         let dave = user(1, 2);
         let opinions = vec![
-            (opinion(alice, 1, &target(), Stance::Deny), Some(trust(alice, 1.0, 1.0))),
-            (opinion(dave, 1, &target(), Stance::Allow), Some(trust(dave, 1.0, 1.0))),
+            (
+                opinion(alice, 1, &target(), Stance::Deny),
+                Some(trust(alice, 1.0, 1.0)),
+            ),
+            (
+                opinion(dave, 1, &target(), Stance::Allow),
+                Some(trust(dave, 1.0, 1.0)),
+            ),
         ];
         let inputs = PolicyInputs {
             target: target(),
@@ -473,7 +531,10 @@ mod tests {
     #[test]
     fn owner_local_override_beats_unanimous_followed_deny() {
         let alice = user(1, 1);
-        let opinions = vec![(opinion(alice, 1, &target(), Stance::Deny), Some(trust(alice, 1.0, 5.0)))];
+        let opinions = vec![(
+            opinion(alice, 1, &target(), Stance::Deny),
+            Some(trust(alice, 1.0, 5.0)),
+        )];
         let overrides = vec![LocalOverride {
             target: target(),
             stance: Stance::Allow,
@@ -501,7 +562,10 @@ mod tests {
     #[test]
     fn expired_override_does_not_apply_falls_through_to_next_tier() {
         let alice = user(1, 1);
-        let opinions = vec![(opinion(alice, 1, &target(), Stance::Deny), Some(trust(alice, 0.0, 5.0)))];
+        let opinions = vec![(
+            opinion(alice, 1, &target(), Stance::Deny),
+            Some(trust(alice, 0.0, 5.0)),
+        )];
         let overrides = vec![LocalOverride {
             target: target(),
             stance: Stance::Allow,
@@ -558,7 +622,10 @@ mod tests {
     #[test]
     fn owner_opinion_beats_trust_weighted_aggregation() {
         let alice = user(1, 1);
-        let followed = vec![(opinion(alice, 1, &target(), Stance::Deny), Some(trust(alice, 0.0, 5.0)))];
+        let followed = vec![(
+            opinion(alice, 1, &target(), Stance::Deny),
+            Some(trust(alice, 0.0, 5.0)),
+        )];
         let own = vec![opinion(user(1, 9), 1, &target(), Stance::Allow)];
         let inputs = PolicyInputs {
             target: target(),
@@ -639,7 +706,10 @@ mod tests {
             now: 1000,
         };
         let result = evaluate(&inputs);
-        assert_eq!(result.explanation.ignored[0].why, IgnoredReason::NoTrustWeight);
+        assert_eq!(
+            result.explanation.ignored[0].why,
+            IgnoredReason::NoTrustWeight
+        );
     }
 
     // ── Replaying the same inputs must produce the exact same result ────────
@@ -647,7 +717,10 @@ mod tests {
     #[test]
     fn evaluation_is_deterministic_given_identical_inputs() {
         let alice = user(1, 1);
-        let opinions = vec![(opinion(alice, 1, &target(), Stance::Deny), Some(trust(alice, 0.6, 0.6)))];
+        let opinions = vec![(
+            opinion(alice, 1, &target(), Stance::Deny),
+            Some(trust(alice, 0.6, 0.6)),
+        )];
         let inputs = PolicyInputs {
             target: target(),
             local_overrides: &[],
@@ -667,13 +740,22 @@ mod tests {
     // ── Shared rule list entries ─────────────────────────────────────────
 
     fn list_entry(stance: Stance) -> SharedRuleEntry {
-        SharedRuleEntry { target: target(), stance, reason: reason(ReasonCode::Tracker) }
+        SharedRuleEntry {
+            target: target(),
+            stance,
+            reason: reason(ReasonCode::Tracker),
+        }
     }
 
     #[test]
     fn a_list_entry_from_a_followed_author_contributes_like_an_opinion_would() {
         let alice = user(1, 1);
-        let entries = vec![(list_entry(Stance::Deny), alice, vec!["privacy".to_string()], Some(trust(alice, 0.5, 1.0)))];
+        let entries = vec![(
+            list_entry(Stance::Deny),
+            alice,
+            vec!["privacy".to_string()],
+            Some(trust(alice, 0.5, 1.0)),
+        )];
         let inputs = PolicyInputs {
             target: target(),
             local_overrides: &[],
@@ -699,7 +781,12 @@ mod tests {
         let alice = user(1, 1);
         let mut rule = trust(alice, 1.0, 1.0);
         rule.category_filter = None;
-        let entries = vec![(list_entry(Stance::Deny), alice, vec!["unrelated-category".to_string()], Some(rule))];
+        let entries = vec![(
+            list_entry(Stance::Deny),
+            alice,
+            vec!["unrelated-category".to_string()],
+            Some(rule),
+        )];
         let inputs = PolicyInputs {
             target: target(),
             local_overrides: &[],
@@ -712,7 +799,11 @@ mod tests {
             now: 1000,
         };
         let result = evaluate(&inputs);
-        assert_eq!(result.decision, Decision::Deny, "no category_filter set means every list from this person counts");
+        assert_eq!(
+            result.decision,
+            Decision::Deny,
+            "no category_filter set means every list from this person counts"
+        );
     }
 
     #[test]
@@ -720,7 +811,12 @@ mod tests {
         let alice = user(1, 1);
         let mut rule = trust(alice, 1.0, 1.0);
         rule.category_filter = Some("security".to_string());
-        let entries = vec![(list_entry(Stance::Deny), alice, vec!["privacy".to_string(), "ads".to_string()], Some(rule))];
+        let entries = vec![(
+            list_entry(Stance::Deny),
+            alice,
+            vec!["privacy".to_string(), "ads".to_string()],
+            Some(rule),
+        )];
         let inputs = PolicyInputs {
             target: target(),
             local_overrides: &[],
@@ -733,8 +829,15 @@ mod tests {
             now: 1000,
         };
         let result = evaluate(&inputs);
-        assert_eq!(result.decision, Decision::NoDecision, "the list's categories don't include the filter, so it must not count");
-        assert_eq!(result.explanation.ignored[0].why, IgnoredReason::CategoryFiltered);
+        assert_eq!(
+            result.decision,
+            Decision::NoDecision,
+            "the list's categories don't include the filter, so it must not count"
+        );
+        assert_eq!(
+            result.explanation.ignored[0].why,
+            IgnoredReason::CategoryFiltered
+        );
     }
 
     #[test]
@@ -742,7 +845,12 @@ mod tests {
         let alice = user(1, 1);
         let mut rule = trust(alice, 1.0, 1.0);
         rule.category_filter = Some("privacy".to_string());
-        let entries = vec![(list_entry(Stance::Deny), alice, vec!["privacy".to_string(), "ads".to_string()], Some(rule))];
+        let entries = vec![(
+            list_entry(Stance::Deny),
+            alice,
+            vec!["privacy".to_string(), "ads".to_string()],
+            Some(rule),
+        )];
         let inputs = PolicyInputs {
             target: target(),
             local_overrides: &[],
@@ -755,7 +863,11 @@ mod tests {
             now: 1000,
         };
         let result = evaluate(&inputs);
-        assert_eq!(result.decision, Decision::Deny, "the list's categories do include the filter, so it must count");
+        assert_eq!(
+            result.decision,
+            Decision::Deny,
+            "the list's categories do include the filter, so it must count"
+        );
     }
 
     #[test]
@@ -779,7 +891,11 @@ mod tests {
             now: 1000,
         };
         let result = evaluate(&inputs);
-        assert_eq!(result.decision, Decision::Deny, "a category_filter must never gate a standalone opinion");
+        assert_eq!(
+            result.decision,
+            Decision::Deny,
+            "a category_filter must never gate a standalone opinion"
+        );
     }
 
     #[test]
@@ -787,7 +903,12 @@ mod tests {
         let alice = user(1, 1);
         let mut rule = trust(alice, 1.0, 1.0);
         rule.excluded = true;
-        let entries = vec![(list_entry(Stance::Deny), alice, vec!["privacy".to_string()], Some(rule))];
+        let entries = vec![(
+            list_entry(Stance::Deny),
+            alice,
+            vec!["privacy".to_string()],
+            Some(rule),
+        )];
         let inputs = PolicyInputs {
             target: target(),
             local_overrides: &[],
@@ -809,7 +930,14 @@ mod tests {
     #[test]
     fn a_trusted_groups_aggregate_stance_contributes_like_a_federation_statement_would() {
         let group_id = domain_types::GroupId(domain_types::Hash32([7; 32]));
-        let rule = domain_types::GroupTrustRule { group_id, allow_weight: 1.0, deny_weight: 1.0, excluded: false, expires_at: None, created_at: 0 };
+        let rule = domain_types::GroupTrustRule {
+            group_id,
+            allow_weight: 1.0,
+            deny_weight: 1.0,
+            excluded: false,
+            expires_at: None,
+            created_at: 0,
+        };
         let contributions = vec![(group_id, Stance::Deny, 3usize, 1usize, rule)];
         let inputs = PolicyInputs {
             target: target(),
@@ -826,7 +954,10 @@ mod tests {
         assert_eq!(result.decision, Decision::Deny);
         assert_eq!(result.explanation.tier, DecisionTier::TrustWeighted);
         assert_eq!(result.explanation.contributing.len(), 1);
-        assert_eq!(result.explanation.contributing[0].source, StatementAuthor::Group(group_id));
+        assert_eq!(
+            result.explanation.contributing[0].source,
+            StatementAuthor::Group(group_id)
+        );
     }
 
     #[test]
@@ -834,7 +965,14 @@ mod tests {
         let alice = user(1, 1);
         let opinions = vec![opinion(alice, 0, &target(), Stance::Allow)];
         let group_id = domain_types::GroupId(domain_types::Hash32([7; 32]));
-        let rule = domain_types::GroupTrustRule { group_id, allow_weight: 1.0, deny_weight: 1.0, excluded: false, expires_at: None, created_at: 0 };
+        let rule = domain_types::GroupTrustRule {
+            group_id,
+            allow_weight: 1.0,
+            deny_weight: 1.0,
+            excluded: false,
+            expires_at: None,
+            created_at: 0,
+        };
         let contributions = vec![(group_id, Stance::Deny, 3usize, 0usize, rule)];
         let inputs = PolicyInputs {
             target: target(),
@@ -848,7 +986,11 @@ mod tests {
             now: 1000,
         };
         let result = evaluate(&inputs);
-        assert_eq!(result.decision, Decision::Allow, "the owner's own opinion beats even a unanimous group vote");
+        assert_eq!(
+            result.decision,
+            Decision::Allow,
+            "the owner's own opinion beats even a unanimous group vote"
+        );
         assert_eq!(result.explanation.tier, DecisionTier::OwnOpinion);
     }
 }

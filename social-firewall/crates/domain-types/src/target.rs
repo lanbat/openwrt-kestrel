@@ -14,7 +14,11 @@ pub enum TargetSelector {
     Service(String),
     /// A target further scoped to a specific protocol/port — orthogonal to
     /// which of the above it wraps, e.g. "example.com on tcp/443 only".
-    ProtoPort { inner: Box<TargetSelector>, proto: String, port: u32 },
+    ProtoPort {
+        inner: Box<TargetSelector>,
+        proto: String,
+        port: u32,
+    },
 }
 
 impl TargetSelector {
@@ -73,7 +77,10 @@ mod tests {
     fn domain_and_domain_suffix_encode_differently() {
         let a = encode(&TargetSelector::Domain("example.com".into()));
         let b = encode(&TargetSelector::DomainSuffix("example.com".into()));
-        assert_ne!(a, b, "different variants with the same string must not collide");
+        assert_ne!(
+            a, b,
+            "different variants with the same string must not collide"
+        );
     }
 
     #[test]

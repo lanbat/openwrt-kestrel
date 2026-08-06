@@ -1,10 +1,13 @@
-use axum::{extract::{Query, State}, response::Html};
+use askama::Template;
+use axum::{
+    extract::{Query, State},
+    response::Html,
+};
 use serde::Deserialize;
 use std::sync::Arc;
-use askama::Template;
 
-use crate::state::{AppState, Snapshot};
 use crate::routes::status::NetworkTmpl;
+use crate::state::{AppState, Snapshot};
 
 #[derive(Template)]
 #[template(path = "network.html")]
@@ -21,11 +24,23 @@ pub struct NetworkQuery {
 
 pub async fn render(snap: &Snapshot, iface: &str) -> Option<String> {
     let conf = snap.net_confs.iter().find(|c| c.iface == iface)?;
-    let show_ip6_col = snap.ipv6_prefixes.get(iface).map(|v| !v.is_empty()).unwrap_or(false);
+    let show_ip6_col = snap
+        .ipv6_prefixes
+        .get(iface)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
     let show_join_col = conf.join_approval;
-    let net = crate::routes::status::build_one_network(snap, conf, show_ip6_col, show_join_col).await;
-    let tmpl = NetworkPageTmpl { net, show_ip6_col, show_join_col };
-    Some(tmpl.render().unwrap_or_else(|e| format!("Template error: {e}")))
+    let net =
+        crate::routes::status::build_one_network(snap, conf, show_ip6_col, show_join_col).await;
+    let tmpl = NetworkPageTmpl {
+        net,
+        show_ip6_col,
+        show_join_col,
+    };
+    Some(
+        tmpl.render()
+            .unwrap_or_else(|e| format!("Template error: {e}")),
+    )
 }
 
 pub async fn get(

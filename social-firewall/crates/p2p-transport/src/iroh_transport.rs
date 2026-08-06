@@ -1,5 +1,5 @@
 use crate::envelope::Envelope;
-use crate::transport::{PeerTransport, TransportError};
+use crate::transport::{Dispatch, PeerTransport, TransportError};
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 use std::sync::mpsc::{Receiver, Sender};
@@ -31,7 +31,9 @@ const MAX_CONCURRENT_ACCEPTS: usize = 16;
 /// The ack byte string written back to a sender once its envelope has
 /// been received and decoded. See `write_ack`'s doc comment for what
 /// this does and does not promise.
-const ACK_BYTES: &[u8] = b"ok";
+const ACK_ACCEPTED: &[u8] = b"accepted";
+const RESPONSE_PREFIX_BYTES: usize = 4;
+type Inbound = (String, Envelope, Sender<Result<Option<Envelope>, String>>);
 
 pub struct IrohTransport {
     runtime: tokio::runtime::Runtime,
@@ -44,18 +46,29 @@ pub struct IrohTransport {
     // disconnect, so `recv()` below could never return `Closed` even
     // after the accept loop had ended — leaving `sf listen` blocked
     // forever in a process that had silently stopped listening.
-    inbox_rx: Mutex<Receiver<(String, Envelope)>>,
+    inbox_rx: Mutex<Receiver<Inbound>>,
 }
 
 impl IrohTransport {
     pub fn new(secret_key_bytes: [u8; 32], alpn: &'static [u8]) -> Result<Self, TransportError> {
-        let runtime = tokio::runtime::Runtime::new().map_err(|e| TransportError::Other(e.to_string()))?;
+        let runtime =
+            tokio::runtime::Runtime::new().map_err(|e| TransportError::Other(e.to_string()))?;
         let secret_key = SecretKey::from_bytes(&secret_key_bytes);
         let endpoint = runtime
-            .block_on(Endpoint::builder(presets::N0).secret_key(secret_key).alpns(vec![alpn.to_vec()]).bind())
+            .block_on(
+                Endpoint::builder(presets::N0)
+                    .secret_key(secret_key)
+                    .alpns(vec![alpn.to_vec()])
+                    .bind(),
+            )
             .map_err(|e| TransportError::Other(e.to_string()))?;
         let (inbox_tx, inbox_rx) = std::sync::mpsc::channel();
-        let transport = IrohTransport { runtime, endpoint, alpn, inbox_rx: Mutex::new(inbox_rx) };
+        let transport = IrohTransport {
+            runtime,
+            endpoint,
+            alpn,
+            inbox_rx: Mutex::new(inbox_rx),
+        };
         transport.spawn_accept_loop(inbox_tx);
         Ok(transport)
     }
@@ -76,7 +89,7 @@ impl IrohTransport {
     /// Every failure path logs to stderr. An operator running
     /// `sf listen` has no other signal that inbound traffic is being
     /// rejected, so silent `return`s are not acceptable here.
-    fn spawn_accept_loop(&self, inbox_tx: Sender<(String, Envelope)>) {
+    fn spawn_accept_loop(&self, inbox_tx: Sender<Inbound>) {
         let endpoint = self.endpoint.clone();
         let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_ACCEPTS));
         self.runtime.spawn(async move {
@@ -153,11 +166,24 @@ impl IrohTransport {
                             return;
                         }
                     };
-                    if tx.send((remote.clone(), envelope)).is_err() {
+                    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+                    if tx.send((remote.clone(), envelope, ack_tx)).is_err() {
                         eprintln!("listen: discarding an envelope from {remote} — nothing is receiving from this transport any more");
                         return;
                     }
-                    write_ack(&mut send, &remote).await;
+                    match tokio::task::spawn_blocking(move || ack_rx.recv()).await {
+                        Ok(Ok(Ok(response))) => {
+                            let mut ack = ACK_ACCEPTED.to_vec();
+                            if let Some(response) = response {
+                                let encoded = response.encode();
+                                ack.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+                                ack.extend_from_slice(&encoded);
+                            }
+                            write_ack(&mut send, &ack, &remote).await
+                        }
+                        Ok(Ok(Err(reason))) => write_ack(&mut send, format!("rejected:{reason}").as_bytes(), &remote).await,
+                        _ => write_ack(&mut send, b"rejected:dispatch unavailable", &remote).await,
+                    }
                 });
             }
         });
@@ -191,8 +217,8 @@ impl IrohTransport {
 /// peer's transport received and decoded this", never "the peer acted on
 /// it". A statement can still be rejected downstream with the sender
 /// none the wiser.
-async fn write_ack(send: &mut iroh::endpoint::SendStream, remote: &str) {
-    if let Err(e) = send.write_all(ACK_BYTES).await {
+async fn write_ack(send: &mut iroh::endpoint::SendStream, bytes: &[u8], remote: &str) {
+    if let Err(e) = send.write_all(bytes).await {
         eprintln!("listen: received an envelope from {remote} but failed to acknowledge it: {e}");
         return;
     }
@@ -209,7 +235,40 @@ impl PeerTransport for IrohTransport {
     /// `cli::tunnel::try_deliver` does) are relying on exactly that
     /// weaker guarantee.
     fn send(&self, to: &str, envelope: &Envelope) -> Result<(), TransportError> {
-        let node_id: PublicKey = to.parse().map_err(|_| TransportError::Unreachable(to.to_string()))?;
+        self.send_inner(to, envelope, false).map(|_| ())
+    }
+
+    fn request(&self, to: &str, envelope: &Envelope) -> Result<Envelope, TransportError> {
+        self.send_inner(to, envelope, true)?
+            .ok_or_else(|| TransportError::Other("peer returned no response".into()))
+    }
+
+    fn recv_and_dispatch(&self, dispatch: &Dispatch<'_>) -> Result<(), TransportError> {
+        let (from, envelope, ack) = self
+            .inbox_rx
+            .lock()
+            .unwrap()
+            .recv()
+            .map_err(|_| TransportError::Closed)?;
+        let result = dispatch(&from, &envelope);
+        ack.send(result.clone())
+            .map_err(|_| TransportError::Closed)?;
+        result
+            .map(|_| ())
+            .map_err(TransportError::ApplicationRejected)
+    }
+}
+
+impl IrohTransport {
+    fn send_inner(
+        &self,
+        to: &str,
+        envelope: &Envelope,
+        expect_response: bool,
+    ) -> Result<Option<Envelope>, TransportError> {
+        let node_id: PublicKey = to
+            .parse()
+            .map_err(|_| TransportError::Unreachable(to.to_string()))?;
         let addr = EndpointAddr::new(node_id);
         let bytes = envelope.encode();
         // `self.alpn` (stored at construction, Step 1's struct field) is
@@ -231,20 +290,33 @@ impl PeerTransport for IrohTransport {
             // `cli::tunnel::try_deliver` report `Delivered`, which makes
             // its call sites skip writing the fallback `--out` file: the
             // statement would vanish with no artifact anywhere.
-            recv.read_to_end(1024)
+            let ack = recv
+                .read_to_end(MAX_ENVELOPE_BYTES + ACK_ACCEPTED.len() + RESPONSE_PREFIX_BYTES)
                 .await
                 .map_err(|e| TransportError::Other(format!("peer never acknowledged the envelope (it was not received or not decodable): {e}")))?;
-            Ok(())
+            if ack == ACK_ACCEPTED {
+                if expect_response {
+                    Err(TransportError::Other("peer returned no response".to_string()))
+                } else {
+                    Ok(None)
+                }
+            } else if ack.starts_with(ACK_ACCEPTED) && expect_response {
+                let length_start = ACK_ACCEPTED.len();
+                let length_end = length_start + RESPONSE_PREFIX_BYTES;
+                if ack.len() < length_end {
+                    return Err(TransportError::Other("peer returned a truncated response".into()));
+                }
+                let length = u32::from_be_bytes(ack[length_start..length_end].try_into().unwrap()) as usize;
+                if length > MAX_ENVELOPE_BYTES || ack.len() != length_end + length {
+                    return Err(TransportError::Other("peer returned an invalid response frame".into()));
+                }
+                Ok(Some(Envelope::decode(&ack[length_end..]).map_err(|e| TransportError::Other(e.to_string()))?))
+            } else if let Some(reason) = ack.strip_prefix(b"rejected:") {
+                Err(TransportError::ApplicationRejected(String::from_utf8_lossy(reason).into_owned()))
+            } else {
+                Err(TransportError::Other("peer returned an invalid acknowledgment".to_string()))
+            }
         })
-    }
-
-    /// Returns `TransportError::Closed` once the accept loop has ended
-    /// and every in-flight connection task has finished, since those
-    /// tasks hold the only `Sender`s for this channel (see
-    /// `spawn_accept_loop`). This is what lets `cli::tunnel::listen`
-    /// notice that it has stopped listening instead of blocking forever.
-    fn recv(&self) -> Result<(String, Envelope), TransportError> {
-        self.inbox_rx.lock().unwrap().recv().map_err(|_| TransportError::Closed)
     }
 }
 
@@ -279,12 +351,19 @@ mod tests {
         let client = IrohTransport::new([9u8; 32], ALPN).unwrap();
         let server_id = server.node_id();
 
-        let envelope = Envelope { kind: StatementKind::TunnelConnectionRequest, payload: b"hello".to_vec() };
+        let envelope = Envelope {
+            kind: StatementKind::TunnelConnectionRequest,
+            payload: b"hello".to_vec(),
+        };
         client.send(&server_id, &envelope).unwrap();
 
-        let (from, received) = server.recv().unwrap();
-        assert_eq!(from, client.node_id());
-        assert_eq!(received, envelope);
+        server
+            .recv_and_dispatch(&|from, received| {
+                assert_eq!(from, client.node_id());
+                assert_eq!(received, &envelope);
+                Ok(None)
+            })
+            .unwrap();
     }
 
     /// Pins the fix for "`recv()` can never observe the transport
@@ -301,7 +380,10 @@ mod tests {
     fn recv_reports_closed_once_the_accept_loop_has_ended() {
         let transport = IrohTransport::new([11u8; 32], ALPN).unwrap();
         transport.runtime.block_on(transport.endpoint.close());
-        assert!(matches!(transport.recv(), Err(TransportError::Closed)));
+        assert!(matches!(
+            transport.recv_and_dispatch(&|_, _| Ok(None)),
+            Err(TransportError::Closed)
+        ));
     }
 
     /// The accept loop's per-connection tasks each hold a `Sender`
@@ -329,9 +411,15 @@ mod tests {
 
         // Would have returned `Disconnected` already if the child's
         // clone were not keeping the channel open.
-        assert!(matches!(rx.recv_timeout(Duration::from_millis(250)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(250)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
 
         drop(release_tx);
-        assert!(matches!(rx.recv(), Err(std::sync::mpsc::RecvError)), "with every sender dropped, the channel must disconnect");
+        assert!(
+            matches!(rx.recv(), Err(std::sync::mpsc::RecvError)),
+            "with every sender dropped, the channel must disconnect"
+        );
     }
 }

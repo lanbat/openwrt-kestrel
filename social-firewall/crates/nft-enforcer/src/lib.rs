@@ -135,7 +135,9 @@ impl ProtectedDestinations {
         } else if let Ok(v6n) = s.parse::<Ipv6Net>() {
             self.v6_nets.push(v6n);
         } else {
-            return Err(format!("`{s}` is not a valid IPv4/IPv6 address or CIDR range"));
+            return Err(format!(
+                "`{s}` is not a valid IPv4/IPv6 address or CIDR range"
+            ));
         }
         Ok(())
     }
@@ -144,13 +146,21 @@ impl ProtectedDestinations {
         self.v4_addrs.contains(&addr) || self.v4_nets.iter().any(|n| n.contains(&addr))
     }
     pub fn protects_v4_net(&self, net: Ipv4Net) -> bool {
-        self.v4_addrs.iter().any(|a| net.contains(a)) || self.v4_nets.iter().any(|n| n.contains(&net) || net.contains(n))
+        self.v4_addrs.iter().any(|a| net.contains(a))
+            || self
+                .v4_nets
+                .iter()
+                .any(|n| n.contains(&net) || net.contains(n))
     }
     pub fn protects_v6(&self, addr: Ipv6Addr) -> bool {
         self.v6_addrs.contains(&addr) || self.v6_nets.iter().any(|n| n.contains(&addr))
     }
     pub fn protects_v6_net(&self, net: Ipv6Net) -> bool {
-        self.v6_addrs.iter().any(|a| net.contains(a)) || self.v6_nets.iter().any(|n| n.contains(&net) || net.contains(n))
+        self.v6_addrs.iter().any(|a| net.contains(a))
+            || self
+                .v6_nets
+                .iter()
+                .any(|n| n.contains(&net) || net.contains(n))
     }
 }
 
@@ -167,14 +177,24 @@ pub struct FirewallSnapshot {
 pub enum ApplyResult {
     /// The compiled policy's digest matched what's already applied — no
     /// nft command was run at all.
-    NoChange { digest: String },
-    Applied { digest: String, revision: i64 },
+    NoChange {
+        digest: String,
+    },
+    Applied {
+        digest: String,
+        revision: i64,
+    },
     /// Rejected before touching live state (`nft --check` failed, or the
     /// policy failed to compile) — nothing to roll back.
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
     /// Something failed after we started changing live state; `rollback`
     /// records whether the rollback itself succeeded.
-    Failed { reason: String, rollback: RollbackResult },
+    Failed {
+        reason: String,
+        rollback: RollbackResult,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,8 +248,17 @@ pub struct NftablesController<'a> {
 }
 
 impl<'a> NftablesController<'a> {
-    pub fn new(runner: &'a dyn CommandRunner, store: &'a StateStore, config: NftablesControllerConfig) -> Self {
-        Self { runner, store, config, health_checks: vec![Box::new(RulesetHealthCheck)] }
+    pub fn new(
+        runner: &'a dyn CommandRunner,
+        store: &'a StateStore,
+        config: NftablesControllerConfig,
+    ) -> Self {
+        Self {
+            runner,
+            store,
+            config,
+            health_checks: vec![Box::new(RulesetHealthCheck)],
+        }
     }
 
     /// Overrides the default health-check set — mainly for tests that
@@ -241,7 +270,10 @@ impl<'a> NftablesController<'a> {
     }
 
     /// Pure — compiles decisions into an nft representation, no I/O.
-    pub fn plan(&self, entries: &[PolicyEntry]) -> Result<CompiledFirewallPolicy, EnforcementError> {
+    pub fn plan(
+        &self,
+        entries: &[PolicyEntry],
+    ) -> Result<CompiledFirewallPolicy, EnforcementError> {
         Ok(compile(entries, &self.config.protected)?)
     }
 
@@ -249,23 +281,40 @@ impl<'a> NftablesController<'a> {
     pub fn dry_run(&self, entries: &[PolicyEntry]) -> Result<DryRunReport, EnforcementError> {
         let compiled = self.plan(entries)?;
         let previous = self.store.get_applied_ruleset()?;
-        let would_apply = previous.as_ref().map(|p| p.digest != compiled.digest).unwrap_or(true);
-        Ok(DryRunReport { compiled, would_apply, previous_digest: previous.map(|p| p.digest) })
+        let would_apply = previous
+            .as_ref()
+            .map(|p| p.digest != compiled.digest)
+            .unwrap_or(true);
+        Ok(DryRunReport {
+            compiled,
+            would_apply,
+            previous_digest: previous.map(|p| p.digest),
+        })
     }
 
     /// The full ten-step apply flow described in the module doc.
     /// Idempotent: reapplying an already-active policy makes no changes
     /// and runs no `nft` commands at all.
-    pub fn apply(&self, entries: &[PolicyEntry], revision: i64) -> Result<ApplyResult, EnforcementError> {
+    pub fn apply(
+        &self,
+        entries: &[PolicyEntry],
+        revision: i64,
+    ) -> Result<ApplyResult, EnforcementError> {
         let previous = self.store.get_applied_ruleset()?;
         let compiled = match self.plan(entries) {
             Ok(c) => c,
-            Err(e) => return Ok(ApplyResult::Rejected { reason: e.to_string() }),
+            Err(e) => {
+                return Ok(ApplyResult::Rejected {
+                    reason: e.to_string(),
+                })
+            }
         };
 
         if let Some(prev) = &previous {
             if prev.digest == compiled.digest {
-                return Ok(ApplyResult::NoChange { digest: compiled.digest });
+                return Ok(ApplyResult::NoChange {
+                    digest: compiled.digest,
+                });
             }
         }
 
@@ -273,27 +322,48 @@ impl<'a> NftablesController<'a> {
         std::fs::write(&script_path, &compiled.script)?;
         let script_path_str = script_path.to_string_lossy().into_owned();
 
-        let check = self.runner.run("nft", &["--check", "-f", &script_path_str], self.config.command_timeout);
+        let check = self.runner.run(
+            "nft",
+            &["--check", "-f", &script_path_str],
+            self.config.command_timeout,
+        );
         if !check.success {
             self.log(revision, &compiled, "rejected_check_failed")?;
-            return Ok(ApplyResult::Rejected { reason: check.stderr });
+            return Ok(ApplyResult::Rejected {
+                reason: check.stderr,
+            });
         }
 
         let snapshot = self.snapshot_live();
 
-        let apply_out = self.runner.run("nft", &["-f", &script_path_str], self.config.command_timeout);
+        let apply_out = self.runner.run(
+            "nft",
+            &["-f", &script_path_str],
+            self.config.command_timeout,
+        );
         if !apply_out.success {
             let rollback = self.rollback(&snapshot);
             self.log(revision, &compiled, "apply_failed_rolled_back")?;
-            return Ok(ApplyResult::Failed { reason: apply_out.stderr, rollback });
+            return Ok(ApplyResult::Failed {
+                reason: apply_out.stderr,
+                rollback,
+            });
         }
 
         for hc in &self.health_checks {
-            let result = hc.check(self.runner, &compiled, &self.config.protected, self.config.command_timeout);
+            let result = hc.check(
+                self.runner,
+                &compiled,
+                &self.config.protected,
+                self.config.command_timeout,
+            );
             if !result.ok {
                 let rollback = self.rollback(&snapshot);
                 self.log(revision, &compiled, "health_check_failed_rolled_back")?;
-                return Ok(ApplyResult::Failed { reason: result.reason.unwrap_or_default(), rollback });
+                return Ok(ApplyResult::Failed {
+                    reason: result.reason.unwrap_or_default(),
+                    rollback,
+                });
             }
         }
 
@@ -304,12 +374,26 @@ impl<'a> NftablesController<'a> {
             updated_at: now(),
         })?;
         self.log(revision, &compiled, "applied")?;
-        Ok(ApplyResult::Applied { digest: compiled.digest, revision })
+        Ok(ApplyResult::Applied {
+            digest: compiled.digest,
+            revision,
+        })
     }
 
     fn snapshot_live(&self) -> FirewallSnapshot {
-        let out = self.runner.run("nft", &["-a", "list", "table", "inet", NFT_TABLE], self.config.command_timeout);
-        FirewallSnapshot { existed: out.success, ruleset_text: if out.success { out.stdout } else { String::new() } }
+        let out = self.runner.run(
+            "nft",
+            &["-a", "list", "table", "inet", NFT_TABLE],
+            self.config.command_timeout,
+        );
+        FirewallSnapshot {
+            existed: out.success,
+            ruleset_text: if out.success {
+                out.stdout
+            } else {
+                String::new()
+            },
+        }
     }
 
     fn rollback(&self, snapshot: &FirewallSnapshot) -> RollbackResult {
@@ -324,28 +408,77 @@ impl<'a> NftablesController<'a> {
             // without bound across repeated failures. `delete table` +
             // `add table` first, in the same atomic `-f` transaction,
             // guarantees the restore starts from a genuinely clean slate.
-            let script = format!("delete table inet {NFT_TABLE}\nadd table inet {NFT_TABLE}\n{}\n", snapshot.ruleset_text);
+            let script = format!(
+                "delete table inet {NFT_TABLE}\nadd table inet {NFT_TABLE}\n{}\n",
+                snapshot.ruleset_text
+            );
             if let Err(e) = std::fs::write(&path, &script) {
-                return RollbackResult { attempted: true, ok: false, detail: format!("failed to write rollback script: {e}") };
+                return RollbackResult {
+                    attempted: true,
+                    ok: false,
+                    detail: format!("failed to write rollback script: {e}"),
+                };
             }
-            let out = self.runner.run("nft", &["-f", &path.to_string_lossy()], self.config.command_timeout);
-            RollbackResult { attempted: true, ok: out.success, detail: if out.success { "restored previous ruleset".into() } else { out.stderr } }
+            let out = self.runner.run(
+                "nft",
+                &["-f", &path.to_string_lossy()],
+                self.config.command_timeout,
+            );
+            RollbackResult {
+                attempted: true,
+                ok: out.success,
+                detail: if out.success {
+                    "restored previous ruleset".into()
+                } else {
+                    out.stderr
+                },
+            }
         } else {
-            let out = self.runner.run("nft", &["delete", "table", "inet", NFT_TABLE], self.config.command_timeout);
-            RollbackResult { attempted: true, ok: out.success, detail: if out.success { "deleted table (none existed before)".into() } else { out.stderr } }
+            let out = self.runner.run(
+                "nft",
+                &["delete", "table", "inet", NFT_TABLE],
+                self.config.command_timeout,
+            );
+            RollbackResult {
+                attempted: true,
+                ok: out.success,
+                detail: if out.success {
+                    "deleted table (none existed before)".into()
+                } else {
+                    out.stderr
+                },
+            }
         }
     }
 
-    fn log(&self, revision: i64, compiled: &CompiledFirewallPolicy, outcome: &str) -> Result<(), EnforcementError> {
-        let decision_count = compiled.deny_v4.len() + compiled.deny_v6.len() + compiled.quarantine_v4.len() + compiled.quarantine_v6.len();
+    fn log(
+        &self,
+        revision: i64,
+        compiled: &CompiledFirewallPolicy,
+        outcome: &str,
+    ) -> Result<(), EnforcementError> {
+        let decision_count = compiled.deny_v4.len()
+            + compiled.deny_v6.len()
+            + compiled.quarantine_v4.len()
+            + compiled.quarantine_v6.len();
         let summary = compiled.summarize();
-        self.store.append_apply_log(revision, &compiled.digest, decision_count as i64, &summary, outcome, now())?;
+        self.store.append_apply_log(
+            revision,
+            &compiled.digest,
+            decision_count as i64,
+            &summary,
+            outcome,
+            now(),
+        )?;
         Ok(())
     }
 }
 
 fn now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Only used by `SystemCommandRunner`'s bounded wait loop — kept here so
@@ -369,8 +502,15 @@ mod tests {
         PolicyEntry { target, decision }
     }
 
-    fn controller<'a>(runner: &'a FakeCommandRunner, store: &'a StateStore, dir: &std::path::Path) -> NftablesController<'a> {
-        let config = NftablesControllerConfig { scratch_dir: dir.to_path_buf(), ..NftablesControllerConfig::default() };
+    fn controller<'a>(
+        runner: &'a FakeCommandRunner,
+        store: &'a StateStore,
+        dir: &std::path::Path,
+    ) -> NftablesController<'a> {
+        let config = NftablesControllerConfig {
+            scratch_dir: dir.to_path_buf(),
+            ..NftablesControllerConfig::default()
+        };
         NftablesController::new(runner, store, config)
     }
 
@@ -379,7 +519,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::open_in_memory().unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        let entries = vec![entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)];
+        let entries = vec![entry(
+            TargetSelector::Ip("203.0.113.9".into()),
+            Decision::Deny,
+        )];
 
         let ctrl = controller(&runner, &store, dir.path());
         let first = ctrl.apply(&entries, 1).unwrap();
@@ -389,7 +532,11 @@ mod tests {
 
         let second = ctrl.apply(&entries, 2).unwrap();
         assert!(matches!(second, ApplyResult::NoChange { .. }));
-        assert_eq!(runner.call_count(), calls_after_first, "no additional nft commands should run on a true no-op reapply");
+        assert_eq!(
+            runner.call_count(),
+            calls_after_first,
+            "no additional nft commands should run on a true no-op reapply"
+        );
     }
 
     #[test]
@@ -399,20 +546,34 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store, dir.path());
 
-        let with_ip = vec![entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)];
+        let with_ip = vec![entry(
+            TargetSelector::Ip("203.0.113.9".into()),
+            Decision::Deny,
+        )];
         let r1 = ctrl.apply(&with_ip, 1).unwrap();
-        let ApplyResult::Applied { digest: d1, .. } = r1 else { panic!("expected Applied, got {r1:?}") };
+        let ApplyResult::Applied { digest: d1, .. } = r1 else {
+            panic!("expected Applied, got {r1:?}")
+        };
 
         let without_ip: Vec<PolicyEntry> = vec![];
         let r2 = ctrl.apply(&without_ip, 2).unwrap();
-        let ApplyResult::Applied { digest: d2, .. } = r2 else { panic!("expected Applied, got {r2:?}") };
-        assert_ne!(d1, d2, "removing the only denied IP must change the applied digest");
+        let ApplyResult::Applied { digest: d2, .. } = r2 else {
+            panic!("expected Applied, got {r2:?}")
+        };
+        assert_ne!(
+            d1, d2,
+            "removing the only denied IP must change the applied digest"
+        );
     }
 
     #[test]
     fn cidr_targets_are_compiled_into_interval_sets() {
-        let entries = vec![entry(TargetSelector::Cidr("198.51.100.0/24".into()), Decision::Deny)];
-        let compiled = compile(&entries, &ProtectedDestinations::default().with_defaults()).unwrap();
+        let entries = vec![entry(
+            TargetSelector::Cidr("198.51.100.0/24".into()),
+            Decision::Deny,
+        )];
+        let compiled =
+            compile(&entries, &ProtectedDestinations::default().with_defaults()).unwrap();
         assert_eq!(compiled.deny_v4, vec!["198.51.100.0/24".to_string()]);
         assert!(compiled.script.contains("flags interval"));
     }
@@ -421,9 +582,13 @@ mod tests {
     fn ipv6_addr_and_cidr_are_supported() {
         let entries = vec![
             entry(TargetSelector::Ip("2001:db8::1".into()), Decision::Deny),
-            entry(TargetSelector::Cidr("2001:db8:1::/48".into()), Decision::Ask),
+            entry(
+                TargetSelector::Cidr("2001:db8:1::/48".into()),
+                Decision::Ask,
+            ),
         ];
-        let compiled = compile(&entries, &ProtectedDestinations::default().with_defaults()).unwrap();
+        let compiled =
+            compile(&entries, &ProtectedDestinations::default().with_defaults()).unwrap();
         assert_eq!(compiled.deny_v6, vec!["2001:db8::1".to_string()]);
         assert_eq!(compiled.quarantine_v6, vec!["2001:db8:1::/48".to_string()]);
     }
@@ -434,11 +599,18 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store, dir.path());
-        let entries = vec![entry(TargetSelector::Ip("not-an-ip".into()), Decision::Deny)];
+        let entries = vec![entry(
+            TargetSelector::Ip("not-an-ip".into()),
+            Decision::Deny,
+        )];
 
         let result = ctrl.apply(&entries, 1).unwrap();
         assert!(matches!(result, ApplyResult::Rejected { .. }));
-        assert_eq!(runner.call_count(), 0, "an invalid policy must never reach nft at all");
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "an invalid policy must never reach nft at all"
+        );
     }
 
     #[test]
@@ -446,13 +618,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::open_in_memory().unwrap();
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|program, args| program == "nft" && args.contains(&"--check".to_string()));
+        runner.fail_next_matching(|program, args| {
+            program == "nft" && args.contains(&"--check".to_string())
+        });
         let ctrl = controller(&runner, &store, dir.path());
-        let entries = vec![entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)];
+        let entries = vec![entry(
+            TargetSelector::Ip("203.0.113.9".into()),
+            Decision::Deny,
+        )];
 
         let result = ctrl.apply(&entries, 1).unwrap();
         assert!(matches!(result, ApplyResult::Rejected { .. }));
-        assert!(store.get_applied_ruleset().unwrap().is_none(), "a rejected check must never be committed as applied state");
+        assert!(
+            store.get_applied_ruleset().unwrap().is_none(),
+            "a rejected check must never be committed as applied state"
+        );
     }
 
     #[test]
@@ -472,16 +652,43 @@ mod tests {
         runner.set_default_stdout("table inet social_firewall {\n\tset deny_v4 { type ipv4_addr; elements = { 203.0.113.9 } }\n}\n");
         let ctrl = controller(&runner, &store, dir.path());
 
-        ctrl.apply(&[entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)], 1).unwrap();
-        runner.fail_next_matching(|program, args| program == "nft" && args.first().map(String::as_str) == Some("-f"));
-        let result = ctrl.apply(&[entry(TargetSelector::Ip("203.0.113.10".into()), Decision::Deny)], 2).unwrap();
+        ctrl.apply(
+            &[entry(
+                TargetSelector::Ip("203.0.113.9".into()),
+                Decision::Deny,
+            )],
+            1,
+        )
+        .unwrap();
+        runner.fail_next_matching(|program, args| {
+            program == "nft" && args.first().map(String::as_str) == Some("-f")
+        });
+        let result = ctrl
+            .apply(
+                &[entry(
+                    TargetSelector::Ip("203.0.113.10".into()),
+                    Decision::Deny,
+                )],
+                2,
+            )
+            .unwrap();
         assert!(matches!(result, ApplyResult::Failed { .. }));
 
-        let rollback_script = std::fs::read_to_string(dir.path().join("social_firewall_rollback.nft")).unwrap();
-        let delete_pos = rollback_script.find(&format!("delete table inet {NFT_TABLE}")).expect("rollback script must delete the table first");
-        let add_pos = rollback_script.find(&format!("add table inet {NFT_TABLE}")).expect("rollback script must recreate the table");
-        let snapshot_pos = rollback_script.find("elements = { 203.0.113.9 }").expect("rollback script must contain the captured snapshot");
-        assert!(delete_pos < add_pos && add_pos < snapshot_pos, "must delete, then add, then restore the snapshot content, in that order");
+        let rollback_script =
+            std::fs::read_to_string(dir.path().join("social_firewall_rollback.nft")).unwrap();
+        let delete_pos = rollback_script
+            .find(&format!("delete table inet {NFT_TABLE}"))
+            .expect("rollback script must delete the table first");
+        let add_pos = rollback_script
+            .find(&format!("add table inet {NFT_TABLE}"))
+            .expect("rollback script must recreate the table");
+        let snapshot_pos = rollback_script
+            .find("elements = { 203.0.113.9 }")
+            .expect("rollback script must contain the captured snapshot");
+        assert!(
+            delete_pos < add_pos && add_pos < snapshot_pos,
+            "must delete, then add, then restore the snapshot content, in that order"
+        );
     }
 
     #[test]
@@ -491,11 +698,28 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         // First real apply succeeds and establishes a "previous" state...
         let ctrl = controller(&runner, &store, dir.path());
-        ctrl.apply(&[entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)], 1).unwrap();
+        ctrl.apply(
+            &[entry(
+                TargetSelector::Ip("203.0.113.9".into()),
+                Decision::Deny,
+            )],
+            1,
+        )
+        .unwrap();
 
         // ...then the *next* apply's actual `nft -f <script>` call (not --check) fails.
-        runner.fail_next_matching(|program, args| program == "nft" && args.first().map(String::as_str) == Some("-f"));
-        let result = ctrl.apply(&[entry(TargetSelector::Ip("203.0.113.10".into()), Decision::Deny)], 2).unwrap();
+        runner.fail_next_matching(|program, args| {
+            program == "nft" && args.first().map(String::as_str) == Some("-f")
+        });
+        let result = ctrl
+            .apply(
+                &[entry(
+                    TargetSelector::Ip("203.0.113.10".into()),
+                    Decision::Deny,
+                )],
+                2,
+            )
+            .unwrap();
 
         match result {
             ApplyResult::Failed { rollback, .. } => assert!(rollback.attempted),
@@ -513,15 +737,36 @@ mod tests {
 
         struct AlwaysFails;
         impl HealthCheck for AlwaysFails {
-            fn check(&self, _runner: &dyn CommandRunner, _compiled: &CompiledFirewallPolicy, _protected: &ProtectedDestinations, _timeout: Duration) -> HealthCheckResult {
-                HealthCheckResult { ok: false, reason: Some("simulated health check failure".into()) }
+            fn check(
+                &self,
+                _runner: &dyn CommandRunner,
+                _compiled: &CompiledFirewallPolicy,
+                _protected: &ProtectedDestinations,
+                _timeout: Duration,
+            ) -> HealthCheckResult {
+                HealthCheckResult {
+                    ok: false,
+                    reason: Some("simulated health check failure".into()),
+                }
             }
         }
 
-        let config = NftablesControllerConfig { scratch_dir: dir.path().to_path_buf(), ..NftablesControllerConfig::default() };
-        let ctrl = NftablesController::new(&runner, &store, config).with_health_checks(vec![Box::new(AlwaysFails)]);
+        let config = NftablesControllerConfig {
+            scratch_dir: dir.path().to_path_buf(),
+            ..NftablesControllerConfig::default()
+        };
+        let ctrl = NftablesController::new(&runner, &store, config)
+            .with_health_checks(vec![Box::new(AlwaysFails)]);
 
-        let result = ctrl.apply(&[entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)], 1).unwrap();
+        let result = ctrl
+            .apply(
+                &[entry(
+                    TargetSelector::Ip("203.0.113.9".into()),
+                    Decision::Deny,
+                )],
+                1,
+            )
+            .unwrap();
         match result {
             ApplyResult::Failed { rollback, reason } => {
                 assert!(rollback.attempted);
@@ -534,9 +779,16 @@ mod tests {
 
     #[test]
     fn compiled_script_never_references_the_fw4_table() {
-        let entries = vec![entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)];
-        let compiled = compile(&entries, &ProtectedDestinations::default().with_defaults()).unwrap();
-        assert!(!compiled.script.contains("fw4"), "must never reference fw4's own table");
+        let entries = vec![entry(
+            TargetSelector::Ip("203.0.113.9".into()),
+            Decision::Deny,
+        )];
+        let compiled =
+            compile(&entries, &ProtectedDestinations::default().with_defaults()).unwrap();
+        assert!(
+            !compiled.script.contains("fw4"),
+            "must never reference fw4's own table"
+        );
         assert!(compiled.script.contains(&format!("table inet {NFT_TABLE}")));
     }
 
@@ -549,9 +801,15 @@ mod tests {
         let entries = vec![entry(TargetSelector::Ip(mgmt.to_string()), Decision::Deny)];
         let compiled = compile(&entries, &protected).unwrap();
 
-        assert!(compiled.deny_v4.is_empty(), "the management address must never end up in the deny set");
+        assert!(
+            compiled.deny_v4.is_empty(),
+            "the management address must never end up in the deny set"
+        );
         assert_eq!(compiled.skipped_protected, vec![mgmt.to_string()]);
-        assert!(compiled.script.contains(&format!("ip daddr {mgmt} accept")), "an explicit accept-first rule must exist as a second layer of protection");
+        assert!(
+            compiled.script.contains(&format!("ip daddr {mgmt} accept")),
+            "an explicit accept-first rule must exist as a second layer of protection"
+        );
     }
 
     #[test]
@@ -559,7 +817,10 @@ mod tests {
         let mut protected = ProtectedDestinations::default().with_defaults();
         protected.v4_nets.push("192.168.1.0/24".parse().unwrap());
 
-        let entries = vec![entry(TargetSelector::Ip("192.168.1.50".into()), Decision::Deny)];
+        let entries = vec![entry(
+            TargetSelector::Ip("192.168.1.50".into()),
+            Decision::Deny,
+        )];
         let compiled = compile(&entries, &protected).unwrap();
         assert!(compiled.deny_v4.is_empty());
     }
@@ -571,7 +832,10 @@ mod tests {
         let runner = FakeCommandRunner::new_all_success();
         let ctrl = controller(&runner, &store, dir.path());
 
-        let entries = vec![entry(TargetSelector::Ip("203.0.113.9".into()), Decision::Deny)];
+        let entries = vec![entry(
+            TargetSelector::Ip("203.0.113.9".into()),
+            Decision::Deny,
+        )];
         let report = ctrl.dry_run(&entries).unwrap();
         assert!(report.would_apply);
         assert_eq!(report.previous_digest, None);
@@ -589,7 +853,10 @@ mod tests {
         assert_eq!(p.v4_addrs, vec![Ipv4Addr::new(192, 168, 1, 1)]);
         assert_eq!(p.v4_nets, vec!["10.0.0.0/24".parse::<Ipv4Net>().unwrap()]);
         assert_eq!(p.v6_addrs, vec!["2001:db8::1".parse::<Ipv6Addr>().unwrap()]);
-        assert_eq!(p.v6_nets, vec!["2001:db8:1::/48".parse::<Ipv6Net>().unwrap()]);
+        assert_eq!(
+            p.v6_nets,
+            vec!["2001:db8:1::/48".parse::<Ipv6Net>().unwrap()]
+        );
     }
 
     #[test]
@@ -597,5 +864,4 @@ mod tests {
         let mut p = ProtectedDestinations::default();
         assert!(p.add("not-an-address").is_err());
     }
-
 }

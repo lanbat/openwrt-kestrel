@@ -71,8 +71,14 @@ pub async fn fetch_servers(now_ts: u64) -> Vec<WgServer> {
             if pk.is_empty() {
                 break;
             }
-            let desc = uci_get(&uci_raw, &format!("network.@wireguard_{iface}[{idx}].description"));
-            let aips = uci_get(&uci_raw, &format!("network.@wireguard_{iface}[{idx}].allowed_ips"));
+            let desc = uci_get(
+                &uci_raw,
+                &format!("network.@wireguard_{iface}[{idx}].description"),
+            );
+            let aips = uci_get(
+                &uci_raw,
+                &format!("network.@wireguard_{iface}[{idx}].allowed_ips"),
+            );
             idx += 1;
 
             let label = if desc.is_empty() {
@@ -84,7 +90,8 @@ pub async fn fetch_servers(now_ts: u64) -> Vec<WgServer> {
             // Find matching dump line by public key
             let peer_line = peer_lines.iter().find(|l| l.starts_with(&pk));
 
-            let (online, endpoint, last_seen, traffic, handshake_ts) = if let Some(line) = peer_line {
+            let (online, endpoint, last_seen, traffic, handshake_ts) = if let Some(line) = peer_line
+            {
                 let cols: Vec<&str> = line.split('\t').collect();
                 let ep = cols.get(2).copied().unwrap_or("").to_string();
                 let ep = if ep == "(none)" { String::new() } else { ep };
@@ -254,12 +261,18 @@ network.@wireguard_wg0[1].allowed_ips='10.200.0.3/32'
 
     #[test]
     fn uci_get_basic() {
-        assert_eq!(uci_get(UCI_RAW, "network.@wireguard_wg0[0].public_key"), "AAABBBCCC");
+        assert_eq!(
+            uci_get(UCI_RAW, "network.@wireguard_wg0[0].public_key"),
+            "AAABBBCCC"
+        );
     }
 
     #[test]
     fn uci_get_description() {
-        assert_eq!(uci_get(UCI_RAW, "network.@wireguard_wg0[0].description"), "laptop");
+        assert_eq!(
+            uci_get(UCI_RAW, "network.@wireguard_wg0[0].description"),
+            "laptop"
+        );
     }
 
     #[test]

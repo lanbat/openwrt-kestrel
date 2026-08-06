@@ -8,6 +8,7 @@ use std::path::Path;
 
 use crate::cmd;
 use crate::data::files;
+use crate::db::Store;
 
 /// What to do about a WAN-state observation, decided independently of any
 /// I/O so it's directly testable.
@@ -26,7 +27,9 @@ fn decide(state: &str, last: &str, down_since: u64, now: u64) -> Transition {
     if state == "down" && last != "down" {
         Transition::WentDown
     } else if state == "up" && last == "down" {
-        Transition::CameUp { duration_secs: now.saturating_sub(down_since) }
+        Transition::CameUp {
+            duration_secs: now.saturating_sub(down_since),
+        }
     } else {
         Transition::None
     }
@@ -53,7 +56,14 @@ fn now_secs() -> u64 {
 }
 
 pub async fn run(base_dir: &Path) -> i32 {
-    run_and_report(base_dir).await.0
+    let store = match Store::open(base_dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("check-wan: failed to open kestrel.sqlite: {e}");
+            return 1;
+        }
+    };
+    run_and_report(base_dir, &store).await.0
 }
 
 /// Same as `run`, but also reports whether WAN state actually changed
@@ -62,33 +72,35 @@ pub async fn run(base_dir: &Path) -> i32 {
 /// point (`kestreld --check-wan`, exit code only). Like the rest of this
 /// function, only runs at all when some network has a `NOTIFY_URL`
 /// configured; a plugin wanting WAN events today needs that too.
-pub async fn run_and_report(base_dir: &Path) -> (i32, Option<bool>) {
+pub async fn run_and_report(base_dir: &Path, store: &Store) -> (i32, Option<bool>) {
     let confs = files::read_all_network_confs(base_dir).await;
-    let Some(notify_url) = confs.into_iter().map(|c| c.notify_url).find(|u| !u.is_empty()) else {
+    let Some(notify_url) = confs
+        .into_iter()
+        .map(|c| c.notify_url)
+        .find(|u| !u.is_empty())
+    else {
         return (0, None);
     };
 
-    let state_file = base_dir.join("wan-state");
-    let down_since_file = base_dir.join("wan-down-since");
-
-    let state = if ping_ok("1.1.1.1").await || ping_ok("8.8.8.8").await { "up" } else { "down" };
-    let last = tokio::fs::read_to_string(&state_file).await
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "up".to_string());
-    let down_since: u64 = tokio::fs::read_to_string(&down_since_file).await
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
+    let state = if ping_ok("1.1.1.1").await || ping_ok("8.8.8.8").await {
+        "up"
+    } else {
+        "down"
+    };
+    let (last, down_since) = store
+        .get_wan_state()
+        .await
+        .unwrap_or(None)
+        .map(|(s, d)| (s, d.unwrap_or(0) as u64))
+        .unwrap_or(("up".to_string(), 0));
 
     let transition = decide(state, &last, down_since, now_secs());
     match transition {
         Transition::WentDown => {
-            let _ = tokio::fs::write(&down_since_file, format!("{}\n", now_secs())).await;
-            let _ = tokio::fs::write(&state_file, "down\n").await;
+            let _ = store.set_wan_state("down", Some(now_secs() as i64)).await;
         }
         Transition::CameUp { duration_secs } => {
-            let _ = tokio::fs::write(&state_file, "up\n").await;
-            let _ = tokio::fs::remove_file(&down_since_file).await;
+            let _ = store.set_wan_state("up", None).await;
 
             let dash = cmd::dashboard_url().await;
             let dur_str = format_duration(duration_secs);
@@ -100,10 +112,20 @@ pub async fn run_and_report(base_dir: &Path) -> (i32, Option<bool>) {
                 "Dashboard",
                 &dash,
                 &format!("WAN connectivity restored after {dur_str} outage.\nDashboard: {dash}"),
-            ).await;
+            )
+            .await;
         }
         Transition::None => {
-            let _ = tokio::fs::write(&state_file, format!("{state}\n")).await;
+            let _ = store
+                .set_wan_state(
+                    state,
+                    if state == "down" {
+                        Some(down_since as i64)
+                    } else {
+                        None
+                    },
+                )
+                .await;
         }
     }
 
@@ -126,7 +148,10 @@ mod tests {
 
     #[test]
     fn came_up_computes_duration_from_down_since() {
-        assert_eq!(decide("up", "down", 1_000, 1_130), Transition::CameUp { duration_secs: 130 });
+        assert_eq!(
+            decide("up", "down", 1_000, 1_130),
+            Transition::CameUp { duration_secs: 130 }
+        );
     }
 
     #[test]

@@ -102,8 +102,8 @@ mod tests {
         let wg = WgPublicKeyBytes(bytes);
         let msg = MessagingPublicKeyBytes(bytes);
         assert_eq!(wg.0, msg.0); // same bytes...
-        // ...but `wg` and `msg` cannot be compared to each other or
-        // substituted for one another — a compile-time guarantee, not
-        // something this assertion could break.
+                                 // ...but `wg` and `msg` cannot be compared to each other or
+                                 // substituted for one another — a compile-time guarantee, not
+                                 // something this assertion could break.
     }
 }

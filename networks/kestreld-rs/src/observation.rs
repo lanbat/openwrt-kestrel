@@ -3,8 +3,9 @@
 //! a mode where every new connection attempt is allowed and recorded for a
 //! fixed duration, then turned into permanent rules automatically once the
 //! window closes — preferring a domain-based rule over a raw-IP one
-//! wherever `data::dns_answers::correlate` found a match, since a domain
-//! rule keeps working if the destination's IP later changes.
+//! wherever a DNS answer correlates to the connection's IP (via
+//! `data::dns_answers::correlate_ip` over `Store`-backed answers), since a
+//! domain rule keeps working if the destination's IP later changes.
 //!
 //! **Enforcement** is kernel-side and self-expiring: `start` adds the
 //! device's IP(s) to a per-network `{iface}_observe_4`/`_6` nftables set
@@ -14,39 +15,31 @@
 //! where a daemon timer has to remember to revoke a temporary allow.
 //!
 //! **Capture** needs no new code: `daemon.rs`'s `handle_new` already
-//! records every new connection attempt to `{iface}-pending-{mac_n}`
-//! regardless of allow/deny state, so an observed device's connections
-//! land there exactly like any other pending connection would.
+//! records every new connection attempt to the `pending_connections`
+//! table regardless of allow/deny state, so an observed device's
+//! connections land there exactly like any other pending connection would.
 //!
 //! **Materialization** (`materialize_expired`, polled by a `daemon.rs`
 //! task) is what actually turns a closed window's pending entries into
-//! permanent `DeviceRule`s. `write_domain_rule`/`write_ip_rule` are the
-//! same rule-writing side effects `routes::device`'s `approve_domain`/
-//! `approve_pending` HTTP handlers perform — factored out here so both
-//! call sites share one implementation instead of two copies that could
-//! drift apart. Materialized rules always use the WAN route (no VPN tier)
-//! since observation never asked the user to choose one; a VPN route can
-//! still be added afterward by re-approving the same domain from the
-//! device page.
+//! permanent `DeviceRule`s, queried directly from `Store` rather than a
+//! directory scan for `{iface}-observe-{mac}` files. `write_domain_rule`/
+//! `write_ip_rule` are the same rule-writing side effects `routes::device`'s
+//! `approve_domain`/`approve_pending` HTTP handlers perform — factored out
+//! here so both call sites share one implementation instead of two copies
+//! that could drift apart. Materialized rules always use the WAN route (no
+//! VPN tier) since observation never asked the user to choose one; a VPN
+//! route can still be added afterward by re-approving the same domain from
+//! the device page.
 
 use std::path::Path;
 
 use crate::cmd;
 use crate::data::{dns_answers, files};
+use crate::db::Store;
 use crate::plugins::{Event, PluginManager};
 
 fn mac_no_colons(mac: &str) -> String {
     mac.replace(':', "")
-}
-
-/// Reverses `mac_no_colons`: `"aabbccddeeff"` -> `"aa:bb:cc:dd:ee:ff"`.
-fn colonize_mac(mac_n: &str) -> String {
-    mac_n
-        .as_bytes()
-        .chunks(2)
-        .map(|c| std::str::from_utf8(c).unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join(":")
 }
 
 /// Starts an observation window for `mac` on `iface`: records the window's
@@ -56,11 +49,19 @@ fn colonize_mac(mac_n: &str) -> String {
 /// accepts their members are declared unconditionally for any network
 /// with at least one labeled device (see `regen_inspect.rs`), which must
 /// already be true for `mac` to have reached the device page at all.
-pub async fn start(base_dir: &Path, iface: &str, mac: &str, ip: Option<&str>, ip6: Option<&str>, duration_secs: u64, now: u64) {
-    let mac_n = mac_no_colons(mac);
+pub async fn start(
+    store: &Store,
+    iface: &str,
+    mac: &str,
+    ip: Option<&str>,
+    ip6: Option<&str>,
+    duration_secs: u64,
+    now: u64,
+) {
     let expiry = now + duration_secs;
-    let observe_path = base_dir.join(format!("{iface}-observe-{mac_n}"));
-    let _ = tokio::fs::write(&observe_path, format!("{now}\t{expiry}")).await;
+    let _ = store
+        .start_observation_window(iface, mac, now as i64, expiry as i64)
+        .await;
 
     let timeout = format!("{duration_secs}s");
     if let Some(ip) = ip {
@@ -69,14 +70,6 @@ pub async fn start(base_dir: &Path, iface: &str, mac: &str, ip: Option<&str>, ip
     if let Some(ip6) = ip6 {
         cmd::nft_add_element(&format!("{iface}_observe_6"), ip6, &timeout).await;
     }
-}
-
-/// `{iface}-observe-{mac_n}` -> `(iface, mac_n)`.
-pub fn parse_observe_filename(name: &str) -> Option<(&str, &str)> {
-    let idx = name.find("-observe-")?;
-    let iface = &name[..idx];
-    let mac_n = &name[idx + "-observe-".len()..];
-    if iface.is_empty() || mac_n.is_empty() { None } else { Some((iface, mac_n)) }
 }
 
 /// The same rule-writing side effects as `routes::device`'s
@@ -92,18 +85,25 @@ pub fn parse_observe_filename(name: &str) -> Option<(&str, &str)> {
 /// `iface`/`domain` an external plugin supplied directly. Either would
 /// otherwise land unescaped in a file path, a dnsmasq conf line, or nft
 /// set names.
-pub async fn write_domain_rule(base_dir: &Path, split_routing_dir: &Path, iface: &str, mac: &str, domain: &str, route: &str) {
-    if !files::is_valid_iface(iface) || !files::is_valid_mac(mac) || !files::is_valid_domain(domain) {
+pub async fn write_domain_rule(
+    store: &Store,
+    base_dir: &Path,
+    split_routing_dir: &Path,
+    iface: &str,
+    mac: &str,
+    domain: &str,
+    route: &str,
+) {
+    if !files::is_valid_iface(iface) || !files::is_valid_mac(mac) || !files::is_valid_domain(domain)
+    {
         return;
     }
     let mac_n = mac_no_colons(mac);
-    let rules_path = base_dir.join(format!("{iface}-device-rules"));
-    let _ = files::file_remove_rule(&rules_path, mac, domain).await;
-    let entry = format!("{mac}\t{domain}\tallow\t\t\t{route}");
-    let _ = files::file_append(&rules_path, &entry).await;
+    let _ = store.upsert_domain_rule(iface, mac, domain, route).await;
 
     let dconf = format!("/etc/dnsmasq.d/{iface}-device-{mac_n}.conf");
-    let mut nftset = format!("4#inet#fw4#{iface}_allow_{mac_n}_4,6#inet#fw4#{iface}_allow_{mac_n}_6");
+    let mut nftset =
+        format!("4#inet#fw4#{iface}_allow_{mac_n}_4,6#inet#fw4#{iface}_allow_{mac_n}_6");
     if !route.is_empty() {
         nftset.push_str(&format!(",4#inet#fw4#{iface}_route_{mac_n}_{route}_4,6#inet#fw4#{iface}_route_{mac_n}_{route}_6"));
     }
@@ -122,7 +122,7 @@ pub async fn write_domain_rule(base_dir: &Path, split_routing_dir: &Path, iface:
     }
     cmd::reload_dnsmasq().await;
     if !route.is_empty() {
-        crate::regen_inspect::run(base_dir, split_routing_dir, iface).await;
+        crate::regen_inspect::run(base_dir, split_routing_dir, store, iface).await;
         cmd::spawn_macfilter(iface);
     }
 }
@@ -138,7 +138,14 @@ pub async fn write_domain_rule(base_dir: &Path, split_routing_dir: &Path, iface:
 /// pending files) and from `plugins::handle_plugin_line`'s `add_rule`
 /// action (values an external plugin supplied directly), neither of
 /// which is a validated HTTP form.
-pub async fn write_ip_rule(base_dir: &Path, iface: &str, mac: &str, dst_ip: &str, port: &str, proto: &str) {
+pub async fn write_ip_rule(
+    store: &Store,
+    iface: &str,
+    mac: &str,
+    dst_ip: &str,
+    port: &str,
+    proto: &str,
+) {
     if !files::is_valid_iface(iface)
         || !files::is_valid_mac(mac)
         || dst_ip.parse::<std::net::IpAddr>().is_err()
@@ -148,12 +155,7 @@ pub async fn write_ip_rule(base_dir: &Path, iface: &str, mac: &str, dst_ip: &str
         return;
     }
     let mac_n = mac_no_colons(mac);
-    let rules_path = base_dir.join(format!("{iface}-device-rules"));
-    let entry = format!("{mac}\t{dst_ip}\tallow\t{port}\t{proto}");
-    let existing = tokio::fs::read_to_string(&rules_path).await.unwrap_or_default();
-    if !existing.contains(&entry) {
-        let _ = files::file_append(&rules_path, &entry).await;
-    }
+    let _ = store.upsert_ip_rule(iface, mac, dst_ip, port, proto).await;
     if dst_ip.contains(':') {
         cmd::nft_add_element(&format!("{iface}_allow_{mac_n}_6"), dst_ip, "").await;
     } else {
@@ -167,56 +169,103 @@ pub async fn write_ip_rule(base_dir: &Path, iface: &str, mac: &str, dst_ip: &str
 /// domain, even if it covers several observed IPs), an IP rule otherwise.
 /// The corresponding pending entries are removed either way, since they're
 /// no longer "pending" once a rule covers them.
-async fn materialize_window(base_dir: &Path, split_routing_dir: &Path, iface: &str, mac_n: &str, start: u64, expiry: u64, plugins: &PluginManager) {
-    let mac = colonize_mac(mac_n);
-    let pending_path = base_dir.join(format!("{iface}-pending-{mac_n}"));
-    let entries = files::read_pending_conns(&pending_path).await;
-    let in_window: Vec<_> = entries.into_iter().filter(|e| e.ts >= start && e.ts <= expiry).collect();
+async fn materialize_window(
+    store: &Store,
+    base_dir: &Path,
+    split_routing_dir: &Path,
+    iface: &str,
+    mac: &str,
+    start: u64,
+    expiry: u64,
+    plugins: &PluginManager,
+) {
+    let entries = store
+        .list_pending_connections(iface, mac)
+        .await
+        .unwrap_or_default();
+    let in_window: Vec<_> = entries
+        .into_iter()
+        .filter(|e| e.ts >= start as i64 && e.ts <= expiry as i64)
+        .collect();
+
+    let dns_entries: Vec<dns_answers::DnsAnswer> = store
+        .list_dns_answers(iface, mac)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| dns_answers::DnsAnswer {
+            ts: a.ts as u64,
+            domain: a.domain,
+            ip: a.ip,
+        })
+        .collect();
 
     let mut domains_written: std::collections::HashSet<String> = std::collections::HashSet::new();
     for entry in &in_window {
-        let domain = dns_answers::correlate(base_dir, iface, mac_n, &entry.dst, entry.ts).await;
+        let domain = dns_answers::correlate_ip(&dns_entries, &entry.dst, entry.ts as u64);
         match domain {
             Some(domain) => {
                 if domains_written.insert(domain.clone()) {
-                    write_domain_rule(base_dir, split_routing_dir, iface, &mac, &domain, "").await;
-                    plugins.broadcast(&Event::DeviceApproved { iface: iface.to_string(), mac: mac.clone(), dst: domain, route: String::new() }).await;
+                    write_domain_rule(store, base_dir, split_routing_dir, iface, mac, &domain, "")
+                        .await;
+                    plugins
+                        .broadcast(&Event::DeviceApproved {
+                            iface: iface.to_string(),
+                            mac: mac.to_string(),
+                            dst: domain,
+                            route: String::new(),
+                        })
+                        .await;
                 }
             }
             None => {
-                write_ip_rule(base_dir, iface, &mac, &entry.dst, &entry.port, &entry.proto).await;
-                plugins.broadcast(&Event::DeviceApproved { iface: iface.to_string(), mac: mac.clone(), dst: entry.dst.clone(), route: String::new() }).await;
+                write_ip_rule(store, iface, mac, &entry.dst, &entry.port, &entry.proto).await;
+                plugins
+                    .broadcast(&Event::DeviceApproved {
+                        iface: iface.to_string(),
+                        mac: mac.to_string(),
+                        dst: entry.dst.clone(),
+                        route: String::new(),
+                    })
+                    .await;
             }
         }
-        let _ = files::file_remove_pending(&pending_path, &entry.dst, &entry.port, &entry.proto).await;
+        let _ = store
+            .remove_pending_connection(iface, mac, &entry.dst, &entry.port, &entry.proto)
+            .await;
     }
 }
 
-/// Polled by a `daemon.rs` task: scans `base_dir` for every
-/// `{iface}-observe-{mac_n}` file, materializes and deletes the ones whose
-/// window has closed.
-pub async fn materialize_expired(base_dir: &Path, split_routing_dir: &Path, plugins: &PluginManager) {
-    let Ok(mut dir) = tokio::fs::read_dir(base_dir).await else { return };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+/// Polled by a `daemon.rs` task: queries `Store` for every observation
+/// window whose expiry has passed, materializes and removes them.
+pub async fn materialize_expired(
+    base_dir: &Path,
+    split_routing_dir: &Path,
+    store: &Store,
+    plugins: &PluginManager,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expired = store
+        .expired_observation_windows(now as i64)
+        .await
+        .unwrap_or_default();
 
-    while let Ok(Some(entry)) = dir.next_entry().await {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let Some((iface, mac_n)) = parse_observe_filename(&name) else { continue };
-
-        let content = tokio::fs::read_to_string(entry.path()).await.unwrap_or_default();
-        let mut fields = content.trim().splitn(2, '\t');
-        let (Some(start), Some(expiry)) = (
-            fields.next().and_then(|s| s.parse::<u64>().ok()),
-            fields.next().and_then(|s| s.parse::<u64>().ok()),
-        ) else {
-            continue;
-        };
-
-        if expiry <= now {
-            materialize_window(base_dir, split_routing_dir, iface, mac_n, start, expiry, plugins).await;
-            let _ = tokio::fs::remove_file(entry.path()).await;
-        }
+    for (iface, mac, window) in expired {
+        materialize_window(
+            store,
+            base_dir,
+            split_routing_dir,
+            &iface,
+            &mac,
+            window.started_at as u64,
+            window.expires_at as u64,
+            plugins,
+        )
+        .await;
+        let _ = store.remove_observation_window(&iface, &mac).await;
     }
 }
 
@@ -225,56 +274,94 @@ mod tests {
     use super::*;
 
     async fn no_plugins() -> PluginManager {
-        PluginManager::discover(Path::new("/nonexistent"), std::path::PathBuf::from("/tmp"), std::path::PathBuf::from("/tmp"), Vec::new()).await
-    }
-
-    #[test]
-    fn colonize_mac_reverses_mac_no_colons() {
-        assert_eq!(colonize_mac("aabbccddeeff"), "aa:bb:cc:dd:ee:ff");
-        assert_eq!(mac_no_colons(&colonize_mac("aabbccddeeff")), "aabbccddeeff");
-    }
-
-    #[test]
-    fn parse_observe_filename_splits_iface_and_mac() {
-        assert_eq!(parse_observe_filename("guest-observe-aabbccddeeff"), Some(("guest", "aabbccddeeff")));
-    }
-
-    #[test]
-    fn parse_observe_filename_rejects_unrelated_names() {
-        assert_eq!(parse_observe_filename("guest-device-rules"), None);
-        assert_eq!(parse_observe_filename(""), None);
+        PluginManager::discover(
+            Path::new("/nonexistent"),
+            std::path::PathBuf::from("/tmp"),
+            std::path::PathBuf::from("/tmp"),
+            std::sync::Arc::new(crate::db::Store::open_in_memory().unwrap()),
+            Vec::new(),
+        )
+        .await
     }
 
     #[tokio::test]
-    async fn start_writes_state_file_and_adds_nft_elements() {
+    async fn start_persists_the_window_via_store() {
         // nft_add_element shells out to the real `nft` binary, which will
         // just fail silently in this sandbox (no `inet fw4` table) — this
-        // only exercises the state-file side, matching how other daemon
+        // only exercises the Store side, matching how other daemon
         // helpers (e.g. handle_new) aren't fully unit-tested either.
-        let dir = tempfile::tempdir().unwrap();
-        start(dir.path(), "guest", "aa:bb:cc:dd:ee:ff", Some("10.10.0.5"), None, 3600, 1000).await;
-        let content = tokio::fs::read_to_string(dir.path().join("guest-observe-aabbccddeeff")).await.unwrap();
-        assert_eq!(content, "1000\t4600");
+        let store = Store::open_in_memory().unwrap();
+        start(
+            &store,
+            "guest",
+            "aa:bb:cc:dd:ee:ff",
+            Some("10.10.0.5"),
+            None,
+            3600,
+            1000,
+        )
+        .await;
+        let expired = store.expired_observation_windows(4600).await.unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0, "guest");
+        assert_eq!(expired[0].1, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(expired[0].2.started_at, 1000);
+        assert_eq!(expired[0].2.expires_at, 4600);
     }
 
     #[tokio::test]
     async fn materialize_window_prefers_domain_when_correlated() {
         let dir = tempfile::tempdir().unwrap();
         let split_dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
 
         // A DNS answer resolving example.com -> 93.184.216.34 at ts=500,
         // and a pending connection to that IP at ts=600 (inside the
         // window), should materialize as a domain rule.
-        tokio::fs::write(dir.path().join("guest-dns-answers-aabbccddeeff"), "500\texample.com\t93.184.216.34\n").await.unwrap();
-        tokio::fs::write(dir.path().join("guest-pending-aabbccddeeff"), "93.184.216.34\t443\ttcp\t600\n").await.unwrap();
+        store
+            .add_dns_answer(
+                "guest",
+                "aa:bb:cc:dd:ee:ff",
+                500,
+                "example.com",
+                "93.184.216.34",
+            )
+            .await
+            .unwrap();
+        store
+            .add_pending_connection(
+                "guest",
+                "aa:bb:cc:dd:ee:ff",
+                "93.184.216.34",
+                "443",
+                "tcp",
+                600,
+            )
+            .await
+            .unwrap();
 
-        materialize_window(dir.path(), split_dir.path(), "guest", "aabbccddeeff", 0, 1000, &no_plugins().await).await;
+        materialize_window(
+            &store,
+            dir.path(),
+            split_dir.path(),
+            "guest",
+            "aa:bb:cc:dd:ee:ff",
+            0,
+            1000,
+            &no_plugins().await,
+        )
+        .await;
 
-        let rules = tokio::fs::read_to_string(dir.path().join("guest-device-rules")).await.unwrap();
-        assert_eq!(rules, "aa:bb:cc:dd:ee:ff\texample.com\tallow\t\t\t\n");
+        let rules = store.list_device_rules("guest").await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].dst, "example.com");
+        assert_eq!(rules[0].action, "allow");
 
         // The now-covered pending entry should be gone.
-        let pending = files::read_pending_conns(&dir.path().join("guest-pending-aabbccddeeff")).await;
+        let pending = store
+            .list_pending_connections("guest", "aa:bb:cc:dd:ee:ff")
+            .await
+            .unwrap();
         assert!(pending.is_empty());
     }
 
@@ -282,42 +369,118 @@ mod tests {
     async fn materialize_window_falls_back_to_ip_rule_without_correlation() {
         let dir = tempfile::tempdir().unwrap();
         let split_dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("guest-pending-aabbccddeeff"), "203.0.113.9\t443\ttcp\t600\n").await.unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .add_pending_connection(
+                "guest",
+                "aa:bb:cc:dd:ee:ff",
+                "203.0.113.9",
+                "443",
+                "tcp",
+                600,
+            )
+            .await
+            .unwrap();
 
-        materialize_window(dir.path(), split_dir.path(), "guest", "aabbccddeeff", 0, 1000, &no_plugins().await).await;
+        materialize_window(
+            &store,
+            dir.path(),
+            split_dir.path(),
+            "guest",
+            "aa:bb:cc:dd:ee:ff",
+            0,
+            1000,
+            &no_plugins().await,
+        )
+        .await;
 
-        let rules = tokio::fs::read_to_string(dir.path().join("guest-device-rules")).await.unwrap();
-        assert_eq!(rules, "aa:bb:cc:dd:ee:ff\t203.0.113.9\tallow\t443\ttcp\n");
+        let rules = store.list_device_rules("guest").await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].dst, "203.0.113.9");
+        assert_eq!(rules[0].port, "443");
     }
 
     #[tokio::test]
     async fn materialize_window_ignores_entries_outside_the_window() {
         let dir = tempfile::tempdir().unwrap();
         let split_dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("guest-pending-aabbccddeeff"), "203.0.113.9\t443\ttcp\t9999\n").await.unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .add_pending_connection(
+                "guest",
+                "aa:bb:cc:dd:ee:ff",
+                "203.0.113.9",
+                "443",
+                "tcp",
+                9999,
+            )
+            .await
+            .unwrap();
 
-        materialize_window(dir.path(), split_dir.path(), "guest", "aabbccddeeff", 0, 1000, &no_plugins().await).await;
+        materialize_window(
+            &store,
+            dir.path(),
+            split_dir.path(),
+            "guest",
+            "aa:bb:cc:dd:ee:ff",
+            0,
+            1000,
+            &no_plugins().await,
+        )
+        .await;
 
-        assert!(tokio::fs::read_to_string(dir.path().join("guest-device-rules")).await.is_err());
+        assert!(store.list_device_rules("guest").await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn materialize_expired_processes_and_removes_only_expired_windows() {
         let dir = tempfile::tempdir().unwrap();
         let split_dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("guest-pending-aabbccddeeff"), "203.0.113.9\t443\ttcp\t600\n").await.unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .add_pending_connection(
+                "guest",
+                "aa:bb:cc:dd:ee:ff",
+                "203.0.113.9",
+                "443",
+                "tcp",
+                600,
+            )
+            .await
+            .unwrap();
         // Expired window (expiry in the past, but its [start,expiry] range
         // still covers the pending entry's ts=600).
-        tokio::fs::write(dir.path().join("guest-observe-aabbccddeeff"), "0\t700").await.unwrap();
+        store
+            .start_observation_window("guest", "aa:bb:cc:dd:ee:ff", 0, 700)
+            .await
+            .unwrap();
         // Not-yet-expired window for a different device
-        let far_future = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 86400;
-        tokio::fs::write(dir.path().join("guest-observe-112233445566"), format!("0\t{far_future}")).await.unwrap();
+        let far_future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 86400;
+        store
+            .start_observation_window("guest", "11:22:33:44:55:66", 0, far_future)
+            .await
+            .unwrap();
 
-        materialize_expired(dir.path(), split_dir.path(), &no_plugins().await).await;
+        materialize_expired(dir.path(), split_dir.path(), &store, &no_plugins().await).await;
 
-        assert!(!dir.path().join("guest-observe-aabbccddeeff").exists());
-        assert!(dir.path().join("guest-observe-112233445566").exists());
-        let rules = tokio::fs::read_to_string(dir.path().join("guest-device-rules")).await.unwrap();
-        assert_eq!(rules, "aa:bb:cc:dd:ee:ff\t203.0.113.9\tallow\t443\ttcp\n");
+        assert!(store
+            .expired_observation_windows(700)
+            .await
+            .unwrap()
+            .iter()
+            .all(|(_, mac, _)| mac != "aa:bb:cc:dd:ee:ff"));
+        assert!(store
+            .expired_observation_windows(far_future)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(_, mac, _)| mac == "11:22:33:44:55:66"));
+        let rules = store.list_device_rules("guest").await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].dst, "203.0.113.9");
     }
 }

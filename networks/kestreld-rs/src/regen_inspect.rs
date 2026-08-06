@@ -19,6 +19,7 @@ use std::path::Path;
 
 use crate::cmd;
 use crate::data::files;
+use crate::db::Store;
 
 fn mac_no_colons(mac: &str) -> String {
     mac.replace(':', "")
@@ -35,9 +36,14 @@ async fn router_ip(iface: &str, notify_conf_path: &Path) -> String {
     if let Some(ip) = query_bridge_ip(iface).await {
         return ip;
     }
-    let content = tokio::fs::read_to_string(notify_conf_path).await.unwrap_or_default();
+    let content = tokio::fs::read_to_string(notify_conf_path)
+        .await
+        .unwrap_or_default();
     let vars = files::parse_sh_vars(&content);
-    let subnet = vars.get("SUBNET").cloned().unwrap_or_else(|| "192.168.1".to_string());
+    let subnet = vars
+        .get("SUBNET")
+        .cloned()
+        .unwrap_or_else(|| "192.168.1".to_string());
     format!("{subnet}.1")
 }
 
@@ -46,8 +52,13 @@ async fn query_bridge_ip(iface: &str) -> Option<String> {
     if !ok {
         return None;
     }
-    out.lines()
-        .find_map(|line| line.trim().strip_prefix("inet ")?.split('/').next().map(str::to_string))
+    out.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("inet ")?
+            .split('/')
+            .next()
+            .map(str::to_string)
+    })
 }
 
 /// Appends `line` to `path` unless it's already present as an exact line
@@ -57,7 +68,12 @@ async fn append_if_absent(path: &Path, line: &str) {
     if existing.lines().any(|l| l == line) {
         return;
     }
-    if let Ok(mut f) = tokio::fs::OpenOptions::new().create(true).append(true).open(path).await {
+    if let Ok(mut f) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+    {
         use tokio::io::AsyncWriteExt;
         let _ = f.write_all(format!("{line}\n").as_bytes()).await;
     }
@@ -69,28 +85,44 @@ fn is_routed_domain_rule(r: &files::DeviceRule) -> bool {
     r.action == "allow" && r.port.is_empty() && !r.route.is_empty()
 }
 
-pub async fn run(base_dir: &Path, split_routing_dir: &Path, iface: &str) -> i32 {
-    let labels_path = base_dir.join(format!("{iface}-device-labels"));
-    let ips_path = base_dir.join(format!("{iface}-device-ips"));
-    let ip6s_path = base_dir.join(format!("{iface}-device-ip6s"));
-    let limits_path = base_dir.join(format!("{iface}-device-limits"));
-    let rules_path = base_dir.join(format!("{iface}-device-rules"));
+pub async fn run(base_dir: &Path, split_routing_dir: &Path, store: &Store, iface: &str) -> i32 {
+    // `{iface}-notify.conf` is the one file here that stays flat — it's a
+    // human/install-time config, not kestreld-owned runtime state (see
+    // `db`'s module doc), so it's never touched by the SQLite migration.
     let notify_conf_path = base_dir.join(format!("{iface}-notify.conf"));
     let nftd_path = format!("/etc/nftables.d/25-{iface}-inspect.nft");
 
-    let labels = files::read_labels(&labels_path).await;
-    let ips = files::read_mac_ip_map(&ips_path).await;
-    let ip6s = files::read_mac_ip_map(&ip6s_path).await;
-    let limits = files::read_device_limits(&limits_path).await;
-    let rules = files::read_device_rules(&rules_path).await;
+    let labels = store.all_labels(iface).await.unwrap_or_default();
+    let ips = store.all_device_ips(iface).await.unwrap_or_default();
+    let ip6s = store.all_device_ip6s(iface).await.unwrap_or_default();
+    let limits = store.all_device_limits(iface).await.unwrap_or_default();
+    let rules: Vec<files::DeviceRule> = store
+        .list_device_rules(iface)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| files::DeviceRule {
+            mac: r.mac,
+            dst: r.dst,
+            action: r.action,
+            port: r.port,
+            proto: r.proto,
+            route: r.route,
+        })
+        .collect();
     let router_ip = router_ip(iface, &notify_conf_path).await;
 
-    let mut out = format!("# Device inspect chain for {iface} — managed by kestreld --regen-inspect\n");
+    let mut out =
+        format!("# Device inspect chain for {iface} — managed by kestreld --regen-inspect\n");
 
     for mac in labels.keys() {
         let mn = mac_no_colons(mac);
-        out.push_str(&format!("set {iface}_allow_{mn}_4 {{ type ipv4_addr; flags dynamic,timeout; timeout 24h; }}\n"));
-        out.push_str(&format!("set {iface}_allow_{mn}_6 {{ type ipv6_addr; flags dynamic,timeout; timeout 24h; }}\n"));
+        out.push_str(&format!(
+            "set {iface}_allow_{mn}_4 {{ type ipv4_addr; flags dynamic,timeout; timeout 24h; }}\n"
+        ));
+        out.push_str(&format!(
+            "set {iface}_allow_{mn}_6 {{ type ipv6_addr; flags dynamic,timeout; timeout 24h; }}\n"
+        ));
     }
 
     // One shared per-network "observe" set (not per-mac — membership
@@ -99,8 +131,12 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path, iface: &str) -> i32 
     // nft `timeout` when a window starts, bypassing the default-drop
     // policy below until nftables expires the membership itself.
     if !labels.is_empty() {
-        out.push_str(&format!("set {iface}_observe_4 {{ type ipv4_addr; flags dynamic,timeout; timeout 1h; }}\n"));
-        out.push_str(&format!("set {iface}_observe_6 {{ type ipv6_addr; flags dynamic,timeout; timeout 1h; }}\n"));
+        out.push_str(&format!(
+            "set {iface}_observe_4 {{ type ipv4_addr; flags dynamic,timeout; timeout 1h; }}\n"
+        ));
+        out.push_str(&format!(
+            "set {iface}_observe_6 {{ type ipv6_addr; flags dynamic,timeout; timeout 1h; }}\n"
+        ));
     }
 
     let mut seen_route_sets: HashSet<(String, String)> = HashSet::new();
@@ -116,10 +152,16 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path, iface: &str) -> i32 
 
     out.push_str(&format!("chain {iface}_inspect {{\n"));
     out.push_str("    type filter hook forward priority 2; policy accept;\n");
-    out.push_str(&format!("    iifname \"br-{iface}\" ip daddr {router_ip} udp dport 53 accept\n"));
-    out.push_str(&format!("    iifname \"br-{iface}\" ip daddr {router_ip} tcp dport 53 accept\n"));
+    out.push_str(&format!(
+        "    iifname \"br-{iface}\" ip daddr {router_ip} udp dport 53 accept\n"
+    ));
+    out.push_str(&format!(
+        "    iifname \"br-{iface}\" ip daddr {router_ip} tcp dport 53 accept\n"
+    ));
     out.push_str(&format!("    iifname \"br-{iface}\" udp dport 53 drop\n"));
-    out.push_str(&format!("    iifname \"br-{iface}\" tcp dport {{ 53, 853 }} drop\n"));
+    out.push_str(&format!(
+        "    iifname \"br-{iface}\" tcp dport {{ 53, 853 }} drop\n"
+    ));
 
     let has_ip_data = !labels.is_empty() && (!ips.is_empty() || !ip6s.is_empty());
     if has_ip_data {
@@ -160,9 +202,13 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path, iface: &str) -> i32 
     let mut routing_rules = String::new();
     for r in rules.iter().filter(|r| is_routed_domain_rule(r)) {
         let vpf_path = split_routing_dir.join(format!("vpn-{}.conf", r.route));
-        let Ok(content) = tokio::fs::read_to_string(&vpf_path).await else { continue };
+        let Ok(content) = tokio::fs::read_to_string(&vpf_path).await else {
+            continue;
+        };
         let vars = files::parse_sh_vars(&content);
-        let Some(fwmark) = vars.get("FWMARK").filter(|m| !m.is_empty()) else { continue };
+        let Some(fwmark) = vars.get("FWMARK").filter(|m| !m.is_empty()) else {
+            continue;
+        };
         let mn = mac_no_colons(&r.mac);
         let route = &r.route;
         if let Some(ip) = ips.get(&r.mac) {
@@ -199,7 +245,10 @@ pub async fn run(base_dir: &Path, split_routing_dir: &Path, iface: &str) -> i32 
 
     // Restore IP-based allow rules from rules file after fw4 reload clears
     // dynamic sets. Domain rules are restored via dnsmasq's nftset=, not here.
-    for r in rules.iter().filter(|r| r.action == "allow" && !r.port.is_empty()) {
+    for r in rules
+        .iter()
+        .filter(|r| r.action == "allow" && !r.port.is_empty())
+    {
         let mn = mac_no_colons(&r.mac);
         if r.dst.parse::<std::net::Ipv6Addr>().is_ok() {
             cmd::nft_add_element(&format!("{iface}_allow_{mn}_6"), &r.dst, "").await;
@@ -224,8 +273,18 @@ mod tests {
     async fn generates_inspect_chain_with_dns_bypass_prevention() {
         let dir = tempdir().unwrap();
         write(dir.path(), "guest-notify.conf", "SUBNET=192.168.3\n").await;
-        write(dir.path(), "guest-device-labels", "aa:bb:cc:dd:ee:ff\tPhone\n").await;
-        write(dir.path(), "guest-device-ips", "aa:bb:cc:dd:ee:ff\t192.168.3.100\n").await;
+        write(
+            dir.path(),
+            "guest-device-labels",
+            "aa:bb:cc:dd:ee:ff\tPhone\n",
+        )
+        .await;
+        write(
+            dir.path(),
+            "guest-device-ips",
+            "aa:bb:cc:dd:ee:ff\t192.168.3.100\n",
+        )
+        .await;
 
         let split_dir = tempdir().unwrap();
         let out_dir = tempdir().unwrap();

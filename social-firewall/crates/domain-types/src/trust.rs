@@ -162,7 +162,10 @@ mod tests {
     #[test]
     fn per_user_exclusion_is_a_distinct_flag_from_absence() {
         let rule = LocalTrustRule {
-            user: UserId { federation: FederationId(Hash32([0; 32])), local_id: Hash32([1; 32]) },
+            user: UserId {
+                federation: FederationId(Hash32([0; 32])),
+                local_id: Hash32([1; 32]),
+            },
             allow_weight: 0.0,
             deny_weight: 0.0,
             advisory_only: false,
@@ -179,7 +182,10 @@ mod tests {
     #[test]
     fn display_name_defaults_to_none_and_can_be_set() {
         let mut rule = LocalTrustRule {
-            user: UserId { federation: FederationId(Hash32([0; 32])), local_id: Hash32([1; 32]) },
+            user: UserId {
+                federation: FederationId(Hash32([0; 32])),
+                local_id: Hash32([1; 32]),
+            },
             allow_weight: 1.0,
             deny_weight: 1.0,
             advisory_only: false,
@@ -198,7 +204,10 @@ mod tests {
     #[test]
     fn tunnel_trust_flags_are_independent_of_each_other() {
         let rule = TunnelTrustRule {
-            user: UserId { federation: FederationId(Hash32([0; 32])), local_id: Hash32([1; 32]) },
+            user: UserId {
+                federation: FederationId(Hash32([0; 32])),
+                local_id: Hash32([1; 32]),
+            },
             auto_accept_requests: true,
             auto_consume_advertisements: false,
             auto_respond_to_service_requests: false,
@@ -216,7 +225,10 @@ mod tests {
     #[test]
     fn tunnel_trust_expiry_is_inclusive_of_the_boundary() {
         let rule = TunnelTrustRule {
-            user: UserId { federation: FederationId(Hash32([0; 32])), local_id: Hash32([1; 32]) },
+            user: UserId {
+                federation: FederationId(Hash32([0; 32])),
+                local_id: Hash32([1; 32]),
+            },
             auto_accept_requests: false,
             auto_consume_advertisements: false,
             auto_respond_to_service_requests: false,
@@ -232,7 +244,14 @@ mod tests {
 
     #[test]
     fn group_trust_expiry_is_inclusive_of_the_boundary() {
-        let rule = GroupTrustRule { group_id: GroupId(Hash32([1; 32])), allow_weight: 1.0, deny_weight: 1.0, excluded: false, expires_at: Some(100), created_at: 0 };
+        let rule = GroupTrustRule {
+            group_id: GroupId(Hash32([1; 32])),
+            allow_weight: 1.0,
+            deny_weight: 1.0,
+            excluded: false,
+            expires_at: Some(100),
+            created_at: 0,
+        };
         assert!(!rule.is_expired(99));
         assert!(rule.is_expired(100));
     }

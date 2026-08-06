@@ -14,10 +14,10 @@
 
 use crate::canonical::CanonicalEncode;
 use crate::ids::SignatureBytes;
+use crate::ids::UserId;
 use crate::opinion::{Reason, Stance, Timestamp};
 use crate::sharing::Visibility;
 use crate::target::TargetSelector;
-use crate::ids::UserId;
 
 /// One rule within a `SharedRuleList` — the same `target`/`stance`/
 /// `reason` shape `PolicyOpinion` uses for a single signed statement,
@@ -99,7 +99,10 @@ mod tests {
     use crate::opinion::{Reason, ReasonCode};
 
     fn user(byte: u8) -> UserId {
-        UserId { federation: FederationId(Hash32([byte; 32])), local_id: Hash32([byte + 1; 32]) }
+        UserId {
+            federation: FederationId(Hash32([byte; 32])),
+            local_id: Hash32([byte + 1; 32]),
+        }
     }
 
     fn sample_list() -> SharedRuleList {
@@ -113,7 +116,11 @@ mod tests {
             entries: vec![SharedRuleEntry {
                 target: TargetSelector::Domain("ads.example".into()),
                 stance: Stance::Deny,
-                reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] },
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
             }],
             issued_at: 1000,
             expires_at: None,
@@ -143,7 +150,11 @@ mod tests {
         b.entries.push(SharedRuleEntry {
             target: TargetSelector::Domain("more-ads.example".into()),
             stance: Stance::Deny,
-            reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] },
+            reason: Reason {
+                code: ReasonCode::Tracker,
+                note: None,
+                evidence: vec![],
+            },
         });
         assert_ne!(a.signing_bytes(), b.signing_bytes());
     }

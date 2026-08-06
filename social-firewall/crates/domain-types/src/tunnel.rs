@@ -100,7 +100,10 @@ impl TunnelAdvertisement {
     /// have applied the cap).
     pub fn validate_tags(&self) -> Result<(), String> {
         if self.tags.len() > MAX_TUNNEL_TAGS {
-            return Err(format!("advertisement has {} tags, more than the maximum of {MAX_TUNNEL_TAGS}", self.tags.len()));
+            return Err(format!(
+                "advertisement has {} tags, more than the maximum of {MAX_TUNNEL_TAGS}",
+                self.tags.len()
+            ));
         }
         Ok(())
     }
@@ -215,7 +218,10 @@ mod tests {
     use crate::ids::{FederationId, Hash32};
 
     fn user(n: u8) -> UserId {
-        UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([n; 32]) }
+        UserId {
+            federation: FederationId(Hash32([1; 32])),
+            local_id: Hash32([n; 32]),
+        }
     }
 
     fn advertisement() -> TunnelAdvertisement {
@@ -332,13 +338,22 @@ mod tests {
         let req = TunnelConnectionRequest {
             requester: user(2),
             sequence: 0,
-            advertisement: StatementRef { author: user(1), sequence: 0 },
+            advertisement: StatementRef {
+                author: user(1),
+                sequence: 0,
+            },
             requester_wg_pubkey: WgPublicKeyBytes([4; 32]),
             requester_messaging_pubkey: MessagingPublicKeyBytes([5; 32]),
             requested_at: 200,
             signature: SignatureBytes([0; 64]),
         };
-        assert_eq!(req.advertisement, StatementRef { author: user(1), sequence: 0 });
+        assert_eq!(
+            req.advertisement,
+            StatementRef {
+                author: user(1),
+                sequence: 0
+            }
+        );
     }
 
     #[test]
@@ -346,7 +361,10 @@ mod tests {
         let base = TunnelConnectionRequest {
             requester: user(2),
             sequence: 0,
-            advertisement: StatementRef { author: user(1), sequence: 0 },
+            advertisement: StatementRef {
+                author: user(1),
+                sequence: 0,
+            },
             requester_wg_pubkey: WgPublicKeyBytes([4; 32]),
             requester_messaging_pubkey: MessagingPublicKeyBytes([5; 32]),
             requested_at: 200,
@@ -361,7 +379,10 @@ mod tests {
     fn connection_accept_signing_bytes_excludes_signature() {
         let accept = TunnelConnectionAccept {
             provider: user(1),
-            request_ref: StatementRef { author: user(2), sequence: 0 },
+            request_ref: StatementRef {
+                author: user(2),
+                sequence: 0,
+            },
             assigned_tunnel_ip: "10.99.0.4".into(),
             assigned_tunnel_ip6: Some("fd99::c8:4".into()),
             accepted_at: 300,
@@ -375,7 +396,10 @@ mod tests {
         fn sample(ip6: Option<&str>) -> TunnelConnectionAccept {
             TunnelConnectionAccept {
                 provider: user(1),
-                request_ref: StatementRef { author: user(2), sequence: 0 },
+                request_ref: StatementRef {
+                    author: user(2),
+                    sequence: 0,
+                },
                 assigned_tunnel_ip: "10.99.0.4".into(),
                 assigned_tunnel_ip6: ip6.map(String::from),
                 accepted_at: 300,

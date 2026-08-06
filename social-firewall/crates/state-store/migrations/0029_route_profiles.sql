@@ -1,0 +1,7 @@
+CREATE TABLE local_route_profiles (
+    name TEXT PRIMARY KEY,
+    table_id INTEGER NOT NULL,
+    interface TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    vpn INTEGER NOT NULL DEFAULT 0
+) STRICT, WITHOUT ROWID;

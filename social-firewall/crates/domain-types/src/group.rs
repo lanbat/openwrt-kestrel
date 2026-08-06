@@ -164,7 +164,10 @@ impl Group {
     }
 
     pub fn is_member(&self, user: &UserId) -> bool {
-        self.owners.contains(user) || self.admins.contains(user) || self.voting_members.contains(user) || self.non_voting_members.contains(user)
+        self.owners.contains(user)
+            || self.admins.contains(user)
+            || self.voting_members.contains(user)
+            || self.non_voting_members.contains(user)
     }
 
     /// Owners and admins can always post, regardless of moderation.
@@ -342,7 +345,10 @@ mod tests {
     use crate::opinion::ReasonCode;
 
     fn user(n: u8) -> UserId {
-        UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([n; 32]) }
+        UserId {
+            federation: FederationId(Hash32([1; 32])),
+            local_id: Hash32([n; 32]),
+        }
     }
 
     fn group_id() -> GroupId {
@@ -456,9 +462,15 @@ mod tests {
     fn can_post_party_line_moderated_requires_explicit_voice() {
         let mut g = sample_group();
         g.party_line_moderated = true;
-        assert!(!g.can_post_party_line(&user(2)), "a plain member without voice must not be able to post while moderated");
+        assert!(
+            !g.can_post_party_line(&user(2)),
+            "a plain member without voice must not be able to post while moderated"
+        );
         g.voiced_members.push(user(2));
-        assert!(g.can_post_party_line(&user(2)), "an explicitly voiced member must be able to post");
+        assert!(
+            g.can_post_party_line(&user(2)),
+            "an explicitly voiced member must be able to post"
+        );
     }
 
     #[test]
@@ -491,7 +503,11 @@ mod tests {
             sequence: 0,
             target: TargetSelector::Domain("ads.example".into()),
             stance: Stance::Deny,
-            reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] },
+            reason: Reason {
+                code: ReasonCode::Tracker,
+                note: None,
+                evidence: vec![],
+            },
             issued_at: 0,
             expires_at: Some(100),
             signature: SignatureBytes([0; 64]),
@@ -507,7 +523,11 @@ mod tests {
             reporter: user(1),
             sequence: 0,
             blocked_user: user(2),
-            reason: Reason { code: ReasonCode::AbuseReport, note: Some("spammed the party line".into()), evidence: vec![] },
+            reason: Reason {
+                code: ReasonCode::AbuseReport,
+                note: Some("spammed the party line".into()),
+                evidence: vec![],
+            },
             issued_at: 100,
             signature: SignatureBytes([9; 64]),
         };
@@ -521,7 +541,11 @@ mod tests {
             reporter: user(1),
             sequence: 0,
             blocked_user: user(2),
-            reason: Reason { code: ReasonCode::AbuseReport, note: None, evidence: vec![] },
+            reason: Reason {
+                code: ReasonCode::AbuseReport,
+                note: None,
+                evidence: vec![],
+            },
             issued_at: 100,
             signature: SignatureBytes([0; 64]),
         };
@@ -532,7 +556,15 @@ mod tests {
 
     #[test]
     fn party_line_signing_bytes_change_with_body() {
-        let base = PartyLineMessage { group_id: group_id(), author: user(1), sequence: 0, body: "hello".into(), in_reply_to: None, issued_at: 0, signature: SignatureBytes([0; 64]) };
+        let base = PartyLineMessage {
+            group_id: group_id(),
+            author: user(1),
+            sequence: 0,
+            body: "hello".into(),
+            in_reply_to: None,
+            issued_at: 0,
+            signature: SignatureBytes([0; 64]),
+        };
         let mut other = base.clone();
         other.body = "goodbye".into();
         assert_ne!(base.signing_bytes(), other.signing_bytes());
@@ -540,13 +572,29 @@ mod tests {
 
     #[test]
     fn party_line_signing_bytes_change_with_in_reply_to() {
-        let base = PartyLineMessage { group_id: group_id(), author: user(1), sequence: 0, body: "this is a CDN, not malware".into(), in_reply_to: None, issued_at: 0, signature: SignatureBytes([0; 64]) };
+        let base = PartyLineMessage {
+            group_id: group_id(),
+            author: user(1),
+            sequence: 0,
+            body: "this is a CDN, not malware".into(),
+            in_reply_to: None,
+            issued_at: 0,
+            signature: SignatureBytes([0; 64]),
+        };
         let mut with_reply = base.clone();
         with_reply.in_reply_to = Some(TargetSelector::Domain("ads.example".into()));
-        assert_ne!(base.signing_bytes(), with_reply.signing_bytes(), "a plain message and a reply-to-a-target message must not sign identically");
+        assert_ne!(
+            base.signing_bytes(),
+            with_reply.signing_bytes(),
+            "a plain message and a reply-to-a-target message must not sign identically"
+        );
 
         let mut other_target = with_reply.clone();
         other_target.in_reply_to = Some(TargetSelector::Domain("other.example".into()));
-        assert_ne!(with_reply.signing_bytes(), other_target.signing_bytes(), "replying to a different target must change the signed bytes");
+        assert_ne!(
+            with_reply.signing_bytes(),
+            other_target.signing_bytes(),
+            "replying to a different target must change the signed bytes"
+        );
     }
 }

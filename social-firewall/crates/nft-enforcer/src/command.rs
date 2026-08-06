@@ -13,10 +13,18 @@ pub struct CommandOutput {
 
 impl CommandOutput {
     pub fn ok(stdout: impl Into<String>) -> Self {
-        Self { success: true, stdout: stdout.into(), stderr: String::new() }
+        Self {
+            success: true,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
     }
     pub fn err(stderr: impl Into<String>) -> Self {
-        Self { success: false, stdout: String::new(), stderr: stderr.into() }
+        Self {
+            success: false,
+            stdout: String::new(),
+            stderr: stderr.into(),
+        }
     }
 }
 
@@ -34,7 +42,13 @@ impl CommandRunner for SystemCommandRunner {
         use std::io::Read;
         use std::process::{Command, Stdio};
 
-        let mut child = match Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        let mut child = match Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
             Ok(c) => c,
             Err(e) => return CommandOutput::err(format!("failed to spawn {program}: {e}")),
         };
@@ -65,8 +79,16 @@ impl CommandRunner for SystemCommandRunner {
         }
 
         match status {
-            Some(status) => CommandOutput { success: status.success(), stdout, stderr },
-            None => CommandOutput { success: false, stdout, stderr: format!("{program} timed out after {timeout:?}") },
+            Some(status) => CommandOutput {
+                success: status.success(),
+                stdout,
+                stderr,
+            },
+            None => CommandOutput {
+                success: false,
+                stdout,
+                stderr: format!("{program} timed out after {timeout:?}"),
+            },
         }
     }
 }
@@ -88,14 +110,21 @@ pub struct FakeCommandRunner {
 
 impl FakeCommandRunner {
     pub fn new_all_success() -> Self {
-        Self { calls: std::sync::Mutex::new(Vec::new()), failures: std::sync::Mutex::new(Vec::new()), default_stdout: std::sync::Mutex::new(String::new()) }
+        Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+            failures: std::sync::Mutex::new(Vec::new()),
+            default_stdout: std::sync::Mutex::new(String::new()),
+        }
     }
 
     /// The next call matching `pred(program, args)` returns a failure;
     /// all other calls (including earlier/later non-matching ones)
     /// succeed. Consumed after one match — call again to fail more than
     /// once.
-    pub fn fail_next_matching(&self, pred: impl Fn(&str, &[String]) -> bool + Send + Sync + 'static) {
+    pub fn fail_next_matching(
+        &self,
+        pred: impl Fn(&str, &[String]) -> bool + Send + Sync + 'static,
+    ) {
         self.failures.lock().unwrap().push(Box::new(pred));
     }
 
@@ -118,7 +147,10 @@ impl FakeCommandRunner {
 impl CommandRunner for FakeCommandRunner {
     fn run(&self, program: &str, args: &[&str], _timeout: Duration) -> CommandOutput {
         let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        self.calls.lock().unwrap().push((program.to_string(), args_owned.clone()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((program.to_string(), args_owned.clone()));
 
         let mut failures = self.failures.lock().unwrap();
         if let Some(pos) = failures.iter().position(|pred| pred(program, &args_owned)) {
@@ -149,18 +181,27 @@ mod tests {
     #[test]
     fn fail_next_matching_only_fails_once() {
         let runner = FakeCommandRunner::new_all_success();
-        runner.fail_next_matching(|p, a| p == "nft" && a.first().map(String::as_str) == Some("--check"));
+        runner.fail_next_matching(|p, a| {
+            p == "nft" && a.first().map(String::as_str) == Some("--check")
+        });
 
         let first = runner.run("nft", &["--check", "-f", "a.nft"], Duration::from_secs(1));
         assert!(!first.success);
         let second = runner.run("nft", &["--check", "-f", "a.nft"], Duration::from_secs(1));
-        assert!(second.success, "the failure should be consumed after the first matching call");
+        assert!(
+            second.success,
+            "the failure should be consumed after the first matching call"
+        );
     }
 
     #[test]
     fn system_runner_reports_failure_for_a_missing_binary() {
         let runner = SystemCommandRunner;
-        let out = runner.run("definitely-not-a-real-binary-xyz", &[], Duration::from_secs(1));
+        let out = runner.run(
+            "definitely-not-a-real-binary-xyz",
+            &[],
+            Duration::from_secs(1),
+        );
         assert!(!out.success);
     }
 
@@ -178,6 +219,9 @@ mod tests {
         let start = std::time::Instant::now();
         let out = runner.run("sleep", &["5"], Duration::from_millis(200));
         assert!(!out.success);
-        assert!(start.elapsed() < Duration::from_secs(2), "must not wait for the full sleep duration");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "must not wait for the full sleep duration"
+        );
     }
 }

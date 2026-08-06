@@ -30,6 +30,9 @@ pub struct NetworkConf {
     /// it's non-destructive and always human-confirmed, but some
     /// households would rather it just not guess.
     pub fingerprint_suggest: bool,
+    /// Passive packet metadata capture is opt-in because raw sockets require
+    /// extra privileges and are not available on every OpenWrt build.
+    pub fingerprint_packet_capture: bool,
 }
 
 pub async fn read_all_network_confs(base_dir: &Path) -> Vec<NetworkConf> {
@@ -68,12 +71,23 @@ pub fn iface_for_ip(confs: &[NetworkConf], ip: &str) -> Option<String> {
     let target_bits = u32::from(target);
     for conf in confs {
         let mut parts = conf.subnet.splitn(2, '/');
-        let Some(net_ip) = parts.next().and_then(|s| s.parse::<std::net::Ipv4Addr>().ok()) else { continue };
-        let Some(prefix) = parts.next().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let Some(net_ip) = parts
+            .next()
+            .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok())
+        else {
+            continue;
+        };
+        let Some(prefix) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
         if prefix > 32 {
             continue;
         }
-        let mask: u32 = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+        let mask: u32 = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
         if (target_bits & mask) == (u32::from(net_ip) & mask) {
             return Some(conf.iface.clone());
         }
@@ -86,9 +100,7 @@ fn parse_notify_conf(filename: &str, content: &str) -> Option<NetworkConf> {
     let iface = vars
         .get("IFACE_NAME")
         .cloned()
-        .or_else(|| {
-            filename.strip_suffix("-notify.conf").map(|s| s.to_string())
-        })?;
+        .or_else(|| filename.strip_suffix("-notify.conf").map(|s| s.to_string()))?;
 
     if iface.is_empty() {
         return None;
@@ -99,19 +111,28 @@ fn parse_notify_conf(filename: &str, content: &str) -> Option<NetworkConf> {
         notify_url: vars.get("NOTIFY_URL").cloned().unwrap_or_default(),
         subnet: vars.get("SUBNET").cloned().unwrap_or_default(),
         rate_limit: vars.get("RATE_LIMIT").cloned().unwrap_or_default(),
-        rate_limit_per_device: vars.get("RATE_LIMIT_PER_DEVICE").cloned().unwrap_or_default(),
+        rate_limit_per_device: vars
+            .get("RATE_LIMIT_PER_DEVICE")
+            .cloned()
+            .unwrap_or_default(),
         dns_server: vars.get("DNS_SERVER").cloned().unwrap_or_default(),
         dns_server_v6: vars.get("DNS_SERVER_V6").cloned().unwrap_or_default(),
         dot: vars.get("DOT").map(|v| v == "yes").unwrap_or(false),
         lan_access: vars.get("LAN_ACCESS").map(|v| v == "yes").unwrap_or(false),
         isolate: vars.get("ISOLATE").map(|v| v != "no").unwrap_or(true),
         notify_join: vars.get("NOTIFY_JOIN").map(|v| v == "yes").unwrap_or(false),
-        join_approval: vars.get("JOIN_APPROVAL").map(|v| v == "yes").unwrap_or(false),
+        join_approval: vars
+            .get("JOIN_APPROVAL")
+            .map(|v| v == "yes")
+            .unwrap_or(false),
         join_history_retention: vars
             .get("JOIN_HISTORY_RETENTION")
             .cloned()
             .unwrap_or_else(|| "90d".to_string()),
-        rotate_password: vars.get("ROTATE_PASSWORD").map(|v| v == "yes").unwrap_or(false),
+        rotate_password: vars
+            .get("ROTATE_PASSWORD")
+            .map(|v| v == "yes")
+            .unwrap_or(false),
         show_qr: if iface == "untrusted" {
             false
         } else {
@@ -122,12 +143,22 @@ fn parse_notify_conf(filename: &str, content: &str) -> Option<NetworkConf> {
             .get("BANDWIDTH_THRESHOLD_MB")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
-        device_control: vars.get("DEVICE_CONTROL").map(|v| v == "yes").unwrap_or(false),
+        device_control: vars
+            .get("DEVICE_CONTROL")
+            .map(|v| v == "yes")
+            .unwrap_or(false),
         default_duration: vars
             .get("DEFAULT_DURATION")
             .cloned()
             .unwrap_or_else(|| "24h".to_string()),
-        fingerprint_suggest: vars.get("FINGERPRINT_SUGGEST").map(|v| v != "no").unwrap_or(true),
+        fingerprint_suggest: vars
+            .get("FINGERPRINT_SUGGEST")
+            .map(|v| v != "no")
+            .unwrap_or(true),
+        fingerprint_packet_capture: vars
+            .get("FINGERPRINT_PACKET_CAPTURE")
+            .map(|v| v == "yes")
+            .unwrap_or(false),
     })
 }
 
@@ -143,7 +174,10 @@ pub fn parse_sh_vars(content: &str) -> HashMap<String, String> {
         if let Some(eq) = line.find('=') {
             let key = &line[..eq];
             if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                let val = line[eq + 1..].trim_matches('"').trim_matches('\'').to_string();
+                let val = line[eq + 1..]
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
                 map.insert(key.to_string(), val);
             }
         }
@@ -260,8 +294,17 @@ pub async fn read_device_rules(path: &Path) -> Vec<DeviceRule> {
             let port = f.next().unwrap_or("").trim().to_string();
             let proto = f.next().unwrap_or("").trim().to_string();
             let route = f.next().unwrap_or("").trim().to_string();
-            if mac.is_empty() || dst.is_empty() { None } else {
-                Some(DeviceRule { mac, dst, action, port, proto, route })
+            if mac.is_empty() || dst.is_empty() {
+                None
+            } else {
+                Some(DeviceRule {
+                    mac,
+                    dst,
+                    action,
+                    port,
+                    proto,
+                    route,
+                })
             }
         })
         .collect()
@@ -277,7 +320,11 @@ pub async fn read_mac_ip_map(path: &Path) -> HashMap<String, String> {
             let mut parts = l.splitn(2, '\t');
             let mac = parts.next()?.trim().to_lowercase();
             let ip = parts.next()?.trim().to_string();
-            if mac.is_empty() || ip.is_empty() { None } else { Some((mac, ip)) }
+            if mac.is_empty() || ip.is_empty() {
+                None
+            } else {
+                Some((mac, ip))
+            }
         })
         .collect()
 }
@@ -296,16 +343,41 @@ pub async fn read_device_limits(path: &Path) -> HashMap<String, u32> {
         .collect()
 }
 
+/// This is a hand-edited file (`install.sh` seeds it with a `#`-commented
+/// header and a commented example line, documenting a whitespace-separated
+/// `mac ip description` format for an admin to add entries to directly —
+/// see `install.sh`'s `MACEOF` heredoc). Real enforcement (the
+/// `51-{iface}-macfilter` hotplug script `install.sh` also installs)
+/// already parses it exactly this way (`while read -r mac ip rest; case
+/// "$mac" in '#'*|'') continue ;; esac`) — this reader previously required
+/// a literal tab and never skipped comment lines, so every comment/example
+/// line in the file was silently ingested as a bogus "allowed MAC" in the
+/// dashboard's own view (though never in real enforcement, which only ever
+/// went through the shell parser above). Fixed to match the shell parser's
+/// actual, real-world behavior.
 pub async fn read_allowed_macs(path: &Path) -> Vec<AllowedMac> {
     read_lines(path)
         .await
         .into_iter()
         .filter_map(|l| {
-            let mut f = l.splitn(3, '\t');
-            let mac = f.next()?.trim().to_lowercase();
-            let ip = f.next().unwrap_or("").trim().to_string();
-            let label = f.next().unwrap_or("").trim().to_string();
-            if mac.is_empty() { None } else { Some(AllowedMac { mac, ip, label }) }
+            let l = l.trim();
+            if l.is_empty() || l.starts_with('#') {
+                return None;
+            }
+            // `split_whitespace` (not `splitn` on a `char::is_whitespace`
+            // pattern, which would treat each run of multiple spaces as
+            // several empty fields) so the file's human-typical
+            // multi-space column alignment parses the same way the shell
+            // `read -r mac ip rest` parser above already does.
+            let mut words = l.split_whitespace();
+            let mac = words.next()?.to_lowercase();
+            let ip = words.next().unwrap_or("").to_string();
+            let label = words.collect::<Vec<_>>().join(" ");
+            if mac.is_empty() {
+                None
+            } else {
+                Some(AllowedMac { mac, ip, label })
+            }
         })
         .collect()
 }
@@ -321,7 +393,16 @@ pub async fn read_pending_conns(path: &Path) -> Vec<PendingConn> {
             let port = f.next().unwrap_or("").trim().to_string();
             let proto = f.next().unwrap_or("").trim().to_string();
             let ts: u64 = f.next().unwrap_or("0").trim().parse().unwrap_or(0);
-            if dst.is_empty() { None } else { Some(PendingConn { dst, port, proto, ts }) }
+            if dst.is_empty() {
+                None
+            } else {
+                Some(PendingConn {
+                    dst,
+                    port,
+                    proto,
+                    ts,
+                })
+            }
         })
         .collect()
 }
@@ -351,7 +432,16 @@ pub async fn read_plugin_notes(path: &Path) -> Vec<PluginNote> {
             let dst = f.next()?.trim().to_string();
             let plugin_name = f.next().unwrap_or("").trim().to_string();
             let note = f.next().unwrap_or("").trim().to_string();
-            if mac.is_empty() || dst.is_empty() { None } else { Some(PluginNote { mac, dst, plugin_name, note }) }
+            if mac.is_empty() || dst.is_empty() {
+                None
+            } else {
+                Some(PluginNote {
+                    mac,
+                    dst,
+                    plugin_name,
+                    note,
+                })
+            }
         })
         .collect()
 }
@@ -361,7 +451,13 @@ pub async fn read_plugin_notes(path: &Path) -> Vec<PluginNote> {
 /// one. An empty `note` still replaces/appends a (now-empty) line rather
 /// than removing it — a plugin clearing its own note is a normal update,
 /// not a delete a different mechanism needs to handle.
-pub async fn upsert_plugin_note(path: &Path, mac: &str, dst: &str, plugin_name: &str, note: &str) -> std::io::Result<()> {
+pub async fn upsert_plugin_note(
+    path: &Path,
+    mac: &str,
+    dst: &str,
+    plugin_name: &str,
+    note: &str,
+) -> std::io::Result<()> {
     let mac_lc = mac.to_lowercase();
     let new_line = format!("{mac_lc}\t{dst}\t{plugin_name}\t{note}");
     let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
@@ -396,7 +492,11 @@ pub async fn read_oui(path: &Path) -> HashMap<String, String> {
             let mut parts = l.splitn(2, '\t');
             let prefix = parts.next()?.trim().to_uppercase();
             let vendor = parts.next()?.trim().to_string();
-            if prefix.is_empty() { None } else { Some((prefix, vendor)) }
+            if prefix.is_empty() {
+                None
+            } else {
+                Some((prefix, vendor))
+            }
         })
         .collect()
 }
@@ -446,13 +546,18 @@ pub fn is_valid_iface(s: &str) -> bool {
 pub fn is_valid_mac(mac: &str) -> bool {
     mac.len() == 17
         && mac.chars().enumerate().all(|(i, c)| {
-            if i % 3 == 2 { c == ':' } else { c.is_ascii_hexdigit() }
+            if i % 3 == 2 {
+                c == ':'
+            } else {
+                c.is_ascii_hexdigit()
+            }
         })
 }
 
 pub fn is_valid_domain(s: &str) -> bool {
     !s.is_empty()
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
         && !s.starts_with('.')
         && !s.ends_with('.')
 }
@@ -469,7 +574,8 @@ pub fn is_valid_plugin_name(s: &str) -> bool {
         && s.len() <= 100
         && s != "."
         && s != ".."
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 /// Whether `mac` has the locally-administered bit set (bit 1 of the first
@@ -552,7 +658,12 @@ pub async fn file_remove_rule(path: &Path, mac: &str, dst: &str) -> std::io::Res
 }
 
 /// Remove a specific `dst\tport\tproto` entry from a pending-connections file.
-pub async fn file_remove_pending(path: &Path, dst: &str, port: &str, proto: &str) -> std::io::Result<()> {
+pub async fn file_remove_pending(
+    path: &Path,
+    dst: &str,
+    port: &str,
+    proto: &str,
+) -> std::io::Result<()> {
     let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
     let out: String = existing
         .lines()
@@ -698,7 +809,10 @@ mod tests {
     fn sh_vars_value_with_equals_sign() {
         // Only the first '=' splits; the rest is part of the value
         let vars = parse_sh_vars("URL=https://example.com/path?a=1\n");
-        assert_eq!(vars.get("URL").map(|s| s.as_str()), Some("https://example.com/path?a=1"));
+        assert_eq!(
+            vars.get("URL").map(|s| s.as_str()),
+            Some("https://example.com/path?a=1")
+        );
     }
 
     // ── parse_notify_conf (via parse_sh_vars) ──────────────────────────────
@@ -719,7 +833,10 @@ JOIN_HISTORY_RETENTION=30d
         assert_eq!(vars.get("IFACE_NAME").map(|s| s.as_str()), Some("guest"));
         assert_eq!(vars.get("DOT").map(|s| s.as_str()), Some("yes"));
         assert_eq!(vars.get("LAN_ACCESS").map(|s| s.as_str()), Some("no"));
-        assert_eq!(vars.get("BANDWIDTH_THRESHOLD_MB").map(|s| s.as_str()), Some("100"));
+        assert_eq!(
+            vars.get("BANDWIDTH_THRESHOLD_MB").map(|s| s.as_str()),
+            Some("100")
+        );
     }
 
     #[test]
@@ -730,21 +847,47 @@ JOIN_HISTORY_RETENTION=30d
 
     #[test]
     fn fingerprint_suggest_can_be_disabled() {
-        let conf = parse_notify_conf("guest-notify.conf", "IFACE_NAME=guest\nFINGERPRINT_SUGGEST=no\n").unwrap();
+        let conf = parse_notify_conf(
+            "guest-notify.conf",
+            "IFACE_NAME=guest\nFINGERPRINT_SUGGEST=no\n",
+        )
+        .unwrap();
         assert!(!conf.fingerprint_suggest);
+    }
+
+    #[test]
+    fn packet_capture_defaults_to_disabled_and_is_explicit() {
+        let conf = parse_notify_conf("guest-notify.conf", "IFACE_NAME=guest\n").unwrap();
+        assert!(!conf.fingerprint_packet_capture);
+        let conf = parse_notify_conf(
+            "guest-notify.conf",
+            "IFACE_NAME=guest\nFINGERPRINT_PACKET_CAPTURE=yes\n",
+        )
+        .unwrap();
+        assert!(conf.fingerprint_packet_capture);
     }
 
     // ── iface_for_ip ──────────────────────────────────────────────────────────
 
     fn conf(iface: &str, subnet: &str) -> NetworkConf {
-        NetworkConf { iface: iface.to_string(), subnet: subnet.to_string(), ..Default::default() }
+        NetworkConf {
+            iface: iface.to_string(),
+            subnet: subnet.to_string(),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn iface_for_ip_matches_containing_subnet() {
-        let confs = vec![conf("guest", "10.10.0.0/24"), conf("untrusted", "10.20.0.0/24")];
+        let confs = vec![
+            conf("guest", "10.10.0.0/24"),
+            conf("untrusted", "10.20.0.0/24"),
+        ];
         assert_eq!(iface_for_ip(&confs, "10.10.0.5"), Some("guest".to_string()));
-        assert_eq!(iface_for_ip(&confs, "10.20.0.5"), Some("untrusted".to_string()));
+        assert_eq!(
+            iface_for_ip(&confs, "10.20.0.5"),
+            Some("untrusted".to_string())
+        );
     }
 
     #[test]
@@ -755,7 +898,10 @@ JOIN_HISTORY_RETENTION=30d
 
     #[test]
     fn iface_for_ip_ignores_conf_with_malformed_subnet() {
-        let confs = vec![conf("broken", "not-a-subnet"), conf("guest", "10.10.0.0/24")];
+        let confs = vec![
+            conf("broken", "not-a-subnet"),
+            conf("guest", "10.10.0.0/24"),
+        ];
         assert_eq!(iface_for_ip(&confs, "10.10.0.5"), Some("guest".to_string()));
     }
 
@@ -780,16 +926,23 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_labels_parses_tab_separated_mac_label() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("labels");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\tAlice's Phone\n").await.unwrap();
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\tAlice's Phone\n")
+            .await
+            .unwrap();
         let labels = read_labels(&path).await;
-        assert_eq!(labels.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()), Some("Alice's Phone"));
+        assert_eq!(
+            labels.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()),
+            Some("Alice's Phone")
+        );
     }
 
     #[tokio::test]
     async fn read_labels_skips_missing_label() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("labels");
-        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\n").await.unwrap();
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\n")
+            .await
+            .unwrap();
         assert!(read_labels(&path).await.is_empty());
     }
 
@@ -797,7 +950,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn mac_in_file_case_insensitive_match() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("macs");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\n").await.unwrap();
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\n")
+            .await
+            .unwrap();
         assert!(mac_in_file(&path, "aa:bb:cc:dd:ee:ff").await);
         assert!(!mac_in_file(&path, "11:22:33:44:55:66").await);
     }
@@ -806,9 +961,14 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_pending_parses_mac_space_ip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pending");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF 10.0.0.5\n").await.unwrap();
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF 10.0.0.5\n")
+            .await
+            .unwrap();
         let pending = read_pending(&path).await;
-        assert_eq!(pending.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()), Some("10.0.0.5"));
+        assert_eq!(
+            pending.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()),
+            Some("10.0.0.5")
+        );
     }
 
     // ── read_device_rules / read_mac_ip_map / read_device_limits ─────────────
@@ -817,7 +977,12 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_device_rules_parses_full_row() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rules");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\texample.com\tallow\t443\ttcp\troute1\n").await.unwrap();
+        tokio::fs::write(
+            &path,
+            "AA:BB:CC:DD:EE:FF\texample.com\tallow\t443\ttcp\troute1\n",
+        )
+        .await
+        .unwrap();
         let rules = read_device_rules(&path).await;
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].mac, "aa:bb:cc:dd:ee:ff");
@@ -832,7 +997,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_device_rules_skips_row_missing_dst() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rules");
-        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\n").await.unwrap();
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\n")
+            .await
+            .unwrap();
         assert!(read_device_rules(&path).await.is_empty());
     }
 
@@ -840,16 +1007,23 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_mac_ip_map_parses_two_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ips");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t10.0.0.5\n").await.unwrap();
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t10.0.0.5\n")
+            .await
+            .unwrap();
         let map = read_mac_ip_map(&path).await;
-        assert_eq!(map.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()), Some("10.0.0.5"));
+        assert_eq!(
+            map.get("aa:bb:cc:dd:ee:ff").map(|s| s.as_str()),
+            Some("10.0.0.5")
+        );
     }
 
     #[tokio::test]
     async fn read_device_limits_parses_numeric_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("limits");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t250\n").await.unwrap();
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t250\n")
+            .await
+            .unwrap();
         let map = read_device_limits(&path).await;
         assert_eq!(map.get("aa:bb:cc:dd:ee:ff").copied(), Some(250));
     }
@@ -858,7 +1032,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_device_limits_skips_non_numeric_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("limits");
-        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\tunlimited\n").await.unwrap();
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\tunlimited\n")
+            .await
+            .unwrap();
         assert!(read_device_limits(&path).await.is_empty());
     }
 
@@ -866,7 +1042,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_allowed_macs_parses_three_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("allowed");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t10.0.0.5\tAlice\n").await.unwrap();
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\t10.0.0.5\tAlice\n")
+            .await
+            .unwrap();
         let macs = read_allowed_macs(&path).await;
         assert_eq!(macs.len(), 1);
         assert_eq!(macs[0].mac, "aa:bb:cc:dd:ee:ff");
@@ -874,11 +1052,40 @@ JOIN_HISTORY_RETENTION=30d
         assert_eq!(macs[0].label, "Alice");
     }
 
+    /// Matches the file's real, human-edited shape — see `install.sh`'s
+    /// `MACEOF` heredoc: a `#`-commented header/example, then
+    /// whitespace-(not tab-)separated real entries.
+    #[tokio::test]
+    async fn read_allowed_macs_skips_comments_and_blanks_and_handles_multi_space_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allowed");
+        tokio::fs::write(
+            &path,
+            "# Devices allowed on the untrusted network.\n\
+             # Format: mac  ip  description\n\
+             \n\
+             aa:bb:cc:dd:ee:02  192.168.4.232  My Test Device\n",
+        )
+        .await
+        .unwrap();
+        let macs = read_allowed_macs(&path).await;
+        assert_eq!(
+            macs.len(),
+            1,
+            "comment/blank lines must not be ingested as fake entries: {macs:?}"
+        );
+        assert_eq!(macs[0].mac, "aa:bb:cc:dd:ee:02");
+        assert_eq!(macs[0].ip, "192.168.4.232");
+        assert_eq!(macs[0].label, "My Test Device");
+    }
+
     #[tokio::test]
     async fn read_pending_conns_parses_four_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pending-conn");
-        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t1000\n").await.unwrap();
+        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t1000\n")
+            .await
+            .unwrap();
         let conns = read_pending_conns(&path).await;
         assert_eq!(conns.len(), 1);
         assert_eq!(conns[0].dst, "1.2.3.4");
@@ -891,7 +1098,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_pending_conns_defaults_missing_ts_to_zero() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pending-conn");
-        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\n").await.unwrap();
+        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\n")
+            .await
+            .unwrap();
         let conns = read_pending_conns(&path).await;
         assert_eq!(conns[0].ts, 0);
     }
@@ -903,7 +1112,9 @@ JOIN_HISTORY_RETENTION=30d
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("oui");
         // 6-char (MA-L) and 9-char (MA-S) prefixes, per oui_lookup's [9, 7, 6] search order.
-        tokio::fs::write(&path, "AABBCC\tGeneric Corp\nAABBCCDDE\tSpecific Corp\n").await.unwrap();
+        tokio::fs::write(&path, "AABBCC\tGeneric Corp\nAABBCCDDE\tSpecific Corp\n")
+            .await
+            .unwrap();
         let oui = read_oui(&path).await;
         assert_eq!(oui_lookup(&oui, "AA:BB:CC:DD:E0:00"), "Specific Corp");
         assert_eq!(oui_lookup(&oui, "AA:BB:CC:11:22:33"), "Generic Corp");
@@ -1001,7 +1212,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn file_upsert_by_mac_appends_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
-        file_upsert_by_mac(&path, "aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff\tAlice").await.unwrap();
+        file_upsert_by_mac(&path, "aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff\tAlice")
+            .await
+            .unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "aa:bb:cc:dd:ee:ff\tAlice\n");
     }
@@ -1010,18 +1223,32 @@ JOIN_HISTORY_RETENTION=30d
     async fn file_upsert_by_mac_replaces_existing_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
-        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\tOldLabel\nbb:bb:bb:bb:bb:bb\tOther\n").await.unwrap();
-        file_upsert_by_mac(&path, "AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff\tNewLabel").await.unwrap();
+        tokio::fs::write(
+            &path,
+            "aa:bb:cc:dd:ee:ff\tOldLabel\nbb:bb:bb:bb:bb:bb\tOther\n",
+        )
+        .await
+        .unwrap();
+        file_upsert_by_mac(&path, "AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff\tNewLabel")
+            .await
+            .unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
-        assert_eq!(content, "aa:bb:cc:dd:ee:ff\tNewLabel\nbb:bb:bb:bb:bb:bb\tOther\n");
+        assert_eq!(
+            content,
+            "aa:bb:cc:dd:ee:ff\tNewLabel\nbb:bb:bb:bb:bb:bb\tOther\n"
+        );
     }
 
     #[tokio::test]
     async fn file_remove_by_mac_removes_matching_line_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
-        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\tAlice\nbb:bb:bb:bb:bb:bb\tBob\n").await.unwrap();
-        file_remove_by_mac(&path, "AA:BB:CC:DD:EE:FF").await.unwrap();
+        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\tAlice\nbb:bb:bb:bb:bb:bb\tBob\n")
+            .await
+            .unwrap();
+        file_remove_by_mac(&path, "AA:BB:CC:DD:EE:FF")
+            .await
+            .unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "bb:bb:bb:bb:bb:bb\tBob\n");
     }
@@ -1030,10 +1257,15 @@ JOIN_HISTORY_RETENTION=30d
     async fn file_remove_rule_matches_mac_and_dst_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rules");
-        tokio::fs::write(&path,
-            "aa:bb:cc:dd:ee:ff\texample.com\tallow\t\t\naa:bb:cc:dd:ee:ff\tother.com\tallow\t\t\n"
-        ).await.unwrap();
-        file_remove_rule(&path, "aa:bb:cc:dd:ee:ff", "example.com").await.unwrap();
+        tokio::fs::write(
+            &path,
+            "aa:bb:cc:dd:ee:ff\texample.com\tallow\t\t\naa:bb:cc:dd:ee:ff\tother.com\tallow\t\t\n",
+        )
+        .await
+        .unwrap();
+        file_remove_rule(&path, "aa:bb:cc:dd:ee:ff", "example.com")
+            .await
+            .unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "aa:bb:cc:dd:ee:ff\tother.com\tallow\t\t\n");
     }
@@ -1042,8 +1274,12 @@ JOIN_HISTORY_RETENTION=30d
     async fn file_remove_pending_matches_dst_port_proto_case_insensitive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pending-conn");
-        tokio::fs::write(&path, "1.2.3.4\t443\tTCP\t1000\n1.2.3.4\t80\ttcp\t1000\n").await.unwrap();
-        file_remove_pending(&path, "1.2.3.4", "443", "tcp").await.unwrap();
+        tokio::fs::write(&path, "1.2.3.4\t443\tTCP\t1000\n1.2.3.4\t80\ttcp\t1000\n")
+            .await
+            .unwrap();
+        file_remove_pending(&path, "1.2.3.4", "443", "tcp")
+            .await
+            .unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "1.2.3.4\t80\ttcp\t1000\n");
     }
@@ -1054,7 +1290,12 @@ JOIN_HISTORY_RETENTION=30d
     async fn read_plugin_notes_parses_four_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugin-notes");
-        tokio::fs::write(&path, "aa:bb:cc:dd:ee:ff\t1.2.3.4\tmy-plugin\tflagged by my feed\n").await.unwrap();
+        tokio::fs::write(
+            &path,
+            "aa:bb:cc:dd:ee:ff\t1.2.3.4\tmy-plugin\tflagged by my feed\n",
+        )
+        .await
+        .unwrap();
         let notes = read_plugin_notes(&path).await;
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].mac, "aa:bb:cc:dd:ee:ff");
@@ -1067,7 +1308,15 @@ JOIN_HISTORY_RETENTION=30d
     async fn upsert_plugin_note_appends_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugin-notes");
-        upsert_plugin_note(&path, "AA:BB:CC:DD:EE:FF", "1.2.3.4", "my-plugin", "note one").await.unwrap();
+        upsert_plugin_note(
+            &path,
+            "AA:BB:CC:DD:EE:FF",
+            "1.2.3.4",
+            "my-plugin",
+            "note one",
+        )
+        .await
+        .unwrap();
         let notes = read_plugin_notes(&path).await;
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].note, "note one");
@@ -1077,8 +1326,24 @@ JOIN_HISTORY_RETENTION=30d
     async fn upsert_plugin_note_replaces_existing_entry_for_same_mac_and_dst() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugin-notes");
-        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "1.2.3.4", "my-plugin", "old note").await.unwrap();
-        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "1.2.3.4", "my-plugin", "new note").await.unwrap();
+        upsert_plugin_note(
+            &path,
+            "aa:bb:cc:dd:ee:ff",
+            "1.2.3.4",
+            "my-plugin",
+            "old note",
+        )
+        .await
+        .unwrap();
+        upsert_plugin_note(
+            &path,
+            "aa:bb:cc:dd:ee:ff",
+            "1.2.3.4",
+            "my-plugin",
+            "new note",
+        )
+        .await
+        .unwrap();
         let notes = read_plugin_notes(&path).await;
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].note, "new note");
@@ -1088,8 +1353,12 @@ JOIN_HISTORY_RETENTION=30d
     async fn upsert_plugin_note_keeps_notes_for_other_destinations() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugin-notes");
-        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "1.2.3.4", "my-plugin", "note a").await.unwrap();
-        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "5.6.7.8", "my-plugin", "note b").await.unwrap();
+        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "1.2.3.4", "my-plugin", "note a")
+            .await
+            .unwrap();
+        upsert_plugin_note(&path, "aa:bb:cc:dd:ee:ff", "5.6.7.8", "my-plugin", "note b")
+            .await
+            .unwrap();
         let notes = read_plugin_notes(&path).await;
         assert_eq!(notes.len(), 2);
     }
@@ -1115,7 +1384,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn file_remove_line_case_insensitive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\nbb:bb:bb:bb:bb:bb\n").await.unwrap();
+        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF\nbb:bb:bb:bb:bb:bb\n")
+            .await
+            .unwrap();
         file_remove_line(&path, "aa:bb:cc:dd:ee:ff").await.unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "bb:bb:bb:bb:bb:bb\n");
@@ -1125,8 +1396,15 @@ JOIN_HISTORY_RETENTION=30d
     async fn file_remove_space_prefix_matches_first_token_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
-        tokio::fs::write(&path, "AA:BB:CC:DD:EE:FF 10.0.0.5\nbb:bb:bb:bb:bb:bb 10.0.0.6\n").await.unwrap();
-        file_remove_space_prefix(&path, "aa:bb:cc:dd:ee:ff").await.unwrap();
+        tokio::fs::write(
+            &path,
+            "AA:BB:CC:DD:EE:FF 10.0.0.5\nbb:bb:bb:bb:bb:bb 10.0.0.6\n",
+        )
+        .await
+        .unwrap();
+        file_remove_space_prefix(&path, "aa:bb:cc:dd:ee:ff")
+            .await
+            .unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "bb:bb:bb:bb:bb:bb 10.0.0.6\n");
     }
@@ -1145,7 +1423,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn prune_and_read_pending_drops_entries_older_than_cutoff() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pending-conn");
-        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t100\n1.2.3.4\t80\ttcp\t2000\n").await.unwrap();
+        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t100\n1.2.3.4\t80\ttcp\t2000\n")
+            .await
+            .unwrap();
         let kept = prune_and_read_pending(&path, 1000).await;
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].port, "80");
@@ -1157,7 +1437,9 @@ JOIN_HISTORY_RETENTION=30d
     async fn prune_and_read_pending_removes_file_when_all_stale() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pending-conn");
-        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t100\n").await.unwrap();
+        tokio::fs::write(&path, "1.2.3.4\t443\ttcp\t100\n")
+            .await
+            .unwrap();
         let kept = prune_and_read_pending(&path, 1000).await;
         assert!(kept.is_empty());
         assert!(!path.exists());

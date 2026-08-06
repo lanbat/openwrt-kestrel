@@ -217,13 +217,20 @@ mod tests {
     use crate::canonical::encode;
 
     fn sample_reason() -> Reason {
-        Reason { code: ReasonCode::Tracker, note: Some("phones home".into()), evidence: vec![] }
+        Reason {
+            code: ReasonCode::Tracker,
+            note: Some("phones home".into()),
+            evidence: vec![],
+        }
     }
 
     #[test]
     fn signing_bytes_excludes_signature() {
         let opinion = PolicyOpinion {
-            author: UserId { federation: FederationId(crate::ids::Hash32([1; 32])), local_id: crate::ids::Hash32([2; 32]) },
+            author: UserId {
+                federation: FederationId(crate::ids::Hash32([1; 32])),
+                local_id: crate::ids::Hash32([2; 32]),
+            },
             sequence: 1,
             target: TargetSelector::Domain("ads.example".into()),
             stance: Stance::Deny,

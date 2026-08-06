@@ -27,17 +27,27 @@ use std::path::Path;
 
 use crate::cmd;
 use crate::data::{dhcp, files, logs};
+use crate::db::Store;
 
-/// `{ts}\t{event}\t{src}\t{dst}\t{port}\t{proto}` — `dst`/`port`/`proto`
-/// are empty for `deny` events (not applicable: an allowlist rejection
-/// has no destination/port of its own). One file per network, matching
-/// the existing `{iface}-join-history` convention. Durable regardless of
-/// whether the ntfy delivery for a given sighting succeeds.
-pub(crate) async fn append_history(base_dir: &Path, iface: &str, event: &str, src: &str, dst: &str, port: &str, proto: &str) {
+/// `dst`/`port`/`proto` are empty for `deny` events (not applicable: an
+/// allowlist rejection has no destination/port of its own). Durable
+/// regardless of whether the ntfy delivery for a given sighting succeeds.
+pub(crate) async fn append_history(
+    store: &Store,
+    iface: &str,
+    event: &str,
+    src: &str,
+    dst: &str,
+    port: &str,
+    proto: &str,
+) {
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let path = base_dir.join(format!("{iface}-connection-history"));
-    let _ = files::file_append(&path, &format!("{now}\t{event}\t{src}\t{dst}\t{port}\t{proto}")).await;
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let _ = store
+        .append_connection_history(iface, now, event, src, dst, port, proto)
+        .await;
 }
 
 /// Everything after the *last* occurrence of `marker`, up to the first
@@ -47,7 +57,11 @@ fn extract_iface<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     let after = line.rsplit_once(marker)?.1;
     let end = after.find([':', ' ']).unwrap_or(after.len());
     let iface = &after[..end];
-    if iface.is_empty() { None } else { Some(iface) }
+    if iface.is_empty() {
+        None
+    } else {
+        Some(iface)
+    }
 }
 
 /// MAC address for an IP from `/proc/net/arp`'s "HW address" column.
@@ -61,32 +75,27 @@ fn arp_mac_for(arp_table: &str, ip: &str) -> Option<String> {
     })
 }
 
-async fn trim_seen(seen_path: &Path) {
-    let lines = files::read_lines(seen_path).await;
-    if lines.len() <= 500 {
-        return;
-    }
-    let kept: String = lines[lines.len() - 400..].iter().map(|l| format!("{l}\n")).collect();
-    let _ = tokio::fs::write(seen_path, kept).await;
-}
-
-async fn already_seen(seen_path: &Path, key: &str) -> bool {
-    files::read_lines(seen_path).await.iter().any(|l| l == key)
-}
-
 pub async fn run(base_dir: &Path) -> i32 {
-    let seen_path = base_dir.join("notified-attempts");
+    let store = match Store::open(base_dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("check-access-log: failed to open kestrel.sqlite: {e}");
+            return 1;
+        }
+    };
     let log = logs::fetch().await;
 
-    let lines: Vec<&String> = log.lines.iter()
+    let lines: Vec<&String> = log
+        .lines
+        .iter()
         .filter(|l| l.contains("EXTNET-2LAN") || l.contains("EXTNET-DENY"))
         .collect();
 
     for line in lines {
         if line.contains("EXTNET-DENY") {
-            handle_deny(line, base_dir, &seen_path).await;
+            handle_deny(line, base_dir, &store).await;
         } else {
-            handle_2lan(line, base_dir, &seen_path).await;
+            handle_2lan(line, base_dir, &store).await;
         }
     }
 
@@ -100,33 +109,53 @@ pub async fn run(base_dir: &Path) -> i32 {
 /// `log_follower` streams them in. The extra per-event file/ARP reads
 /// are cheap; a stale pre-fetched map spanning a long-running follower's
 /// entire lifetime would not be.
-pub(crate) async fn handle_deny(line: &str, base_dir: &Path, seen_path: &Path) {
-    let Some(iface) = extract_iface(line, "EXTNET-DENY-") else { return };
+pub(crate) async fn handle_deny(line: &str, base_dir: &Path, store: &Store) {
+    let Some(iface) = extract_iface(line, "EXTNET-DENY-") else {
+        return;
+    };
     let confs = files::read_all_network_confs(base_dir).await;
-    let Some(notify_url) = confs.iter().find(|c| c.iface == iface).map(|c| c.notify_url.clone()) else { return };
-    let Some(fields) = logs::parse_nf_fields(line) else { return };
+    let Some(notify_url) = confs
+        .iter()
+        .find(|c| c.iface == iface)
+        .map(|c| c.notify_url.clone())
+    else {
+        return;
+    };
+    let Some(fields) = logs::parse_nf_fields(line) else {
+        return;
+    };
     let src = fields.src;
     if src.is_empty() {
         return;
     }
 
     let key = format!("deny:{iface}:{src}");
-    if already_seen(seen_path, &key).await {
+    if store.notified_attempt_seen(&key).await.unwrap_or(false) {
         return;
     }
-    let _ = files::file_append(seen_path, &key).await;
-    trim_seen(seen_path).await;
-    append_history(base_dir, iface, "deny", src, "", "", "").await;
+    let _ = store.notified_attempt_record(&key).await;
+    let _ = store.trim_notified_attempts().await;
+    append_history(store, iface, "deny", src, "", "", "").await;
 
     if notify_url.is_empty() {
         return;
     }
 
     let leases = dhcp::fetch().await;
-    let hostname = leases.iter().find(|l| l.ip == src).map(|l| l.hostname.clone()).unwrap_or_default();
-    let arp_table = tokio::fs::read_to_string("/proc/net/arp").await.unwrap_or_default();
+    let hostname = leases
+        .iter()
+        .find(|l| l.ip == src)
+        .map(|l| l.hostname.clone())
+        .unwrap_or_default();
+    let arp_table = tokio::fs::read_to_string("/proc/net/arp")
+        .await
+        .unwrap_or_default();
     let src_mac = arp_mac_for(&arp_table, src);
-    let src_label = if hostname.is_empty() { src.to_string() } else { format!("{hostname} ({src})") };
+    let src_label = if hostname.is_empty() {
+        src.to_string()
+    } else {
+        format!("{hostname} ({src})")
+    };
     let mac_suffix = src_mac.map(|m| format!(" [{m}]")).unwrap_or_default();
 
     cmd::ntfy(
@@ -140,30 +169,50 @@ pub(crate) async fn handle_deny(line: &str, base_dir: &Path, seen_path: &Path) {
     ).await;
 }
 
-pub(crate) async fn handle_2lan(line: &str, base_dir: &Path, seen_path: &Path) {
-    let Some(iface) = extract_iface(line, "EXTNET-2LAN-") else { return };
+pub(crate) async fn handle_2lan(line: &str, base_dir: &Path, store: &Store) {
+    let Some(iface) = extract_iface(line, "EXTNET-2LAN-") else {
+        return;
+    };
     let confs = files::read_all_network_confs(base_dir).await;
-    let Some(notify_url) = confs.iter().find(|c| c.iface == iface).map(|c| c.notify_url.clone()) else { return };
-    let Some(fields) = logs::parse_nf_fields(line) else { return };
-    let (src, dst, proto, port) = (fields.src, fields.dst, fields.proto.to_lowercase(), fields.dpt);
+    let Some(notify_url) = confs
+        .iter()
+        .find(|c| c.iface == iface)
+        .map(|c| c.notify_url.clone())
+    else {
+        return;
+    };
+    let Some(fields) = logs::parse_nf_fields(line) else {
+        return;
+    };
+    let (src, dst, proto, port) = (
+        fields.src,
+        fields.dst,
+        fields.proto.to_lowercase(),
+        fields.dpt,
+    );
     if src.is_empty() || dst.is_empty() || proto.is_empty() || port.is_empty() {
         return;
     }
 
     let key = format!("{iface}:{src}:{dst}:{proto}:{port}");
-    if already_seen(seen_path, &key).await {
+    if store.notified_attempt_seen(&key).await.unwrap_or(false) {
         return;
     }
-    let _ = files::file_append(seen_path, &key).await;
-    trim_seen(seen_path).await;
-    append_history(base_dir, iface, "2lan", src, dst, &port, &proto).await;
+    let _ = store.notified_attempt_record(&key).await;
+    let _ = store.trim_notified_attempts().await;
+    append_history(store, iface, "2lan", src, dst, &port, &proto).await;
 
     if notify_url.is_empty() {
         return;
     }
 
     let leases = dhcp::fetch().await;
-    let hostname_by_ip = |ip: &str| leases.iter().find(|l| l.ip == ip).map(|l| l.hostname.clone());
+    let hostname_by_ip = |ip: &str| {
+        leases
+            .iter()
+            .find(|l| l.ip == ip)
+            .map(|l| l.hostname.clone())
+    };
     let label = |ip: &str| match hostname_by_ip(ip) {
         Some(name) if !name.is_empty() => format!("{name} ({ip})"),
         _ => ip.to_string(),
@@ -211,12 +260,16 @@ mod tests {
     fn arp_mac_for_finds_matching_ip() {
         let table = "IP address       HW type     Flags       HW address            Mask     Device\n\
                       192.168.1.5      0x1         0x2         aa:bb:cc:dd:ee:ff      *        br-lan\n";
-        assert_eq!(arp_mac_for(table, "192.168.1.5"), Some("aa:bb:cc:dd:ee:ff".to_string()));
+        assert_eq!(
+            arp_mac_for(table, "192.168.1.5"),
+            Some("aa:bb:cc:dd:ee:ff".to_string())
+        );
     }
 
     #[test]
     fn arp_mac_for_unknown_ip_returns_none() {
-        let table = "IP address       HW type     Flags       HW address            Mask     Device\n";
+        let table =
+            "IP address       HW type     Flags       HW address            Mask     Device\n";
         assert_eq!(arp_mac_for(table, "10.0.0.99"), None);
     }
 }

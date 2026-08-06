@@ -97,11 +97,18 @@ mod tests {
 
     fn sample(mac: &str) -> DeviceApprovalOpinion {
         DeviceApprovalOpinion {
-            author: UserId { federation: FederationId(Hash32([1; 32])), local_id: Hash32([2; 32]) },
+            author: UserId {
+                federation: FederationId(Hash32([1; 32])),
+                local_id: Hash32([2; 32]),
+            },
             sequence: 1,
             mac: mac.to_string(),
             stance: Stance::Deny,
-            reason: Reason { code: ReasonCode::Malware, note: Some("botnet C2 beacon".into()), evidence: vec![] },
+            reason: Reason {
+                code: ReasonCode::Malware,
+                note: Some("botnet C2 beacon".into()),
+                evidence: vec![],
+            },
             device_label: Some("shady-iot-cam".into()),
             issued_at: 1000,
             expires_at: None,

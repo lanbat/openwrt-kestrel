@@ -13,15 +13,27 @@ pub struct HealthCheckResult {
 
 impl HealthCheckResult {
     pub fn ok() -> Self {
-        Self { ok: true, reason: None }
+        Self {
+            ok: true,
+            reason: None,
+        }
     }
     pub fn fail(reason: impl Into<String>) -> Self {
-        Self { ok: false, reason: Some(reason.into()) }
+        Self {
+            ok: false,
+            reason: Some(reason.into()),
+        }
     }
 }
 
 pub trait HealthCheck {
-    fn check(&self, runner: &dyn CommandRunner, compiled: &CompiledFirewallPolicy, protected: &ProtectedDestinations, timeout: Duration) -> HealthCheckResult;
+    fn check(
+        &self,
+        runner: &dyn CommandRunner,
+        compiled: &CompiledFirewallPolicy,
+        protected: &ProtectedDestinations,
+        timeout: Duration,
+    ) -> HealthCheckResult;
 }
 
 /// Re-lists the live table after applying and checks two things: the
@@ -35,17 +47,28 @@ pub trait HealthCheck {
 pub struct RulesetHealthCheck;
 
 impl HealthCheck for RulesetHealthCheck {
-    fn check(&self, runner: &dyn CommandRunner, _compiled: &CompiledFirewallPolicy, protected: &ProtectedDestinations, timeout: Duration) -> HealthCheckResult {
+    fn check(
+        &self,
+        runner: &dyn CommandRunner,
+        _compiled: &CompiledFirewallPolicy,
+        protected: &ProtectedDestinations,
+        timeout: Duration,
+    ) -> HealthCheckResult {
         let out = runner.run("nft", &["-a", "list", "table", "inet", NFT_TABLE], timeout);
         if !out.success {
-            return HealthCheckResult::fail(format!("post-apply `nft list table` failed: {}", out.stderr));
+            return HealthCheckResult::fail(format!(
+                "post-apply `nft list table` failed: {}",
+                out.stderr
+            ));
         }
 
         let protected_strings = protected_destination_strings(protected);
         for (set_name, elements_line) in enforcement_set_elements(&out.stdout) {
             for p in &protected_strings {
                 if elements_line.contains(p.as_str()) {
-                    return HealthCheckResult::fail(format!("protected destination {p} found in live set {set_name}"));
+                    return HealthCheckResult::fail(format!(
+                        "protected destination {p} found in live set {set_name}"
+                    ));
                 }
             }
         }
@@ -107,7 +130,12 @@ mod tests {
     fn health_check_fails_when_list_table_fails() {
         let runner = FakeCommandRunner::new_all_success();
         runner.fail_next_matching(|p, a| p == "nft" && a.contains(&"list".to_string()));
-        let result = RulesetHealthCheck.check(&runner, &empty_compiled(), &ProtectedDestinations::default(), Duration::from_secs(1));
+        let result = RulesetHealthCheck.check(
+            &runner,
+            &empty_compiled(),
+            &ProtectedDestinations::default(),
+            Duration::from_secs(1),
+        );
         assert!(!result.ok);
     }
 
@@ -124,7 +152,12 @@ mod tests {
         );
         let mut protected = ProtectedDestinations::default();
         protected.v4_addrs.push("192.168.1.1".parse().unwrap());
-        let result = RulesetHealthCheck.check(&runner, &empty_compiled(), &protected, Duration::from_secs(1));
+        let result = RulesetHealthCheck.check(
+            &runner,
+            &empty_compiled(),
+            &protected,
+            Duration::from_secs(1),
+        );
         assert!(result.ok);
     }
 
@@ -141,8 +174,16 @@ mod tests {
         );
         let mut protected = ProtectedDestinations::default();
         protected.v4_addrs.push("192.168.1.1".parse().unwrap());
-        let result = RulesetHealthCheck.check(&runner, &empty_compiled(), &protected, Duration::from_secs(1));
-        assert!(!result.ok, "a protected address inside a live deny set must fail health check");
+        let result = RulesetHealthCheck.check(
+            &runner,
+            &empty_compiled(),
+            &protected,
+            Duration::from_secs(1),
+        );
+        assert!(
+            !result.ok,
+            "a protected address inside a live deny set must fail health check"
+        );
     }
 
     #[test]
@@ -163,7 +204,12 @@ mod tests {
         );
         let mut protected = ProtectedDestinations::default();
         protected.v4_addrs.push("192.168.1.1".parse().unwrap());
-        let result = RulesetHealthCheck.check(&runner, &empty_compiled(), &protected, Duration::from_secs(1));
+        let result = RulesetHealthCheck.check(
+            &runner,
+            &empty_compiled(),
+            &protected,
+            Duration::from_secs(1),
+        );
         assert!(result.ok);
     }
 }

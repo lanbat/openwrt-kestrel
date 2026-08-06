@@ -1,9 +1,9 @@
+use askama::Template;
 use axum::{
     extract::{Form, Query, State},
     http::HeaderMap,
     response::{Html, Json},
 };
-use askama::Template;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -166,21 +166,37 @@ pub struct ApiResult {
 }
 
 fn ok() -> Json<ApiResult> {
-    Json(ApiResult { ok: true, error: None, redirect: None })
+    Json(ApiResult {
+        ok: true,
+        error: None,
+        redirect: None,
+    })
 }
 
 fn ok_redirect(url: impl Into<String>) -> Json<ApiResult> {
-    Json(ApiResult { ok: true, error: None, redirect: Some(url.into()) })
+    Json(ApiResult {
+        ok: true,
+        error: None,
+        redirect: Some(url.into()),
+    })
 }
 
 fn err(msg: impl Into<String>) -> Json<ApiResult> {
-    Json(ApiResult { ok: false, error: Some(msg.into()), redirect: None })
+    Json(ApiResult {
+        ok: false,
+        error: Some(msg.into()),
+        redirect: None,
+    })
 }
 
 fn valid_mac(mac: &str) -> bool {
     mac.len() == 17
         && mac.chars().enumerate().all(|(i, c)| {
-            if i % 3 == 2 { c == ':' } else { c.is_ascii_hexdigit() }
+            if i % 3 == 2 {
+                c == ':'
+            } else {
+                c.is_ascii_hexdigit()
+            }
         })
 }
 
@@ -197,29 +213,51 @@ fn valid_ip(s: &str) -> bool {
 }
 
 fn is_private_origin(origin: &str) -> bool {
-    if origin.is_empty() { return true; }
-    let prefixes = ["http://192.168.", "http://10.", "http://172.1", "http://172.2",
-        "http://172.30.", "http://172.31.", "http://127.", "http://[fd", "http://[fc",
-        "http://[fe80", "http://[::1]"];
+    if origin.is_empty() {
+        return true;
+    }
+    let prefixes = [
+        "http://192.168.",
+        "http://10.",
+        "http://172.1",
+        "http://172.2",
+        "http://172.30.",
+        "http://172.31.",
+        "http://127.",
+        "http://[fd",
+        "http://[fc",
+        "http://[fe80",
+        "http://[::1]",
+    ];
     prefixes.iter().any(|p| origin.starts_with(p))
 }
 
-fn mac_no_colons(mac: &str) -> String { mac.replace(':', "") }
+fn mac_no_colons(mac: &str) -> String {
+    mac.replace(':', "")
+}
 
 fn lease_status(leases: &[crate::data::dhcp::Lease], mac: &str) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if let Some(l) = leases.iter().find(|l| l.mac.to_lowercase() == mac.to_lowercase()) {
+    if let Some(l) = leases
+        .iter()
+        .find(|l| l.mac.to_lowercase() == mac.to_lowercase())
+    {
         if l.expiry == 0 {
             return "Static (no expiry)".into();
         }
         let diff = l.expiry as i64 - now as i64;
-        if diff <= 0 { "Expired".into() }
-        else if diff < 3600 { format!("Expires in {}m", diff / 60) }
-        else if diff < 86400 { format!("Expires in {}h", diff / 3600) }
-        else { format!("Expires in {}d", diff / 86400) }
+        if diff <= 0 {
+            "Expired".into()
+        } else if diff < 3600 {
+            format!("Expires in {}m", diff / 60)
+        } else if diff < 86400 {
+            format!("Expires in {}h", diff / 3600)
+        } else {
+            format!("Expires in {}d", diff / 86400)
+        }
     } else {
         "No lease".into()
     }
@@ -256,10 +294,15 @@ pub(crate) fn rel_time(ts: u64) -> String {
         .unwrap_or_default()
         .as_secs();
     let diff = now.saturating_sub(ts);
-    if diff < 60 { "just now".into() }
-    else if diff < 3600 { format!("{} min ago", diff / 60) }
-    else if diff < 86400 { format!("{}h ago", diff / 3600) }
-    else { format!("{}d ago", diff / 86400) }
+    if diff < 60 {
+        "just now".into()
+    } else if diff < 3600 {
+        format!("{} min ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
 }
 
 // ── GET handler ───────────────────────────────────────────────────────────────
@@ -284,24 +327,37 @@ pub async fn get(
         None => return Html(format!("<h1>Network not found: {net}</h1>")),
     };
 
-    let base_dir = &state.base_dir;
-    let mac_n = mac_no_colons(&mac);
-
     // Device label
-    let label = snap.labels.get(net)
+    let label = snap
+        .labels
+        .get(net)
         .and_then(|m| m.get(&mac))
         .cloned()
         .unwrap_or_default();
 
     // IPs
-    let dev_ip = snap.device_ips.get(net)
+    let dev_ip = snap
+        .device_ips
+        .get(net)
         .and_then(|m| m.get(&mac))
         .cloned()
-        .or_else(|| snap.join_approved_ips.get(net).and_then(|m| m.get(&mac)).cloned())
-        .or_else(|| snap.leases.iter().find(|l| l.mac.to_lowercase() == mac).map(|l| l.ip.clone()))
+        .or_else(|| {
+            snap.join_approved_ips
+                .get(net)
+                .and_then(|m| m.get(&mac))
+                .cloned()
+        })
+        .or_else(|| {
+            snap.leases
+                .iter()
+                .find(|l| l.mac.to_lowercase() == mac)
+                .map(|l| l.ip.clone())
+        })
         .unwrap_or_default();
 
-    let dev_ip6 = snap.device_ip6s.get(net)
+    let dev_ip6 = snap
+        .device_ip6s
+        .get(net)
         .and_then(|m| m.get(&mac))
         .cloned()
         .or_else(|| snap.neigh.ip6_for_mac(&mac).map(|s| s.to_string()))
@@ -325,8 +381,7 @@ pub async fn get(
     // never shown for a fixed MAC, since those already identify a device
     // permanently on their own and are never registered in the first place.
     let identity = if is_randomized_mac {
-        let fp_path = base_dir.join(format!("{net}-device-fingerprints"));
-        let records = crate::data::fingerprint::read_registry(&fp_path).await;
+        let records = crate::data::fingerprint::read_registry(&state.store, net).await;
         crate::data::fingerprint::find_by_mac(&records, &mac).map(|r| IdentityInfo {
             id: r.id.clone(),
             macs_count: r.macs.len(),
@@ -337,30 +392,56 @@ pub async fn get(
     };
 
     // DHCP hostname
-    let hostname = snap.leases.iter()
+    let hostname = snap
+        .leases
+        .iter()
         .find(|l| l.mac.to_lowercase() == mac)
-        .and_then(|l| if l.hostname == "*" { None } else { Some(l.hostname.clone()) })
+        .and_then(|l| {
+            if l.hostname == "*" {
+                None
+            } else {
+                Some(l.hostname.clone())
+            }
+        })
         .unwrap_or_default();
 
     // Lease status
     let lease_status = lease_status(&snap.leases, &mac);
 
     // Limit
-    let limit = snap.device_limits.get(net)
+    let limit = snap
+        .device_limits
+        .get(net)
         .and_then(|m| m.get(&mac))
         .copied()
         .unwrap_or(120);
 
     // Join state
-    let join_state = if snap.join_approved.get(net).map(|v| v.contains(&mac)).unwrap_or(false) {
+    let join_state = if snap
+        .join_approved
+        .get(net)
+        .map(|v| v.contains(&mac))
+        .unwrap_or(false)
+    {
         "Approved"
-    } else if snap.join_denied.get(net).map(|v| v.contains(&mac)).unwrap_or(false) {
+    } else if snap
+        .join_denied
+        .get(net)
+        .map(|v| v.contains(&mac))
+        .unwrap_or(false)
+    {
         "Denied"
-    } else if snap.join_pending.get(net).map(|m| m.contains_key(&mac)).unwrap_or(false) {
+    } else if snap
+        .join_pending
+        .get(net)
+        .map(|m| m.contains_key(&mac))
+        .unwrap_or(false)
+    {
         "Pending"
     } else {
         "Untracked"
-    }.to_string();
+    }
+    .to_string();
 
     // Display name
     let display = if !label.is_empty() {
@@ -371,76 +452,142 @@ pub async fn get(
         format!("{mac} (unlabelled)")
     };
 
-    // Pending connections (per-device file, pruned to 24h)
-    let pending_path = base_dir.join(format!("{net}-pending-{mac_n}"));
+    // Pending connections, pruned to 24h
     let cutoff = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        .saturating_sub(86400);
-    let raw_pending = files::prune_and_read_pending(&pending_path, cutoff).await;
+        .as_secs();
+    let _ = state
+        .store
+        .prune_pending_connections(net, &mac, cutoff.saturating_sub(86400) as i64)
+        .await;
+    let raw_pending = state
+        .store
+        .list_pending_connections(net, &mac)
+        .await
+        .unwrap_or_default();
 
     // Filter out already-ruled destinations
-    let rules = snap.device_rules.get(net)
+    let rules = snap
+        .device_rules
+        .get(net)
         .cloned()
         .unwrap_or_default()
         .into_iter()
         .filter(|r| r.mac == mac)
         .collect::<Vec<_>>();
 
-    let ruled_dsts: std::collections::HashSet<&str> = rules.iter().map(|r| r.dst.as_str()).collect();
+    let ruled_dsts: std::collections::HashSet<&str> =
+        rules.iter().map(|r| r.dst.as_str()).collect();
 
     // DNS answers this device has resolved recently, used both to
     // correlate a pending IP connection back to the domain that resolved
     // to it, and to show the DNS query history's most recent answer.
-    let dns_answers_path = base_dir.join(format!("{net}-dns-answers-{mac_n}"));
-    let dns_answers = crate::data::dns_answers::read_dns_answers(&dns_answers_path).await;
-    let threat_path = base_dir.join("threat-domains.txt");
-
-    let plugin_notes_path = base_dir.join(format!("{net}-plugin-notes"));
-    let plugin_notes = files::read_plugin_notes(&plugin_notes_path).await;
-
-    let mut pending: Vec<PendingRow> = raw_pending.into_iter()
-        .filter(|p| !ruled_dsts.contains(p.dst.as_str()))
-        .map(|p| {
-            let description = snap.banip.lookup(&p.dst)
-                .map(crate::data::banip::describe)
-                .unwrap_or_default();
-            let resolved_domain = crate::data::dns_answers::correlate_ip(&dns_answers, &p.dst, p.ts)
-                .unwrap_or_default();
-            let matching_note = plugin_notes.iter().find(|n| n.mac == mac && n.dst == p.dst);
-            let plugin_note = matching_note.map(|n| n.note.clone()).unwrap_or_default();
-            let plugin_name = matching_note.map(|n| n.plugin_name.clone()).unwrap_or_default();
-            PendingRow { dst: p.dst, port: p.port, proto: p.proto, description, resolved_domain, domain_threats: Vec::new(), plugin_note, plugin_name }
+    let dns_answers: Vec<crate::data::dns_answers::DnsAnswer> = state
+        .store
+        .list_dns_answers(net, &mac)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| crate::data::dns_answers::DnsAnswer {
+            ts: a.ts as u64,
+            domain: a.domain,
+            ip: a.ip,
         })
         .collect();
 
-    let resolved_domains: Vec<String> = pending.iter()
+    let plugin_notes = state.store.list_plugin_notes(net).await.unwrap_or_default();
+
+    let mut pending: Vec<PendingRow> = raw_pending
+        .into_iter()
+        .filter(|p| !ruled_dsts.contains(p.dst.as_str()))
+        .map(|p| {
+            let description = snap
+                .banip
+                .lookup(&p.dst)
+                .map(crate::data::banip::describe)
+                .unwrap_or_default();
+            let resolved_domain =
+                crate::data::dns_answers::correlate_ip(&dns_answers, &p.dst, p.ts as u64)
+                    .unwrap_or_default();
+            let matching_note = plugin_notes.iter().find(|n| n.mac == mac && n.dst == p.dst);
+            let plugin_note = matching_note.map(|n| n.note.clone()).unwrap_or_default();
+            let plugin_name = matching_note
+                .map(|n| n.plugin_name.clone())
+                .unwrap_or_default();
+            PendingRow {
+                dst: p.dst,
+                port: p.port,
+                proto: p.proto,
+                description,
+                resolved_domain,
+                domain_threats: Vec::new(),
+                plugin_note,
+                plugin_name,
+            }
+        })
+        .collect();
+
+    let resolved_domains: Vec<String> = pending
+        .iter()
         .filter(|p| !p.resolved_domain.is_empty())
         .map(|p| p.resolved_domain.clone())
         .collect();
-    let domain_threat_feeds = crate::data::threat_domains::lookup_domains(&threat_path, &resolved_domains).await;
+    let domain_threat_feeds =
+        crate::data::threat_domains::lookup_domains(&state.store, &resolved_domains).await;
     for p in pending.iter_mut() {
         if let Some(feeds) = domain_threat_feeds.get(&p.resolved_domain) {
-            p.domain_threats = feeds.iter().map(|f| crate::data::threat_domains::describe(f)).collect();
+            p.domain_threats = feeds
+                .iter()
+                .map(|f| crate::data::threat_domains::describe(f))
+                .collect();
         }
     }
 
-    let rules: Vec<RuleRow> = rules.into_iter()
+    let rules: Vec<RuleRow> = rules
+        .into_iter()
         .map(|r| {
-            let css = if r.action == "allow" { "tag-allow".into() } else { "tag-deny".into() };
-            let action = if r.action == "allow" { "Allow".into() } else { "Deny".into() };
-            let route = if r.route.is_empty() { "WAN".to_string() } else { r.route.to_uppercase() };
-            RuleRow { dst: r.dst, port: r.port, proto: r.proto, action, css, route }
+            let css = if r.action == "allow" {
+                "tag-allow".into()
+            } else {
+                "tag-deny".into()
+            };
+            let action = if r.action == "allow" {
+                "Allow".into()
+            } else {
+                "Deny".into()
+            };
+            let route = if r.route.is_empty() {
+                "WAN".to_string()
+            } else {
+                r.route.to_uppercase()
+            };
+            RuleRow {
+                dst: r.dst,
+                port: r.port,
+                proto: r.proto,
+                action,
+                css,
+                route,
+            }
         })
         .collect();
 
-    let vpn_options: Vec<VpnOption> = snap.vpn_tiers.iter()
-        .map(|t| VpnOption { name: t.name.clone(), label: t.name.to_uppercase() })
+    let vpn_options: Vec<VpnOption> = snap
+        .vpn_tiers
+        .iter()
+        .map(|t| VpnOption {
+            name: t.name.clone(),
+            label: t.name.to_uppercase(),
+        })
         .collect();
 
     // DNS queries from logs
-    let src_ip = if dev_ip.is_empty() { dev_ip6.clone() } else { dev_ip.clone() };
+    let src_ip = if dev_ip.is_empty() {
+        dev_ip6.clone()
+    } else {
+        dev_ip.clone()
+    };
     let queried: Vec<(String, String)> = if !src_ip.is_empty() {
         crate::data::logs::parse_dns_queries(&snap.logs.lines, &src_ip)
             .into_iter()
@@ -452,51 +599,76 @@ pub async fn get(
     };
     let domains: Vec<String> = queried.iter().map(|(d, _)| d.clone()).collect();
     let blocklist = crate::data::adblock::flag_domains(
-        std::path::Path::new(crate::data::adblock::LIST_PATH), &domains,
-    ).await;
-    let threat_feeds = crate::data::threat_domains::lookup_domains(&threat_path, &domains).await;
-    let dns_queries: Vec<DnsRow> = queried.into_iter()
+        std::path::Path::new(crate::data::adblock::LIST_PATH),
+        &domains,
+    )
+    .await;
+    let threat_feeds = crate::data::threat_domains::lookup_domains(&state.store, &domains).await;
+    let dns_queries: Vec<DnsRow> = queried
+        .into_iter()
         .map(|(domain, qtype)| {
             let blocked = blocklist.get(&domain).copied().unwrap_or(false);
-            let threats = threat_feeds.get(&domain).cloned().unwrap_or_default()
-                .iter().map(|f| crate::data::threat_domains::describe(f)).collect();
-            let resolved_ip = crate::data::dns_answers::most_recent_ip_for_domain(&dns_answers, &domain)
-                .unwrap_or_default();
-            DnsRow { domain, qtype, blocked, threats, resolved_ip }
+            let threats = threat_feeds
+                .get(&domain)
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|f| crate::data::threat_domains::describe(f))
+                .collect();
+            let resolved_ip =
+                crate::data::dns_answers::most_recent_ip_for_domain(&dns_answers, &domain)
+                    .unwrap_or_default();
+            DnsRow {
+                domain,
+                qtype,
+                blocked,
+                threats,
+                resolved_ip,
+            }
         })
         .collect();
 
-    // History from join-history files
-    let hist_path = base_dir.join(format!("{net}-join-history"));
-    let mut all_hist = files::read_join_history(&hist_path).await;
-    all_hist.sort_by(|a, b| {
-        let ta: u64 = a.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let tb: u64 = b.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-        tb.cmp(&ta)
-    });
+    // History for this device, newest first — `recent_join_history` is
+    // already ordered/capped at the iface level; a generous limit here
+    // (history is rare, and this is a home-router scale table) keeps this
+    // MAC's own entries from being crowded out by other devices' recent
+    // activity before the per-MAC filter runs.
+    const HISTORY_SCAN_LIMIT: u32 = 5000;
+    let all_hist = state
+        .store
+        .recent_join_history(net, HISTORY_SCAN_LIMIT)
+        .await
+        .unwrap_or_default();
 
-    let history: Vec<HistRow> = all_hist.into_iter()
-        .filter(|row| row.get(3).map(|m| m.to_lowercase() == mac).unwrap_or(false))
+    let history: Vec<HistRow> = all_hist
+        .into_iter()
+        .filter(|row| row.mac.to_lowercase() == mac)
         .take(20)
         .map(|row| {
-            let get = |i: usize| row.get(i).cloned().unwrap_or_default();
-            let act = get(2);
-            let by_mac = get(10);
+            let by_mac = row.actor_mac;
             HistRow {
-                when: get(1),
-                css: badge_css(&act).to_string(),
-                action: badge_label(&act).to_string(),
+                when: row.when_str,
+                css: badge_css(&row.action).to_string(),
+                action: badge_label(&row.action).to_string(),
                 net: net.to_string(),
-                ip4: get(4),
-                ip6: get(5),
-                by: if !by_mac.is_empty() { by_mac.clone() } else { "unknown".to_string() },
+                ip4: row.ip4,
+                ip6: row.ip6,
+                by: if !by_mac.is_empty() {
+                    by_mac.clone()
+                } else {
+                    "unknown".to_string()
+                },
                 by_mac,
             }
         })
         .collect();
 
     // join_ip: first non-empty IP for approve/deny action
-    let join_ip = if !dev_ip.is_empty() { dev_ip.clone() } else { dev_ip6.clone() };
+    let join_ip = if !dev_ip.is_empty() {
+        dev_ip.clone()
+    } else {
+        dev_ip6.clone()
+    };
 
     let tmpl = DeviceTmpl {
         net: net.to_string(),
@@ -512,9 +684,21 @@ pub async fn get(
         },
         online_css,
         online_text,
-        dev_ip: if dev_ip.is_empty() { "\u{2014}".into() } else { dev_ip },
-        dev_ip6: if dev_ip6.is_empty() { "\u{2014}".into() } else { dev_ip6 },
-        hostname: if hostname.is_empty() { "\u{2014}".into() } else { hostname },
+        dev_ip: if dev_ip.is_empty() {
+            "\u{2014}".into()
+        } else {
+            dev_ip
+        },
+        dev_ip6: if dev_ip6.is_empty() {
+            "\u{2014}".into()
+        } else {
+            dev_ip6
+        },
+        hostname: if hostname.is_empty() {
+            "\u{2014}".into()
+        } else {
+            hostname
+        },
         lease_status,
         join_approval: conf.join_approval,
         join_state,
@@ -528,7 +712,10 @@ pub async fn get(
         vpn_options,
     };
 
-    Html(tmpl.render().unwrap_or_else(|e| format!("Template error: {e}")))
+    Html(
+        tmpl.render()
+            .unwrap_or_else(|e| format!("Template error: {e}")),
+    )
 }
 
 // ── POST handler ──────────────────────────────────────────────────────────────
@@ -539,7 +726,8 @@ pub async fn post(
     Query(params): Query<DeviceQuery>,
     Form(form): Form<DeviceForm>,
 ) -> Json<ApiResult> {
-    let origin = headers.get("origin")
+    let origin = headers
+        .get("origin")
         .or_else(|| headers.get("referer"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -548,17 +736,21 @@ pub async fn post(
     }
 
     // net/mac from query string first, then form
-    let net = params.net.as_deref()
-        .or(form.net.as_deref())
-        .unwrap_or("");
-    let mac = params.mac.as_deref()
+    let net = params.net.as_deref().or(form.net.as_deref()).unwrap_or("");
+    let mac = params
+        .mac
+        .as_deref()
         .or(form.mac.as_deref())
         .unwrap_or("")
         .to_lowercase();
     let action = form.action.as_deref().unwrap_or("");
 
-    if !valid_net(net) { return err("Invalid network"); }
-    if !valid_mac(&mac) { return err("Invalid MAC"); }
+    if !valid_net(net) {
+        return err("Invalid network");
+    }
+    if !valid_mac(&mac) {
+        return err("Invalid MAC");
+    }
 
     let snap = state.snap().await;
     let conf = match snap.net_confs.iter().find(|c| c.iface == net) {
@@ -568,19 +760,41 @@ pub async fn post(
 
     let base_dir = state.base_dir.clone();
     let mac_n = mac_no_colons(&mac);
-    let remote_ip = headers.get("x-forwarded-for")
+    let remote_ip = headers
+        .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
-        .split(',').next().unwrap_or("unknown")
+        .split(',')
+        .next()
+        .unwrap_or("unknown")
         .trim()
         .to_string();
     let actor_mac = snap.neigh.mac_for_ip(&remote_ip).unwrap_or("").to_string();
 
-    let dev_ip = snap.device_ips.get(net).and_then(|m| m.get(&mac)).cloned()
-        .or_else(|| snap.join_approved_ips.get(net).and_then(|m| m.get(&mac)).cloned())
+    let dev_ip = snap
+        .device_ips
+        .get(net)
+        .and_then(|m| m.get(&mac))
+        .cloned()
+        .or_else(|| {
+            snap.join_approved_ips
+                .get(net)
+                .and_then(|m| m.get(&mac))
+                .cloned()
+        })
         .unwrap_or_default();
-    let dev_ip6 = snap.device_ip6s.get(net).and_then(|m| m.get(&mac)).cloned().unwrap_or_default();
-    let dev_label = snap.labels.get(net).and_then(|m| m.get(&mac)).cloned().unwrap_or_default();
+    let dev_ip6 = snap
+        .device_ip6s
+        .get(net)
+        .and_then(|m| m.get(&mac))
+        .cloned()
+        .unwrap_or_default();
+    let dev_label = snap
+        .labels
+        .get(net)
+        .and_then(|m| m.get(&mac))
+        .cloned()
+        .unwrap_or_default();
     let notify_url = conf.notify_url.clone();
     let vpn_tiers = snap.vpn_tiers.clone();
     drop(snap);
@@ -589,19 +803,39 @@ pub async fn post(
 
     match action {
         "set_label" => {
-            let new_label: String = form.label.as_deref().unwrap_or("").trim().chars().take(40).collect();
-            if new_label.is_empty() { return ok(); }
-            let lbl_path = base_dir.join(format!("{net}-device-labels"));
-            let _ = files::file_upsert_by_mac(&lbl_path, &mac, &format!("{mac}\t{new_label}")).await;
+            let new_label: String = form
+                .label
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(40)
+                .collect();
+            if new_label.is_empty() {
+                return ok();
+            }
+            let _ = state.store.set_label(net, &mac, &new_label).await;
             crate::cmd::write_device_dns(&base_dir, net, &mac, &new_label, "").await;
 
-            let fp_path = base_dir.join(format!("{net}-device-fingerprints"));
-            crate::data::fingerprint::rename_if_known(&fp_path, &mac, &new_label).await;
+            crate::data::fingerprint::rename_if_known(&state.store, net, &mac, &new_label).await;
 
             if new_label != dev_label && !notify_url.is_empty() {
-                let body = format!("MAC: {mac}{}\nNow: {new_label}",
-                    if dev_label.is_empty() { String::new() } else { format!("\nWas: {dev_label}") });
-                crate::cmd::ntfy(&notify_url, &format!("Label set — {net}"), "default", "pencil2", &body).await;
+                let body = format!(
+                    "MAC: {mac}{}\nNow: {new_label}",
+                    if dev_label.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nWas: {dev_label}")
+                    }
+                );
+                crate::cmd::ntfy(
+                    &notify_url,
+                    &format!("Label set — {net}"),
+                    "default",
+                    "pencil2",
+                    &body,
+                )
+                .await;
             }
             ok()
         }
@@ -611,9 +845,8 @@ pub async fn post(
                 Ok(n) if n >= 1 && n <= 9999 => n,
                 _ => return err("Invalid limit"),
             };
-            let limits_path = base_dir.join(format!("{net}-device-limits"));
-            let _ = files::file_upsert_by_mac(&limits_path, &mac, &format!("{mac}\t{lim}")).await;
-            crate::regen_inspect::run(&base_dir, &state.split_routing_dir, net).await;
+            let _ = state.store.set_device_limit(net, &mac, lim).await;
+            crate::regen_inspect::run(&base_dir, &state.split_routing_dir, &state.store, net).await;
             ok()
         }
 
@@ -628,53 +861,82 @@ pub async fn post(
                 "15m" | "1h" | "8h" | "24h" => crate::routes::approve_access::dur_secs(duration),
                 _ => return err("Invalid duration"),
             };
-            if dev_ip.is_empty() && dev_ip6.is_empty() { return err("Device has no tracked IP"); }
+            if dev_ip.is_empty() && dev_ip6.is_empty() {
+                return err("Device has no tracked IP");
+            }
 
             let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-            let ip = if dev_ip.is_empty() { None } else { Some(dev_ip.as_str()) };
-            let ip6 = if dev_ip6.is_empty() { None } else { Some(dev_ip6.as_str()) };
-            crate::observation::start(&base_dir, net, &mac, ip, ip6, dur_secs, now).await;
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let ip = if dev_ip.is_empty() {
+                None
+            } else {
+                Some(dev_ip.as_str())
+            };
+            let ip6 = if dev_ip6.is_empty() {
+                None
+            } else {
+                Some(dev_ip6.as_str())
+            };
+            crate::observation::start(&state.store, net, &mac, ip, ip6, dur_secs, now).await;
 
             if !notify_url.is_empty() {
                 let body = format!("{}: observing all connections for {duration} on {net}, then approving what it used.\n\nLabel: {dev_label}", if dev_label.is_empty() { mac.as_str() } else { &dev_label });
-                crate::cmd::ntfy(&notify_url, &format!("Observation started — {net}"), "default", "eye", &body).await;
+                crate::cmd::ntfy(
+                    &notify_url,
+                    &format!("Observation started — {net}"),
+                    "default",
+                    "eye",
+                    &body,
+                )
+                .await;
             }
             ok()
         }
 
         "revoke_join_approval" => {
-            let approved_path = base_dir.join(format!("{net}-join-approved"));
-            let _ = files::file_remove_line(&approved_path, &mac).await;
+            let _ = state.store.join_approved_remove(net, &mac).await;
 
-            // Move to pending
-            let pending_path = base_dir.join(format!("{net}-join-pending"));
-            let _ = files::file_remove_space_prefix(&pending_path, &mac).await;
+            // Move to pending — the single-column `join_pending` table
+            // means the second `set` (if both v4 and v6 are present) wins,
+            // matching the old flat file's own effective behavior once
+            // read back through a `mac -> ip` map (last line for a given
+            // MAC always overwrote the first in that map too).
             if !dev_ip.is_empty() {
-                let _ = files::file_append(&pending_path, &format!("{mac} {dev_ip}")).await;
+                let _ = state.store.join_pending_set(net, &mac, &dev_ip).await;
                 crate::cmd::nft_del_element(&format!("{net}_join_approved_ips"), &dev_ip).await;
                 crate::cmd::nft_add_element(&format!("{net}_join_pending"), &dev_ip, "").await;
             }
             if !dev_ip6.is_empty() {
-                let _ = files::file_append(&pending_path, &format!("{mac} {dev_ip6}")).await;
+                let _ = state.store.join_pending_set(net, &mac, &dev_ip6).await;
                 crate::cmd::nft_del_element(&format!("{net}_join_approved_ips6"), &dev_ip6).await;
                 crate::cmd::nft_add_element(&format!("{net}_join_pending6"), &dev_ip6, "").await;
             }
 
             // Remove from denied and approved-ips
-            let _ = files::file_remove_line(&base_dir.join(format!("{net}-join-denied")), &mac).await;
-            let _ = files::file_remove_space_prefix(&base_dir.join(format!("{net}-join-approved-ips")), &mac).await;
+            let _ = state.store.join_denied_remove(net, &mac).await;
+            let _ = state.store.join_approved_ips_remove(net, &mac).await;
 
             if !notify_url.is_empty() {
                 let body = format!("Type: Internet access revoked\n\nMAC: {mac}\nLabel: {dev_label}\nIPv4: {dev_ip}\nIPv6: {dev_ip6}");
-                crate::cmd::ntfy(&notify_url, &format!("Access revoked — {net}"), "default", "no_entry", &body).await;
+                crate::cmd::ntfy(
+                    &notify_url,
+                    &format!("Access revoked — {net}"),
+                    "default",
+                    "no_entry",
+                    &body,
+                )
+                .await;
             }
             ok()
         }
 
         "approve_domain" => {
             let domain: String = form.domain.as_deref().unwrap_or("").trim().to_lowercase();
-            if !files::is_valid_domain(&domain) { return err("Invalid domain"); }
+            if !files::is_valid_domain(&domain) {
+                return err("Invalid domain");
+            }
 
             let route: String = form.route.as_deref().unwrap_or("").trim().to_lowercase();
             let vpn_tier = if route.is_empty() {
@@ -686,12 +948,38 @@ pub async fn post(
                 }
             };
 
-            crate::observation::write_domain_rule(&base_dir, &state.split_routing_dir, net, &mac, &domain, &route).await;
+            crate::observation::write_domain_rule(
+                &state.store,
+                &base_dir,
+                &state.split_routing_dir,
+                net,
+                &mac,
+                &domain,
+                &route,
+            )
+            .await;
 
             if !notify_url.is_empty() {
-                let route_suffix = vpn_tier.as_ref().map(|t| format!(" via {} VPN", t.name)).unwrap_or_default();
-                let body = format!("{}: {domain} allowed on {net}{route_suffix}.\n\nLabel: {dev_label}", if dev_label.is_empty() { mac.as_str() } else { &dev_label });
-                crate::cmd::ntfy(&notify_url, &format!("Rule added — {net}"), "default", "shield", &body).await;
+                let route_suffix = vpn_tier
+                    .as_ref()
+                    .map(|t| format!(" via {} VPN", t.name))
+                    .unwrap_or_default();
+                let body = format!(
+                    "{}: {domain} allowed on {net}{route_suffix}.\n\nLabel: {dev_label}",
+                    if dev_label.is_empty() {
+                        mac.as_str()
+                    } else {
+                        &dev_label
+                    }
+                );
+                crate::cmd::ntfy(
+                    &notify_url,
+                    &format!("Rule added — {net}"),
+                    "default",
+                    "shield",
+                    &body,
+                )
+                .await;
             }
             ok()
         }
@@ -701,7 +989,9 @@ pub async fn post(
             let dst_port = form.dst_port.as_deref().unwrap_or("");
             let dst_proto = form.dst_proto.as_deref().unwrap_or("").to_lowercase();
 
-            if !valid_ip(dst_ip) { return err("Invalid IP"); }
+            if !valid_ip(dst_ip) {
+                return err("Invalid IP");
+            }
             if !dst_port.chars().all(|c| c.is_ascii_digit()) || dst_port.is_empty() {
                 return err("Invalid port");
             }
@@ -709,14 +999,37 @@ pub async fn post(
                 return err("Invalid proto");
             }
 
-            crate::observation::write_ip_rule(&base_dir, net, &mac, dst_ip, dst_port, &dst_proto).await;
-
-            let pending_path = base_dir.join(format!("{net}-pending-{mac_n}"));
-            let _ = files::file_remove_pending(&pending_path, dst_ip, dst_port, &dst_proto).await;
+            crate::observation::write_ip_rule(
+                &state.store,
+                net,
+                &mac,
+                dst_ip,
+                dst_port,
+                &dst_proto,
+            )
+            .await;
+            let _ = state
+                .store
+                .remove_pending_connection(net, &mac, dst_ip, dst_port, &dst_proto)
+                .await;
 
             if !notify_url.is_empty() {
-                let body = format!("{}: {dst_ip}:{dst_port}/{dst_proto} allowed on {net}.", if dev_label.is_empty() { mac.as_str() } else { &dev_label });
-                crate::cmd::ntfy(&notify_url, &format!("Rule added — {net}"), "default", "shield", &body).await;
+                let body = format!(
+                    "{}: {dst_ip}:{dst_port}/{dst_proto} allowed on {net}.",
+                    if dev_label.is_empty() {
+                        mac.as_str()
+                    } else {
+                        &dev_label
+                    }
+                );
+                crate::cmd::ntfy(
+                    &notify_url,
+                    &format!("Rule added — {net}"),
+                    "default",
+                    "shield",
+                    &body,
+                )
+                .await;
             }
             ok()
         }
@@ -725,9 +1038,13 @@ pub async fn post(
             let dst_ip = form.dst_ip.as_deref().unwrap_or("");
             let dst_port = form.dst_port.as_deref().unwrap_or("");
             let dst_proto = form.dst_proto.as_deref().unwrap_or("").to_lowercase();
-            if !valid_ip(dst_ip) { return err("Invalid IP"); }
-            let pending_path = base_dir.join(format!("{net}-pending-{mac_n}"));
-            let _ = files::file_remove_pending(&pending_path, dst_ip, dst_port, &dst_proto).await;
+            if !valid_ip(dst_ip) {
+                return err("Invalid IP");
+            }
+            let _ = state
+                .store
+                .remove_pending_connection(net, &mac, dst_ip, dst_port, &dst_proto)
+                .await;
             ok()
         }
 
@@ -735,10 +1052,11 @@ pub async fn post(
             let dst = form.dst.as_deref().unwrap_or("");
             let port = form.port.as_deref().unwrap_or("");
             let proto = form.proto.as_deref().unwrap_or("").to_lowercase();
-            if dst.is_empty() { return err("Missing dst"); }
+            if dst.is_empty() {
+                return err("Missing dst");
+            }
 
-            let rules_path = base_dir.join(format!("{net}-device-rules"));
-            let _ = files::file_remove_rule(&rules_path, &mac, dst).await;
+            let _ = state.store.remove_device_rule(net, &mac, dst).await;
 
             if dst.contains(':') {
                 crate::cmd::nft_del_element(&format!("{net}_allow_{mac_n}_6"), dst).await;
@@ -748,7 +1066,8 @@ pub async fn post(
                 // domain — remove from dnsmasq conf
                 let dconf = format!("/etc/dnsmasq.d/{net}-device-{mac_n}.conf");
                 if let Ok(content) = tokio::fs::read_to_string(&dconf).await {
-                    let patched: String = content.lines()
+                    let patched: String = content
+                        .lines()
                         .filter(|l| !l.contains(&format!("/{dst}/")))
                         .flat_map(|l| [l, "\n"])
                         .collect();
@@ -762,31 +1081,30 @@ pub async fn post(
 
         "delete" => {
             crate::cmd::append_join_history(
-                &base_dir, net, "deleted", &mac,
-                &dev_ip, &dev_ip6, &dev_label,
-                &remote_ip, &remote_ip, "", &actor_mac,
-            ).await;
+                &state.store,
+                net,
+                "deleted",
+                &mac,
+                &dev_ip,
+                &dev_ip6,
+                &dev_label,
+                &remote_ip,
+                &remote_ip,
+                "",
+                &actor_mac,
+            )
+            .await;
 
-            // Remove from all state files
-            for filename in &[
-                format!("{net}-device-labels"),
-                format!("{net}-device-ips"),
-                format!("{net}-device-ip6s"),
-                format!("{net}-device-limits"),
-                format!("{net}-device-rules"),
-            ] {
-                let path = base_dir.join(filename);
-                let _ = files::file_remove_by_mac(&path, &mac).await;
-            }
-            for filename in &[
-                format!("{net}-join-approved"),
-                format!("{net}-join-denied"),
-            ] {
-                let path = base_dir.join(filename);
-                let _ = files::file_remove_line(&path, &mac).await;
-            }
-            let _ = files::file_remove_space_prefix(&base_dir.join(format!("{net}-join-pending")), &mac).await;
-            let _ = files::file_remove_space_prefix(&base_dir.join(format!("{net}-join-approved-ips")), &mac).await;
+            // Remove from all state
+            let _ = state.store.remove_label(net, &mac).await;
+            let _ = state.store.remove_device_ip(net, &mac).await;
+            let _ = state.store.remove_device_ip6(net, &mac).await;
+            let _ = state.store.remove_device_limit(net, &mac).await;
+            let _ = state.store.remove_device_rules_for_mac(net, &mac).await;
+            let _ = state.store.join_approved_remove(net, &mac).await;
+            let _ = state.store.join_denied_remove(net, &mac).await;
+            let _ = state.store.join_pending_remove(net, &mac).await;
+            let _ = state.store.join_approved_ips_remove(net, &mac).await;
 
             // NFT cleanup
             if !dev_ip.is_empty() {
@@ -799,14 +1117,22 @@ pub async fn post(
             }
 
             // dnsmasq cleanup
-            let _ = tokio::fs::remove_file(format!("/etc/dnsmasq.d/{net}-device-{mac_n}.conf")).await;
+            let _ =
+                tokio::fs::remove_file(format!("/etc/dnsmasq.d/{net}-device-{mac_n}.conf")).await;
             let _ = tokio::fs::remove_file(format!("/etc/dnsmasq.d/{net}-dns-{mac_n}.conf")).await;
             crate::cmd::reload_dnsmasq().await;
-            crate::regen_inspect::run(&base_dir, &state.split_routing_dir, net).await;
+            crate::regen_inspect::run(&base_dir, &state.split_routing_dir, &state.store, net).await;
 
             if !notify_url.is_empty() {
                 let body = format!("{} has been removed from {net}.\n\nMAC: {mac}\nIPv4: {dev_ip}\nIPv6: {dev_ip6}", if dev_label.is_empty() { mac.as_str() } else { &dev_label });
-                crate::cmd::ntfy(&notify_url, &format!("Device removed — {net}"), "default", "wastebasket", &body).await;
+                crate::cmd::ntfy(
+                    &notify_url,
+                    &format!("Device removed — {net}"),
+                    "default",
+                    "wastebasket",
+                    &body,
+                )
+                .await;
             }
 
             let _ = back_url; // suppress warning — we redirect to network page on delete
@@ -932,7 +1258,12 @@ mod tests {
     // ── lease_status ──────────────────────────────────────────────────────────
 
     fn lease(mac: &str, expiry: u64) -> Lease {
-        Lease { expiry, mac: mac.to_string(), ip: "10.0.0.5".into(), hostname: "host".into() }
+        Lease {
+            expiry,
+            mac: mac.to_string(),
+            ip: "10.0.0.5".into(),
+            hostname: "host".into(),
+        }
     }
 
     #[test]
@@ -943,7 +1274,10 @@ mod tests {
     #[test]
     fn lease_status_static_when_expiry_zero() {
         let leases = vec![lease("aa:bb:cc:dd:ee:ff", 0)];
-        assert_eq!(lease_status(&leases, "aa:bb:cc:dd:ee:ff"), "Static (no expiry)");
+        assert_eq!(
+            lease_status(&leases, "aa:bb:cc:dd:ee:ff"),
+            "Static (no expiry)"
+        );
     }
 
     #[test]
@@ -955,7 +1289,9 @@ mod tests {
     #[test]
     fn lease_status_matches_mac_case_insensitively() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let leases = vec![lease("AA:BB:CC:DD:EE:FF", now + 100000)];
         assert_eq!(lease_status(&leases, "aa:bb:cc:dd:ee:ff"), "Expires in 1d");
     }
@@ -965,28 +1301,36 @@ mod tests {
     #[test]
     fn rel_time_just_now_for_recent_timestamp() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert_eq!(rel_time(now), "just now");
     }
 
     #[test]
     fn rel_time_minutes_ago() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert_eq!(rel_time(now - 120), "2 min ago");
     }
 
     #[test]
     fn rel_time_hours_ago() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert_eq!(rel_time(now - 7200), "2h ago");
     }
 
     #[test]
     fn rel_time_days_ago() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert_eq!(rel_time(now - 172800), "2d ago");
     }
 

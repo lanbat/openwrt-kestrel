@@ -6,10 +6,13 @@
 //! export/ingest machinery is shared infrastructure, not a coincidence.
 
 use crate::tunnel::{
-    bytes32, bytes64, parse_user_ref, parse_visibility, read_maybe_sealed,
+    bytes32, bytes64, maybe_sealed_bytes, parse_user_ref, parse_visibility,
     recipient_messaging_pubkey, self_identity, user_id_str, write_maybe_sealed,
 };
-use crate::{now_unix, parse_hash32, parse_reason_code, parse_stance, parse_target, reason_code_str, stance_str, target_value_str};
+use crate::{
+    now_unix, parse_hash32, parse_reason_code, parse_stance, parse_target, reason_code_str,
+    stance_str, target_value_str,
+};
 use anyhow::{bail, Context, Result};
 use domain_types::{Hash32, PublicKeyBytes, Reason, SharedRuleEntry, SharedRuleList, Visibility};
 use state_store::StateStore;
@@ -29,22 +32,43 @@ fn entry_to_json(e: &SharedRuleEntry) -> serde_json::Value {
 }
 
 fn entry_from_json(json: &serde_json::Value) -> Result<SharedRuleEntry> {
-    let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
+    let get_str = |key: &str| -> Result<&str> {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("missing `{key}`"))
+    };
     let target = parse_target(get_str("target_kind")?, get_str("target_value")?)?;
     let stance = parse_stance(get_str("stance")?)?;
     let reason_code = parse_reason_code(get_str("reason_code")?)?;
-    let reason_note = json.get("reason_note").and_then(|v| v.as_str()).map(String::from);
+    let reason_note = json
+        .get("reason_note")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let reason_evidence: Vec<Hash32> = json
         .get("reason_evidence")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(parse_hash32).collect::<Result<Vec<_>>>())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(parse_hash32)
+                .collect::<Result<Vec<_>>>()
+        })
         .transpose()?
         .unwrap_or_default();
-    Ok(SharedRuleEntry { target, stance, reason: Reason { code: reason_code, note: reason_note, evidence: reason_evidence } })
+    Ok(SharedRuleEntry {
+        target,
+        stance,
+        reason: Reason {
+            code: reason_code,
+            note: reason_note,
+            evidence: reason_evidence,
+        },
+    })
 }
 
 fn read_entries_file(path: &Path) -> Result<Vec<SharedRuleEntry>> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let json: serde_json::Value = serde_json::from_str(&text)?;
     json.as_array()
         .with_context(|| format!("{} must contain a JSON array of entries", path.display()))?
@@ -73,7 +97,11 @@ fn list_to_json(list: &SharedRuleList, identity_pubkey: &PublicKeyBytes) -> serd
 }
 
 fn list_from_json(json: &serde_json::Value) -> Result<(SharedRuleList, PublicKeyBytes)> {
-    let get_str = |key: &str| -> Result<&str> { json.get(key).and_then(|v| v.as_str()).with_context(|| format!("missing `{key}`")) };
+    let get_str = |key: &str| -> Result<&str> {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("missing `{key}`"))
+    };
     let author = parse_user_ref(get_str("author")?)?;
     let identity_pubkey = PublicKeyBytes(bytes32(get_str("identity_pubkey")?)?);
     let categories: Vec<String> = json
@@ -92,13 +120,19 @@ fn list_from_json(json: &serde_json::Value) -> Result<(SharedRuleList, PublicKey
         .collect::<Result<_>>()?;
     let list = SharedRuleList {
         author,
-        sequence: json.get("sequence").and_then(|v| v.as_u64()).context("missing `sequence`")?,
+        sequence: json
+            .get("sequence")
+            .and_then(|v| v.as_u64())
+            .context("missing `sequence`")?,
         name: get_str("name")?.to_string(),
         description: get_str("description")?.to_string(),
         categories,
         visibility: parse_visibility(get_str("visibility")?)?,
         entries,
-        issued_at: json.get("issued_at").and_then(|v| v.as_i64()).context("missing `issued_at`")?,
+        issued_at: json
+            .get("issued_at")
+            .and_then(|v| v.as_i64())
+            .context("missing `issued_at`")?,
         expires_at: json.get("expires_at").and_then(|v| v.as_i64()),
         supersedes: json.get("supersedes").and_then(|v| v.as_u64()),
         signature: domain_types::SignatureBytes(bytes64(get_str("signature")?)?),
@@ -129,7 +163,10 @@ pub fn publish_list(
     }
     let entries = read_entries_file(entries_file)?;
     if entries.is_empty() {
-        bail!("{} contains no entries — refusing to publish an empty list", entries_file.display());
+        bail!(
+            "{} contains no entries — refusing to publish an empty list",
+            entries_file.display()
+        );
     }
 
     let (author, seed) = self_identity(store)?;
@@ -153,7 +190,10 @@ pub fn publish_list(
     list.signature = kp.sign(crypto::contexts::SHARED_RULE_LIST, &signing_bytes);
 
     store.store_own_shared_rule_list(&list)?;
-    println!("published list #{sequence} \"{name}\" ({} entries)", list.entries.len());
+    println!(
+        "published list #{sequence} \"{name}\" ({} entries)",
+        list.entries.len()
+    );
 
     let identity_pubkey = kp.public_key();
     let json = list_to_json(&list, &identity_pubkey);
@@ -173,8 +213,19 @@ pub fn publish_list(
                 let recipient_user = parse_user_ref(r)?;
                 let recipient_pubkey = recipient_messaging_pubkey(store, &recipient_user)?;
                 let path = dir.join(format!("{}.json", r.replace('/', "_")));
-                write_maybe_sealed(&plaintext, Some(&recipient_pubkey), &path)?;
-                println!("exported (sealed) to {}", path.display());
+                let payload = maybe_sealed_bytes(&plaintext, Some(&recipient_pubkey))?;
+                if crate::tunnel::needs_file_fallback(
+                    crate::tunnel::try_deliver(
+                        store,
+                        &recipient_user,
+                        p2p_transport::StatementKind::RestrictedSharedRuleList,
+                        &payload,
+                    ),
+                    &recipient_user,
+                ) {
+                    write_maybe_sealed(&plaintext, Some(&recipient_pubkey), &path)?;
+                    println!("exported (sealed) to {}", path.display());
+                }
             }
         }
     }
@@ -182,14 +233,27 @@ pub fn publish_list(
 }
 
 pub fn ingest_list(store: &StateStore, file: &Path) -> Result<()> {
-    let json = read_maybe_sealed(store, file)?;
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    ingest_list_bytes(store, &bytes)
+}
+
+pub(crate) fn ingest_list_bytes(store: &StateStore, bytes: &[u8]) -> Result<()> {
+    let json = crate::tunnel::parse_maybe_sealed_bytes(store, bytes)?;
     let (list, identity_pubkey) = list_from_json(&json)?;
-    crypto::verify(&identity_pubkey, crypto::contexts::SHARED_RULE_LIST, &list.signing_bytes(), &list.signature)
-        .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
+    crypto::verify(
+        &identity_pubkey,
+        crypto::contexts::SHARED_RULE_LIST,
+        &list.signing_bytes(),
+        &list.signature,
+    )
+    .map_err(|_| anyhow::anyhow!("signature verification failed — refusing to ingest"))?;
     store.ingest_shared_rule_list(&list)?;
     println!(
         "ingested list #{} \"{}\" from {} ({} entries)",
-        list.sequence, list.name, user_id_str(&list.author), list.entries.len()
+        list.sequence,
+        list.name,
+        user_id_str(&list.author),
+        list.entries.len()
     );
     Ok(())
 }
@@ -201,7 +265,12 @@ pub fn list_subscribed_lists(store: &StateStore) -> Result<()> {
         return Ok(());
     }
     for list in lists {
-        println!("#{} \"{}\" from {}", list.sequence, list.name, user_id_str(&list.author));
+        println!(
+            "#{} \"{}\" from {}",
+            list.sequence,
+            list.name,
+            user_id_str(&list.author)
+        );
         println!("  description : {}", list.description);
         println!("  categories  : {:?}", list.categories);
         println!("  entries     : {}", list.entries.len());
@@ -217,13 +286,25 @@ pub fn list_subscribed_lists(store: &StateStore) -> Result<()> {
 /// rather than silently creating one with default weights, since a
 /// category filter without any weights configured would be a confusing
 /// half-set-up trust relationship.
-pub fn set_follow_category_filter(store: &StateStore, target_user: domain_types::UserId, category: Option<String>) -> Result<()> {
-    let mut rule = store.get_follow(&target_user)?.context("not following this user yet — run `add-follow` first")?;
+pub fn set_follow_category_filter(
+    store: &StateStore,
+    target_user: domain_types::UserId,
+    category: Option<String>,
+) -> Result<()> {
+    let mut rule = store
+        .get_follow(&target_user)?
+        .context("not following this user yet — run `add-follow` first")?;
     rule.category_filter = category.clone();
     store.upsert_follow(&rule)?;
     match category {
-        Some(c) => println!("category filter for {} set to \"{c}\"", user_id_str(&target_user)),
-        None => println!("category filter for {} cleared — every subscribed list from them counts again", user_id_str(&target_user)),
+        Some(c) => println!(
+            "category filter for {} set to \"{c}\"",
+            user_id_str(&target_user)
+        ),
+        None => println!(
+            "category filter for {} cleared — every subscribed list from them counts again",
+            user_id_str(&target_user)
+        ),
     }
     Ok(())
 }

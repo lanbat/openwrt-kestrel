@@ -21,6 +21,14 @@ use std::path::Path;
 use tokio::io::AsyncReadExt;
 
 use crate::data::{dhcp_fingerprint::DhcpFingerprint, files, mdns::MdnsInfo};
+use crate::db::{FingerprintRow, Store};
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 /// The fingerprint signals gathered for one specific, not-yet-identified
 /// join — nothing here is tied to a label yet.
@@ -29,6 +37,22 @@ pub struct Observed {
     pub dhcp: DhcpFingerprint,
     pub mdns: MdnsInfo,
     pub wifi_caps: String,
+    pub browser_cookie: String,
+    pub http_headers: String,
+    pub tcp_syn: String,
+    pub tls_clienthello: String,
+    pub quic_initial: String,
+}
+
+/// A normalized observation retained as historical evidence. Values are
+/// bounded fingerprints, never raw packets or HTTP headers.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct EvidenceObservation {
+    pub signal: String,
+    pub value: String,
+    pub first_seen: u64,
+    pub last_seen: u64,
+    pub observations: u32,
 }
 
 impl Observed {
@@ -41,9 +65,16 @@ impl Observed {
         let dhcp = crate::data::dhcp_fingerprint::parse_all(logs)
             .remove(mac)
             .unwrap_or_default();
-        let mdns = crate::data::mdns::lookup_device_info(bridge_ip, ip).await.unwrap_or_default();
+        let mdns = crate::data::mdns::lookup_device_info(bridge_ip, ip)
+            .await
+            .unwrap_or_default();
         let wifi_caps = crate::data::wifi_caps::capabilities(net, mac).await;
-        Self { dhcp, mdns, wifi_caps }
+        Self {
+            dhcp,
+            mdns,
+            wifi_caps,
+            ..Default::default()
+        }
     }
 }
 
@@ -68,9 +99,13 @@ pub struct FingerprintRecord {
     /// first — `rename` appends to this rather than discarding the old
     /// label, so a rename never loses the identity's naming history.
     pub label_history: Vec<(String, u64)>,
+    pub browser_cookie: String,
+    pub http_headers: String,
+    pub tcp_syn: String,
+    pub tls_clienthello: String,
+    pub quic_initial: String,
+    pub evidence: Vec<EvidenceObservation>,
 }
-
-const FIELDS: usize = 11;
 
 /// `label_history` entries are encoded as `label@timestamp`, joined by
 /// `|` — labels are free text (see the "allow any text as device label"
@@ -79,11 +114,15 @@ const FIELDS: usize = 11;
 /// project's tab-separated file formats (a device-labels entry with a
 /// literal tab would break the same way): fine for a home router admin's
 /// own input, not hardened against adversarial label text.
-fn encode_label_history(history: &[(String, u64)]) -> String {
-    history.iter().map(|(label, ts)| format!("{label}@{ts}")).collect::<Vec<_>>().join("|")
+pub(crate) fn encode_label_history(history: &[(String, u64)]) -> String {
+    history
+        .iter()
+        .map(|(label, ts)| format!("{label}@{ts}"))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
-fn parse_label_history(s: &str) -> Vec<(String, u64)> {
+pub(crate) fn parse_label_history(s: &str) -> Vec<(String, u64)> {
     s.split('|')
         .filter(|e| !e.is_empty())
         .filter_map(|e| {
@@ -93,25 +132,201 @@ fn parse_label_history(s: &str) -> Vec<(String, u64)> {
         .collect()
 }
 
-pub async fn read_registry(path: &Path) -> Vec<FingerprintRecord> {
-    files::read_lines(path)
+pub async fn read_registry(store: &Store, iface: &str) -> Vec<FingerprintRecord> {
+    store
+        .read_fingerprint_registry(iface)
         .await
-        .iter()
-        .filter_map(|line| parse_record(line))
+        .unwrap_or_default()
+        .into_iter()
+        .map(row_to_record)
         .collect()
 }
 
 /// The identity `mac` currently belongs to, if any — used both to offer a
 /// suggestion and to find what needs renaming when a device's label is
 /// edited.
-pub fn find_by_mac<'a>(records: &'a [FingerprintRecord], mac: &str) -> Option<&'a FingerprintRecord> {
+pub fn find_by_mac<'a>(
+    records: &'a [FingerprintRecord],
+    mac: &str,
+) -> Option<&'a FingerprintRecord> {
     let mac = mac.to_lowercase();
     records.iter().find(|r| r.macs.contains(&mac))
 }
 
-fn parse_record(line: &str) -> Option<FingerprintRecord> {
-    let f: Vec<&str> = line.splitn(FIELDS, '\t').collect();
-    if f.len() < FIELDS || f[0].is_empty() || f[1].is_empty() {
+fn row_to_record(r: FingerprintRow) -> FingerprintRecord {
+    FingerprintRecord {
+        id: r.id,
+        label: r.label,
+        dhcp_options: r.dhcp_options,
+        dhcp_vendor: r.dhcp_vendor,
+        wifi_caps: r.wifi_caps,
+        mdns_name: r.mdns_name,
+        mdns_model: r.mdns_model,
+        macs: r
+            .macs
+            .split(',')
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty())
+            .collect(),
+        last_seen: r.last_seen as u64,
+        first_seen: r.first_seen as u64,
+        label_history: parse_label_history(&r.label_history),
+        browser_cookie: r.browser_cookie,
+        http_headers: r.http_headers,
+        tcp_syn: r.tcp_syn,
+        tls_clienthello: r.tls_clienthello,
+        quic_initial: r.quic_initial,
+        evidence: serde_json::from_str(&r.evidence_json).unwrap_or_default(),
+    }
+}
+
+fn record_to_row(r: &FingerprintRecord) -> FingerprintRow {
+    FingerprintRow {
+        id: r.id.clone(),
+        label: r.label.clone(),
+        dhcp_options: r.dhcp_options.clone(),
+        dhcp_vendor: r.dhcp_vendor.clone(),
+        wifi_caps: r.wifi_caps.clone(),
+        mdns_name: r.mdns_name.clone(),
+        mdns_model: r.mdns_model.clone(),
+        macs: r.macs.join(","),
+        last_seen: r.last_seen as i64,
+        first_seen: r.first_seen as i64,
+        label_history: encode_label_history(&r.label_history),
+        browser_cookie: r.browser_cookie.clone(),
+        http_headers: r.http_headers.clone(),
+        tcp_syn: r.tcp_syn.clone(),
+        tls_clienthello: r.tls_clienthello.clone(),
+        quic_initial: r.quic_initial.clone(),
+        evidence_json: serde_json::to_string(&r.evidence).unwrap_or_else(|_| "[]".into()),
+    }
+}
+
+fn observed_signals(observed: &Observed) -> Vec<(&'static str, String, f32)> {
+    let mut out = Vec::new();
+    if !observed.mdns.name.is_empty() {
+        out.push(("mdns_name", observed.mdns.name.clone(), 50.0));
+    }
+    if !observed.mdns.model.is_empty() {
+        out.push(("mdns_model", observed.mdns.model.clone(), 15.0));
+    }
+    if !observed.wifi_caps.is_empty() {
+        out.push(("wifi_caps", observed.wifi_caps.clone(), 15.0));
+    }
+    if !observed.dhcp.vendor_class.is_empty() {
+        out.push(("dhcp_vendor", observed.dhcp.vendor_class.clone(), 10.0));
+    }
+    if !observed.dhcp.requested_options.is_empty() {
+        out.push((
+            "dhcp_options",
+            observed.dhcp.requested_options.clone(),
+            10.0,
+        ));
+    }
+    if !observed.browser_cookie.is_empty() {
+        out.push(("browser_cookie", observed.browser_cookie.clone(), 35.0));
+    }
+    if !observed.http_headers.is_empty() {
+        out.push(("http_headers", observed.http_headers.clone(), 10.0));
+    }
+    if !observed.tcp_syn.is_empty() {
+        out.push(("tcp_syn", observed.tcp_syn.clone(), 8.0));
+    }
+    if !observed.tls_clienthello.is_empty() {
+        out.push(("tls_clienthello", observed.tls_clienthello.clone(), 12.0));
+    }
+    if !observed.quic_initial.is_empty() {
+        out.push(("quic_initial", observed.quic_initial.clone(), 12.0));
+    }
+    out
+}
+
+fn record_evidence(record: &mut FingerprintRecord, observed: &Observed, now_ts: u64) {
+    for (signal, value, _) in observed_signals(observed) {
+        if let Some(existing) = record
+            .evidence
+            .iter_mut()
+            .find(|item| item.signal == signal && item.value == value)
+        {
+            existing.last_seen = now_ts;
+            existing.observations = existing.observations.saturating_add(1);
+        } else {
+            record.evidence.push(EvidenceObservation {
+                signal: signal.into(),
+                value,
+                first_seen: now_ts,
+                last_seen: now_ts,
+                observations: 1,
+            });
+        }
+    }
+    // Keep the registry bounded when a signal legitimately changes over a
+    // device's lifetime, while retaining enough history to distinguish a
+    // stable value from a one-off observation.
+    for signal in [
+        "mdns_name",
+        "mdns_model",
+        "wifi_caps",
+        "dhcp_vendor",
+        "dhcp_options",
+        "browser_cookie",
+        "http_headers",
+        "tcp_syn",
+        "tls_clienthello",
+        "quic_initial",
+    ] {
+        let mut indexes: Vec<usize> = record
+            .evidence
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.signal == signal)
+            .map(|(index, _)| index)
+            .collect();
+        while indexes.len() > 8 {
+            let remove_at = indexes
+                .iter()
+                .copied()
+                .min_by_key(|index| {
+                    let item = &record.evidence[*index];
+                    (item.last_seen, item.observations)
+                })
+                .unwrap();
+            record.evidence.remove(remove_at);
+            indexes = record
+                .evidence
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item.signal == signal)
+                .map(|(index, _)| index)
+                .collect();
+        }
+    }
+}
+
+async fn write_registry(store: &Store, iface: &str, records: &[FingerprintRecord]) {
+    let rows: Vec<FingerprintRow> = records.iter().map(record_to_row).collect();
+    let _ = store.write_fingerprint_registry(iface, &rows).await;
+}
+
+const FLAT_FILE_FIELDS: usize = 11;
+
+/// Parses the legacy `{iface}-device-fingerprints` flat-file format —
+/// used only by `migrate::migrate_fingerprints` to import a router's
+/// existing registry into `Store`. Not part of the ongoing API (see
+/// `read_registry`, which reads from `Store`); this exists purely so the
+/// one-time importer doesn't need to duplicate the ad-hoc tab-separated
+/// parsing this format has always used.
+pub(crate) async fn read_registry_from_flat_file(path: &Path) -> Vec<FingerprintRecord> {
+    files::read_lines(path)
+        .await
+        .iter()
+        .filter_map(|line| parse_flat_file_record(line))
+        .collect()
+}
+
+fn parse_flat_file_record(line: &str) -> Option<FingerprintRecord> {
+    let f: Vec<&str> = line.splitn(FLAT_FILE_FIELDS, '\t').collect();
+    if f.len() < FLAT_FILE_FIELDS || f[0].is_empty() || f[1].is_empty() {
         return None;
     }
     Some(FingerprintRecord {
@@ -122,25 +337,21 @@ fn parse_record(line: &str) -> Option<FingerprintRecord> {
         wifi_caps: f[4].to_string(),
         mdns_name: f[5].to_string(),
         mdns_model: f[6].to_string(),
-        macs: f[7].split(',').map(str::to_lowercase).filter(|s| !s.is_empty()).collect(),
+        macs: f[7]
+            .split(',')
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty())
+            .collect(),
         last_seen: f[8].parse().unwrap_or(0),
         first_seen: f[9].parse().unwrap_or(0),
         label_history: parse_label_history(f[10]),
+        browser_cookie: String::new(),
+        http_headers: String::new(),
+        tcp_syn: String::new(),
+        tls_clienthello: String::new(),
+        quic_initial: String::new(),
+        evidence: Vec::new(),
     })
-}
-
-fn format_record(r: &FingerprintRecord) -> String {
-    format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        r.id, r.label, r.dhcp_options, r.dhcp_vendor, r.wifi_caps, r.mdns_name, r.mdns_model,
-        r.macs.join(","), r.last_seen, r.first_seen, encode_label_history(&r.label_history),
-    )
-}
-
-async fn write_registry(path: &Path, records: &[FingerprintRecord]) {
-    let content = records.iter().map(format_record).collect::<Vec<_>>().join("\n");
-    let content = if content.is_empty() { content } else { format!("{content}\n") };
-    let _ = tokio::fs::write(path, content).await;
 }
 
 /// 8 random hex characters from `/dev/urandom` — same source
@@ -173,17 +384,36 @@ fn apply_observed(r: &mut FingerprintRecord, mac: &str, observed: &Observed, now
     if !observed.mdns.model.is_empty() {
         r.mdns_model = observed.mdns.model.clone();
     }
+    for (dst, src) in [
+        (&mut r.browser_cookie, &observed.browser_cookie),
+        (&mut r.http_headers, &observed.http_headers),
+        (&mut r.tcp_syn, &observed.tcp_syn),
+        (&mut r.tls_clienthello, &observed.tls_clienthello),
+        (&mut r.quic_initial, &observed.quic_initial),
+    ] {
+        if !src.is_empty() {
+            *dst = src.clone();
+        }
+    }
     r.last_seen = now_ts;
+    record_evidence(r, observed, now_ts);
 }
 
 /// Registers a brand-new identity (no confirmed match existed) for
 /// `label`, seeded with whatever was observed for `mac`. Returns the
 /// generated id.
-pub async fn create(path: &Path, label: &str, mac: &str, observed: &Observed, now_ts: u64) -> String {
-    let mut records = read_registry(path).await;
+pub async fn create(
+    store: &Store,
+    iface: &str,
+    label: &str,
+    mac: &str,
+    observed: &Observed,
+    now_ts: u64,
+) -> String {
+    let mut records = read_registry(store, iface).await;
     let id = gen_id().await;
     let mac = mac.to_lowercase();
-    records.push(FingerprintRecord {
+    let mut record = FingerprintRecord {
         id: id.clone(),
         label: label.to_string(),
         dhcp_options: observed.dhcp.requested_options.clone(),
@@ -195,8 +425,16 @@ pub async fn create(path: &Path, label: &str, mac: &str, observed: &Observed, no
         last_seen: now_ts,
         first_seen: now_ts,
         label_history: Vec::new(),
-    });
-    write_registry(path, &records).await;
+        browser_cookie: observed.browser_cookie.clone(),
+        http_headers: observed.http_headers.clone(),
+        tcp_syn: observed.tcp_syn.clone(),
+        tls_clienthello: observed.tls_clienthello.clone(),
+        quic_initial: observed.quic_initial.clone(),
+        evidence: Vec::new(),
+    };
+    record_evidence(&mut record, observed, now_ts);
+    records.push(record);
+    write_registry(store, iface, &records).await;
     id
 }
 
@@ -205,12 +443,19 @@ pub async fn create(path: &Path, label: &str, mac: &str, observed: &Observed, no
 /// time (an empty `Observed` field never overwrites a previously-known
 /// one). Does not touch the label — that's `rename`'s job, kept separate
 /// so a label edit later doesn't require re-confirming a match.
-pub async fn merge_into(path: &Path, id: &str, mac: &str, observed: &Observed, now_ts: u64) {
-    let mut records = read_registry(path).await;
+pub async fn merge_into(
+    store: &Store,
+    iface: &str,
+    id: &str,
+    mac: &str,
+    observed: &Observed,
+    now_ts: u64,
+) {
+    let mut records = read_registry(store, iface).await;
     let mac = mac.to_lowercase();
     if let Some(r) = records.iter_mut().find(|r| r.id == id) {
         apply_observed(r, &mac, observed, now_ts);
-        write_registry(path, &records).await;
+        write_registry(store, iface, &records).await;
     }
 }
 
@@ -218,29 +463,31 @@ pub async fn merge_into(path: &Path, id: &str, mac: &str, observed: &Observed, n
 /// wherever a device's label actually gets edited (`routes::device`'s
 /// label form, `approve_join`'s `set_label` action), so a rename never
 /// orphans the identity's accumulated fingerprint history.
-pub async fn rename(path: &Path, id: &str, new_label: &str) {
-    let mut records = read_registry(path).await;
+pub async fn rename(store: &Store, iface: &str, id: &str, new_label: &str) {
+    let mut records = read_registry(store, iface).await;
     if let Some(r) = records.iter_mut().find(|r| r.id == id) {
         if r.label != new_label {
             let now_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             r.label_history.push((r.label.clone(), now_ts));
             r.label = new_label.to_string();
         }
-        write_registry(path, &records).await;
+        write_registry(store, iface, &records).await;
     }
 }
 
 /// Convenience wrapper for callers that only have a MAC, not an identity
 /// id (i.e. every actual label-editing call site): looks up whether `mac`
-/// belongs to a known identity in the registry at `path` and, if so,
-/// renames it. A no-op for a MAC that was never registered — the common
-/// case, since only randomized MACs ever get an entry at all.
-pub async fn rename_if_known(path: &Path, mac: &str, new_label: &str) {
-    let records = read_registry(path).await;
+/// belongs to a known identity in the registry, and if so, renames it. A
+/// no-op for a MAC that was never registered — the common case, since
+/// only randomized MACs ever get an entry at all.
+pub async fn rename_if_known(store: &Store, iface: &str, mac: &str, new_label: &str) {
+    let records = read_registry(store, iface).await;
     if let Some(r) = find_by_mac(&records, mac) {
         let id = r.id.clone();
-        rename(path, &id, new_label).await;
+        rename(store, iface, &id, new_label).await;
     }
 }
 
@@ -256,8 +503,27 @@ pub async fn rename_if_known(path: &Path, mac: &str, new_label: &str) {
 /// identically on both); DHCP vendor class and option-request order are
 /// weaker still (OS/DHCP-client-version level). All five cap at 100.
 fn score(observed: &Observed, record: &FingerprintRecord) -> u8 {
+    if !record.evidence.is_empty() {
+        let mut total = 0.0f32;
+        for (signal, value, weight) in observed_signals(observed) {
+            let best = record
+                .evidence
+                .iter()
+                .filter(|item| item.signal == signal && item.value == value)
+                .map(|item| {
+                    let repeat_confidence = (item.observations.min(3) as f32) / 3.0;
+                    let age_days = now_unix().saturating_sub(item.last_seen) as f32 / 86_400.0;
+                    let recency = (1.0 - age_days / 365.0 * 0.5).max(0.5);
+                    weight * (0.5 + repeat_confidence * 0.5) * recency
+                })
+                .fold(0.0f32, f32::max);
+            total += best;
+        }
+        return total.min(100.0) as u8;
+    }
     let mut total = 0u32;
-    if !observed.mdns.name.is_empty() && observed.mdns.name.eq_ignore_ascii_case(&record.mdns_name) {
+    if !observed.mdns.name.is_empty() && observed.mdns.name.eq_ignore_ascii_case(&record.mdns_name)
+    {
         total += 50;
     }
     if !observed.mdns.model.is_empty() && observed.mdns.model == record.mdns_model {
@@ -269,8 +535,25 @@ fn score(observed: &Observed, record: &FingerprintRecord) -> u8 {
     if !observed.dhcp.vendor_class.is_empty() && observed.dhcp.vendor_class == record.dhcp_vendor {
         total += 10;
     }
-    if !observed.dhcp.requested_options.is_empty() && observed.dhcp.requested_options == record.dhcp_options {
+    if !observed.dhcp.requested_options.is_empty()
+        && observed.dhcp.requested_options == record.dhcp_options
+    {
         total += 10;
+    }
+    if !observed.browser_cookie.is_empty() && observed.browser_cookie == record.browser_cookie {
+        total += 35;
+    }
+    if !observed.http_headers.is_empty() && observed.http_headers == record.http_headers {
+        total += 10;
+    }
+    if !observed.tcp_syn.is_empty() && observed.tcp_syn == record.tcp_syn {
+        total += 8;
+    }
+    if !observed.tls_clienthello.is_empty() && observed.tls_clienthello == record.tls_clienthello {
+        total += 12;
+    }
+    if !observed.quic_initial.is_empty() && observed.quic_initial == record.quic_initial {
+        total += 12;
     }
     total.min(100) as u8
 }
@@ -288,6 +571,7 @@ const SUGGEST_THRESHOLD: u8 = 50;
 /// confident-looking suggestion is least trustworthy.
 const AMBIGUOUS_MARGIN: u8 = 10;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchResult {
     None,
@@ -305,13 +589,17 @@ pub fn best_match(observed: &Observed, records: &[FingerprintRecord]) -> MatchRe
         .map(|r| (r.clone(), score(observed, r)))
         .filter(|(_, s)| *s >= SUGGEST_THRESHOLD)
         .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     match scored.first() {
         None => MatchResult::None,
         Some((_, top)) => {
             let top = *top;
-            let tied: Vec<_> = scored.iter().take_while(|(_, s)| top - *s <= AMBIGUOUS_MARGIN).cloned().collect();
+            let tied: Vec<_> = scored
+                .iter()
+                .take_while(|(_, s)| top - *s <= AMBIGUOUS_MARGIN)
+                .cloned()
+                .collect();
             if tied.len() > 1 {
                 MatchResult::Ambiguous(tied)
             } else {
@@ -321,20 +609,52 @@ pub fn best_match(observed: &Observed, records: &[FingerprintRecord]) -> MatchRe
     }
 }
 
+/// Refreshes packet signals only on an already registered MAC. This is
+/// intentionally not a create path: passive observation can improve a human
+/// suggestion but can never silently establish an identity.
+pub async fn ingest_packet(store: &Store, iface: &str, mac: &str, packet: &[u8], now_ts: u64) {
+    let Some(signal) = crate::packet_observer::classify(packet) else {
+        return;
+    };
+    let mut observed = Observed::default();
+    if signal.starts_with("tcp;") {
+        observed.tcp_syn = signal;
+    } else if signal.starts_with("tls;") {
+        observed.tls_clienthello = signal;
+    } else {
+        observed.quic_initial = signal;
+    }
+    let records = read_registry(store, iface).await;
+    if let Some(record) = find_by_mac(&records, mac) {
+        merge_into(store, iface, &record.id, mac, &observed, now_ts).await;
+    }
+}
+
 /// Other registered identities that look like `target` — for the
 /// identity detail page, to catch e.g. the same physical device having
 /// been registered twice under different labels, or flag two genuinely
 /// different devices that happen to share a fingerprint. A high score
 /// here means "worth a human checking these aren't the same device," not
 /// a claim that they are — same ceiling as `best_match`.
-pub fn similar_identities(target: &FingerprintRecord, all: &[FingerprintRecord]) -> Vec<(FingerprintRecord, u8)> {
+pub fn similar_identities(
+    target: &FingerprintRecord,
+    all: &[FingerprintRecord],
+) -> Vec<(FingerprintRecord, u8)> {
     let observed = Observed {
         dhcp: DhcpFingerprint {
             requested_options: target.dhcp_options.clone(),
             vendor_class: target.dhcp_vendor.clone(),
         },
         wifi_caps: target.wifi_caps.clone(),
-        mdns: MdnsInfo { name: target.mdns_name.clone(), model: target.mdns_model.clone() },
+        mdns: MdnsInfo {
+            name: target.mdns_name.clone(),
+            model: target.mdns_model.clone(),
+        },
+        browser_cookie: target.browser_cookie.clone(),
+        http_headers: target.http_headers.clone(),
+        tcp_syn: target.tcp_syn.clone(),
+        tls_clienthello: target.tls_clienthello.clone(),
+        quic_initial: target.quic_initial.clone(),
     };
     let mut scored: Vec<(FingerprintRecord, u8)> = all
         .iter()
@@ -342,7 +662,7 @@ pub fn similar_identities(target: &FingerprintRecord, all: &[FingerprintRecord])
         .map(|r| (r.clone(), score(&observed, r)))
         .filter(|(_, s)| *s >= SUGGEST_THRESHOLD)
         .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.1));
     scored
 }
 
@@ -365,43 +685,128 @@ mod tests {
             last_seen: 1000,
             first_seen: 1000,
             label_history: Vec::new(),
+            browser_cookie: String::new(),
+            http_headers: String::new(),
+            tcp_syn: String::new(),
+            tls_clienthello: String::new(),
+            quic_initial: String::new(),
+            evidence: Vec::new(),
         }
     }
 
     fn full_observed() -> Observed {
         Observed {
-            dhcp: DhcpFingerprint { requested_options: "1,3,6".into(), vendor_class: "android-dhcp-14".into() },
+            dhcp: DhcpFingerprint {
+                requested_options: "1,3,6".into(),
+                vendor_class: "android-dhcp-14".into(),
+            },
             wifi_caps: "ht,vht,wmm".into(),
-            mdns: MdnsInfo { name: "Kirils-Phone".into(), model: "Pixel 8".into() },
+            mdns: MdnsInfo {
+                name: "Kirils-Phone".into(),
+                model: "Pixel 8".into(),
+            },
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn repeated_observations_accumulate_historical_evidence() {
+        let observed = full_observed();
+        let mut record = rec("phone");
+        record_evidence(&mut record, &observed, 100);
+        record_evidence(&mut record, &observed, 200);
+        let mdns = record
+            .evidence
+            .iter()
+            .find(|item| item.signal == "mdns_name")
+            .unwrap();
+        assert_eq!(mdns.observations, 2);
+        assert_eq!(mdns.first_seen, 100);
+        assert_eq!(mdns.last_seen, 200);
+    }
+
+    #[test]
+    fn recent_evidence_outweighs_year_old_evidence() {
+        let observed = full_observed();
+        let now = now_unix();
+        let mut recent = rec("recent");
+        record_evidence(&mut recent, &observed, now);
+        let mut old = rec("old");
+        record_evidence(&mut old, &observed, now.saturating_sub(365 * 86_400));
+        assert!(score(&observed, &recent) > score(&observed, &old));
+    }
+
+    #[test]
+    fn changing_signal_history_is_bounded_per_signal() {
+        let mut record = rec("phone");
+        for n in 0..12 {
+            let mut observed = Observed::default();
+            observed.mdns.name = format!("phone-{n}");
+            record_evidence(&mut record, &observed, n);
+        }
+        assert_eq!(
+            record
+                .evidence
+                .iter()
+                .filter(|item| item.signal == "mdns_name")
+                .count(),
+            8
+        );
+        assert!(!record.evidence.iter().any(|item| item.value == "phone-0"));
     }
 
     #[tokio::test]
     async fn create_registers_a_new_identity_with_a_generated_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        let id = create(&path, "Kirils-Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
+        let store = Store::open_in_memory().unwrap();
+        let id = create(
+            &store,
+            "guest",
+            "Kirils-Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
         assert_eq!(id.len(), 8);
 
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert_eq!(records.len(), 1);
         let mut expected = rec("Kirils-Phone");
         expected.id = id;
+        record_evidence(&mut expected, &full_observed(), 1000);
         assert_eq!(records[0], expected);
     }
 
     #[tokio::test]
     async fn merge_into_folds_a_rotated_mac_into_the_same_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        let id = create(&path, "Kirils-Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
+        let store = Store::open_in_memory().unwrap();
+        let id = create(
+            &store,
+            "guest",
+            "Kirils-Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
 
         // Second sighting under a rotated MAC, no fresh fingerprint data this time.
-        merge_into(&path, &id, "02:bb:bb:bb:bb:bb", &Observed::default(), 2000).await;
+        merge_into(
+            &store,
+            "guest",
+            &id,
+            "02:bb:bb:bb:bb:bb",
+            &Observed::default(),
+            2000,
+        )
+        .await;
 
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].macs, vec!["02:aa:aa:aa:aa:aa", "02:bb:bb:bb:bb:bb"]);
+        assert_eq!(
+            records[0].macs,
+            vec!["02:aa:aa:aa:aa:aa", "02:bb:bb:bb:bb:bb"]
+        );
         assert_eq!(records[0].last_seen, 2000);
         // Fingerprint fields weren't wiped by the empty second observation.
         assert_eq!(records[0].mdns_name, "Kirils-Phone");
@@ -412,57 +817,108 @@ mod tests {
 
     #[tokio::test]
     async fn rename_updates_the_label_without_touching_history() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        let id = create(&path, "Kirils Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
-        merge_into(&path, &id, "02:bb:bb:bb:bb:bb", &Observed::default(), 2000).await;
+        let store = Store::open_in_memory().unwrap();
+        let id = create(
+            &store,
+            "guest",
+            "Kirils Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
+        merge_into(
+            &store,
+            "guest",
+            &id,
+            "02:bb:bb:bb:bb:bb",
+            &Observed::default(),
+            2000,
+        )
+        .await;
 
-        rename(&path, &id, "Kiril's iPhone 16").await;
+        rename(&store, "guest", &id, "Kiril's iPhone 16").await;
 
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].label, "Kiril's iPhone 16");
         // History survives the rename intact.
-        assert_eq!(records[0].macs, vec!["02:aa:aa:aa:aa:aa", "02:bb:bb:bb:bb:bb"]);
+        assert_eq!(
+            records[0].macs,
+            vec!["02:aa:aa:aa:aa:aa", "02:bb:bb:bb:bb:bb"]
+        );
         assert_eq!(records[0].mdns_name, "Kirils-Phone");
     }
 
     #[tokio::test]
     async fn rename_records_the_outgoing_label_in_history() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        let id = create(&path, "Kirils Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
+        let store = Store::open_in_memory().unwrap();
+        let id = create(
+            &store,
+            "guest",
+            "Kirils Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
 
-        rename(&path, &id, "Kiril's iPhone 16").await;
-        rename(&path, &id, "Kiril's Phone (old)").await;
+        rename(&store, "guest", &id, "Kiril's iPhone 16").await;
+        rename(&store, "guest", &id, "Kiril's Phone (old)").await;
 
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert_eq!(records[0].label, "Kiril's Phone (old)");
-        let labels: Vec<_> = records[0].label_history.iter().map(|(l, _)| l.as_str()).collect();
+        let labels: Vec<_> = records[0]
+            .label_history
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect();
         assert_eq!(labels, vec!["Kirils Phone", "Kiril's iPhone 16"]);
     }
 
     #[tokio::test]
     async fn renaming_to_the_same_label_does_not_add_a_history_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        let id = create(&path, "Kirils Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
+        let store = Store::open_in_memory().unwrap();
+        let id = create(
+            &store,
+            "guest",
+            "Kirils Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
 
-        rename(&path, &id, "Kirils Phone").await;
+        rename(&store, "guest", &id, "Kirils Phone").await;
 
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert!(records[0].label_history.is_empty());
     }
 
     #[tokio::test]
     async fn first_seen_is_set_once_and_never_changed_afterward() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        let id = create(&path, "Kirils Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
-        merge_into(&path, &id, "02:bb:bb:bb:bb:bb", &Observed::default(), 5000).await;
-        rename(&path, &id, "New Name").await;
+        let store = Store::open_in_memory().unwrap();
+        let id = create(
+            &store,
+            "guest",
+            "Kirils Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
+        merge_into(
+            &store,
+            "guest",
+            &id,
+            "02:bb:bb:bb:bb:bb",
+            &Observed::default(),
+            5000,
+        )
+        .await;
+        rename(&store, "guest", &id, "New Name").await;
 
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert_eq!(records[0].first_seen, 1000);
         assert_eq!(records[0].last_seen, 5000);
     }
@@ -506,50 +962,100 @@ mod tests {
         // Two genuinely different devices that happen to get the same
         // label text — without an explicit confirmed match, `create`
         // must never merge them into one record.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        let id_a = create(&path, "Kirils Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
-        let id_b = create(&path, "Kirils Phone", "02:cc:cc:cc:cc:cc", &full_observed(), 2000).await;
+        let store = Store::open_in_memory().unwrap();
+        let id_a = create(
+            &store,
+            "guest",
+            "Kirils Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
+        let id_b = create(
+            &store,
+            "guest",
+            "Kirils Phone",
+            "02:cc:cc:cc:cc:cc",
+            &full_observed(),
+            2000,
+        )
+        .await;
 
         assert_ne!(id_a, id_b);
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert_eq!(records.len(), 2);
-        assert_eq!(records.iter().filter(|r| r.label == "Kirils Phone").count(), 2);
+        assert_eq!(
+            records.iter().filter(|r| r.label == "Kirils Phone").count(),
+            2
+        );
     }
 
     #[tokio::test]
     async fn find_by_mac_locates_the_identity_a_mac_belongs_to() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        let id = create(&path, "Kirils-Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
-        merge_into(&path, &id, "02:bb:bb:bb:bb:bb", &Observed::default(), 2000).await;
+        let store = Store::open_in_memory().unwrap();
+        let id = create(
+            &store,
+            "guest",
+            "Kirils-Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
+        merge_into(
+            &store,
+            "guest",
+            &id,
+            "02:bb:bb:bb:bb:bb",
+            &Observed::default(),
+            2000,
+        )
+        .await;
 
-        let records = read_registry(&path).await;
-        assert_eq!(find_by_mac(&records, "02:BB:BB:BB:BB:BB").map(|r| r.id.as_str()), Some(id.as_str()));
+        let records = read_registry(&store, "guest").await;
+        assert_eq!(
+            find_by_mac(&records, "02:BB:BB:BB:BB:BB").map(|r| r.id.as_str()),
+            Some(id.as_str())
+        );
         assert!(find_by_mac(&records, "02:ff:ff:ff:ff:ff").is_none());
     }
 
     #[tokio::test]
     async fn rename_if_known_renames_the_identity_owning_that_mac() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        create(&path, "Kirils Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
+        let store = Store::open_in_memory().unwrap();
+        create(
+            &store,
+            "guest",
+            "Kirils Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
 
-        rename_if_known(&path, "02:aa:aa:aa:aa:aa", "Kiril's iPhone 16").await;
+        rename_if_known(&store, "guest", "02:aa:aa:aa:aa:aa", "Kiril's iPhone 16").await;
 
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert_eq!(records[0].label, "Kiril's iPhone 16");
     }
 
     #[tokio::test]
     async fn rename_if_known_is_a_no_op_for_an_unregistered_mac() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fp");
-        create(&path, "Kirils Phone", "02:aa:aa:aa:aa:aa", &full_observed(), 1000).await;
+        let store = Store::open_in_memory().unwrap();
+        create(
+            &store,
+            "guest",
+            "Kirils Phone",
+            "02:aa:aa:aa:aa:aa",
+            &full_observed(),
+            1000,
+        )
+        .await;
 
-        rename_if_known(&path, "00:11:22:33:44:55", "Some Other Name").await;
+        rename_if_known(&store, "guest", "00:11:22:33:44:55", "Some Other Name").await;
 
-        let records = read_registry(&path).await;
+        let records = read_registry(&store, "guest").await;
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].label, "Kirils Phone");
     }
@@ -559,7 +1065,11 @@ mod tests {
         let observed = Observed {
             dhcp: DhcpFingerprint::default(),
             wifi_caps: String::new(),
-            mdns: MdnsInfo { name: "Kirils-Phone".into(), model: String::new() },
+            mdns: MdnsInfo {
+                name: "Kirils-Phone".into(),
+                model: String::new(),
+            },
+            ..Default::default()
         };
         match best_match(&observed, &[rec("Kirils-Phone")]) {
             MatchResult::Confident(matched, s) => {
@@ -576,21 +1086,38 @@ mod tests {
         // enough on its own to claim it's the *same physical device* —
         // any unit of the same phone model scores identically on both.
         let observed = Observed {
-            dhcp: DhcpFingerprint { requested_options: "1,3,6".into(), vendor_class: "android-dhcp-14".into() },
+            dhcp: DhcpFingerprint {
+                requested_options: "1,3,6".into(),
+                vendor_class: "android-dhcp-14".into(),
+            },
             wifi_caps: "ht,vht,wmm".into(),
             mdns: MdnsInfo::default(),
+            ..Default::default()
         };
-        assert_eq!(best_match(&observed, &[rec("Kirils-Phone")]), MatchResult::None);
+        assert_eq!(
+            best_match(&observed, &[rec("Kirils-Phone")]),
+            MatchResult::None
+        );
     }
 
     #[test]
     fn no_signal_in_common_never_matches() {
         let observed = Observed {
-            dhcp: DhcpFingerprint { requested_options: "1,121".into(), vendor_class: "MSFT 5.0".into() },
+            dhcp: DhcpFingerprint {
+                requested_options: "1,121".into(),
+                vendor_class: "MSFT 5.0".into(),
+            },
             wifi_caps: "he".into(),
-            mdns: MdnsInfo { name: "Some-Other-Device".into(), model: "iPhone16,2".into() },
+            mdns: MdnsInfo {
+                name: "Some-Other-Device".into(),
+                model: "iPhone16,2".into(),
+            },
+            ..Default::default()
         };
-        assert_eq!(best_match(&observed, &[rec("Kirils-Phone")]), MatchResult::None);
+        assert_eq!(
+            best_match(&observed, &[rec("Kirils-Phone")]),
+            MatchResult::None
+        );
     }
 
     #[test]
@@ -617,9 +1144,16 @@ mod tests {
         device_b.mdns_name = String::new();
 
         let observed = Observed {
-            dhcp: DhcpFingerprint { requested_options: "1,3,6".into(), vendor_class: "android-dhcp-14".into() },
+            dhcp: DhcpFingerprint {
+                requested_options: "1,3,6".into(),
+                vendor_class: "android-dhcp-14".into(),
+            },
             wifi_caps: "ht,vht,wmm".into(),
-            mdns: MdnsInfo { name: String::new(), model: "Pixel 8".into() },
+            mdns: MdnsInfo {
+                name: String::new(),
+                model: "Pixel 8".into(),
+            },
+            ..Default::default()
         };
         match best_match(&observed, &[device_a, device_b]) {
             MatchResult::Ambiguous(candidates) => {

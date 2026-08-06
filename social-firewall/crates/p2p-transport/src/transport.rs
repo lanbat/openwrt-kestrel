@@ -7,9 +7,13 @@ pub enum TransportError {
     Unreachable(String),
     #[error("transport closed")]
     Closed,
+    #[error("application rejected the envelope: {0}")]
+    ApplicationRejected(String),
     #[error("transport error: {0}")]
     Other(String),
 }
+
+pub type Dispatch<'a> = dyn Fn(&str, &Envelope) -> Result<Option<Envelope>, String> + 'a;
 
 /// Mirrors `wg_tunnel::CommandRunner`'s shape: a small trait so the
 /// send/receive/dispatch flow above this boundary is fully unit
@@ -17,23 +21,13 @@ pub enum TransportError {
 /// addresses (an Iroh node id as a string, in production) — this trait
 /// doesn't know or care about Iroh specifically.
 pub trait PeerTransport {
-    /// `Ok(())` means the peer's transport received and decoded the
-    /// envelope — **not** that the peer's ingest logic accepted the
-    /// statement inside it. See this crate's module docs: because
-    /// `recv` below is a queue rather than a callback, dispatch happens
-    /// after the sender has already been acked, so accept/reject cannot
-    /// be reported back over the wire today.
+    /// `Ok(())` means the peer dispatched and accepted the envelope.
+    /// Application rejection is returned as `ApplicationRejected`.
     fn send(&self, to: &str, envelope: &Envelope) -> Result<(), TransportError>;
-    /// Blocks until one envelope arrives, returning the sender's address
-    /// alongside it. A simple blocking single-item receive rather than a
-    /// callback-based `listen` — `sf listen` (Task 5) wraps this in its
-    /// own loop, keeping this trait's surface minimal. The cost of that
-    /// minimalism is that the transport acks a sender before anything
-    /// has dispatched the envelope; changing this method to a callback
-    /// is the prerequisite for real accept/reject acking.
-    ///
-    /// `from` is the sender's address, and for `IrohTransport` it is
-    /// cryptographically authenticated by the QUIC/TLS handshake — safe
-    /// for a caller to gate on, which `cli::tunnel::listen` does.
-    fn recv(&self) -> Result<(String, Envelope), TransportError>;
+    /// Sends an application request and returns the response produced by the
+    /// receiver's dispatch callback.
+    fn request(&self, to: &str, envelope: &Envelope) -> Result<Envelope, TransportError>;
+    /// Blocks until one envelope arrives, dispatches it, and acknowledges
+    /// the sender. `from` is authenticated by Iroh in production.
+    fn recv_and_dispatch(&self, dispatch: &Dispatch<'_>) -> Result<(), TransportError>;
 }

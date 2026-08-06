@@ -1,22 +1,20 @@
 //! Checks a handful of FQDNs against locally-cached domain threat-intel
-//! feeds (`{base_dir}/threat-domains.txt`, refreshed by
+//! feeds (the `threat_domains` table in `Store`, refreshed by
 //! `kestreld --update-threat-intel` — see `crate::threat_intel_update`).
 //!
-//! File format: `domain\tfeed_id` per line, one line per (domain, feed)
-//! pair — a domain flagged by more than one feed appears once per feed, so
-//! every match can be shown, not just the first. This mirrors
-//! `data::banip`'s per-feed attribution for IPs, but for hostnames.
+//! A domain flagged by more than one feed has one row per feed, so every
+//! match can be shown, not just the first. This mirrors `data::banip`'s
+//! per-feed attribution for IPs, but for hostnames.
 //!
-//! Unlike `data::adblock::flag_domains` (which stops scanning as soon as
-//! every queried domain has *a* match, since it only needs a yes/no), this
-//! always scans the whole file, since a domain already matched by one feed
-//! might still match another further down. That's an acceptable tradeoff
-//! here — the feeds this project fetches (see `threat_intel_update.rs`) are
-//! tens of thousands of lines, not adblock's tens of millions.
+//! One indexed point lookup per candidate suffix, rather than a full
+//! table/file scan — `data::adblock::flag_domains`'s "stop once every
+//! queried domain has *a* match" shortcut doesn't apply here (a domain
+//! already matched by one feed might still match another), but an indexed
+//! lookup makes that moot: there's no full-scan cost to avoid in the first
+//! place, unlike the flat-file version this replaced.
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use crate::db::Store;
+use std::collections::HashMap;
 
 /// Short human description of a threat-feed id, for display next to a
 /// flagged domain. Unrecognized ids still show the raw feed name.
@@ -30,50 +28,20 @@ pub fn describe(feed: &str) -> String {
 
 /// For each domain in `queried`, the list of feed ids that flag it (or a
 /// parent of it) — empty when not flagged by anything. Domains not found
-/// (including when the file is missing, e.g. `--update-threat-intel` has
-/// never run) simply map to an empty list.
-pub async fn lookup_domains(list_path: &Path, queried: &[String]) -> HashMap<String, Vec<String>> {
-    let mut needed: HashSet<String> = HashSet::new();
+/// (including when `--update-threat-intel` has never run, so the table is
+/// empty) simply map to an empty list.
+pub async fn lookup_domains(store: &Store, queried: &[String]) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
     for d in queried {
+        let mut feeds: Vec<String> = Vec::new();
         for suffix in suffixes(d) {
-            needed.insert(suffix);
+            feeds.extend(store.threat_domain_feeds(&suffix).await.unwrap_or_default());
         }
+        feeds.sort();
+        feeds.dedup();
+        out.insert(d.clone(), feeds);
     }
-    if needed.is_empty() {
-        return HashMap::new();
-    }
-
-    let mut matched: HashMap<String, HashSet<String>> = HashMap::new();
-    if let Ok(file) = tokio::fs::File::open(list_path).await {
-        let mut lines = BufReader::new(file).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let mut f = line.splitn(2, '\t');
-            let Some(dom) = f.next() else { continue };
-            if !needed.contains(dom) {
-                continue;
-            }
-            let feed = f.next().unwrap_or("unknown");
-            matched.entry(dom.to_string()).or_default().insert(feed.to_string());
-        }
-    }
-
-    queried
-        .iter()
-        .map(|d| {
-            let mut feeds: Vec<String> = suffixes(d)
-                .iter()
-                .filter_map(|s| matched.get(s))
-                .flat_map(|set| set.iter().cloned())
-                .collect();
-            feeds.sort();
-            feeds.dedup();
-            (d.clone(), feeds)
-        })
-        .collect()
+    out
 }
 
 /// A domain and all of its parents up to (but not including) the bare TLD —
@@ -84,17 +52,84 @@ fn suffixes(domain: &str) -> Vec<String> {
     if labels.len() < 2 {
         return Vec::new();
     }
-    (0..labels.len() - 1).map(|i| labels[i..].join(".")).collect()
+    (0..labels.len() - 1)
+        .map(|i| labels[i..].join("."))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    async fn write_fixture(lines: &[&str]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("threat-domains.txt"), lines.join("\n")).await.unwrap();
-        dir
+    #[tokio::test]
+    async fn flags_exact_match_with_single_feed() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .replace_threat_feed("urlhaus", &["evil.example.com".to_string()])
+            .await
+            .unwrap();
+        let result = lookup_domains(&store, &["evil.example.com".to_string()]).await;
+        assert_eq!(
+            result.get("evil.example.com"),
+            Some(&vec!["urlhaus".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn flags_with_multiple_feeds_when_present_in_both() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .replace_threat_feed("urlhaus", &["evil.example.com".to_string()])
+            .await
+            .unwrap();
+        store
+            .replace_threat_feed("openphish", &["evil.example.com".to_string()])
+            .await
+            .unwrap();
+        let result = lookup_domains(&store, &["evil.example.com".to_string()]).await;
+        assert_eq!(
+            result.get("evil.example.com"),
+            Some(&vec!["openphish".to_string(), "urlhaus".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn flags_via_parent_domain_match() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .replace_threat_feed("urlhaus", &["evil.example.com".to_string()])
+            .await
+            .unwrap();
+        let result = lookup_domains(&store, &["sub.evil.example.com".to_string()]).await;
+        assert_eq!(
+            result.get("sub.evil.example.com"),
+            Some(&vec!["urlhaus".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn unflagged_domain_maps_to_empty() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .replace_threat_feed("urlhaus", &["evil.example.com".to_string()])
+            .await
+            .unwrap();
+        let result = lookup_domains(&store, &["good.example.com".to_string()]).await;
+        assert_eq!(result.get("good.example.com"), Some(&Vec::<String>::new()));
+    }
+
+    #[tokio::test]
+    async fn empty_feed_table_flags_everything_empty() {
+        let store = Store::open_in_memory().unwrap();
+        let result = lookup_domains(&store, &["evil.example.com".to_string()]).await;
+        assert_eq!(result.get("evil.example.com"), Some(&Vec::<String>::new()));
+    }
+
+    #[tokio::test]
+    async fn empty_queried_list_short_circuits() {
+        let store = Store::open_in_memory().unwrap();
+        let result = lookup_domains(&store, &[]).await;
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -110,54 +145,12 @@ mod tests {
         assert!(suffixes("com").is_empty());
     }
 
-    #[tokio::test]
-    async fn flags_exact_match_with_single_feed() {
-        let dir = write_fixture(&["evil.example.com\turlhaus"]).await;
-        let path = dir.path().join("threat-domains.txt");
-        let result = lookup_domains(&path, &["evil.example.com".to_string()]).await;
-        assert_eq!(result.get("evil.example.com"), Some(&vec!["urlhaus".to_string()]));
-    }
-
-    #[tokio::test]
-    async fn flags_with_multiple_feeds_when_present_in_both() {
-        let dir = write_fixture(&["evil.example.com\turlhaus", "evil.example.com\topenphish"]).await;
-        let path = dir.path().join("threat-domains.txt");
-        let result = lookup_domains(&path, &["evil.example.com".to_string()]).await;
-        assert_eq!(result.get("evil.example.com"), Some(&vec!["openphish".to_string(), "urlhaus".to_string()]));
-    }
-
-    #[tokio::test]
-    async fn flags_via_parent_domain_match() {
-        let dir = write_fixture(&["evil.example.com\turlhaus"]).await;
-        let path = dir.path().join("threat-domains.txt");
-        let result = lookup_domains(&path, &["sub.evil.example.com".to_string()]).await;
-        assert_eq!(result.get("sub.evil.example.com"), Some(&vec!["urlhaus".to_string()]));
-    }
-
-    #[tokio::test]
-    async fn unflagged_domain_maps_to_empty() {
-        let dir = write_fixture(&["evil.example.com\turlhaus"]).await;
-        let path = dir.path().join("threat-domains.txt");
-        let result = lookup_domains(&path, &["good.example.com".to_string()]).await;
-        assert_eq!(result.get("good.example.com"), Some(&Vec::<String>::new()));
-    }
-
-    #[tokio::test]
-    async fn missing_list_file_flags_everything_empty() {
-        let path = Path::new("/nonexistent/threat-domains.txt");
-        let result = lookup_domains(path, &["evil.example.com".to_string()]).await;
-        assert_eq!(result.get("evil.example.com"), Some(&Vec::<String>::new()));
-    }
-
-    #[tokio::test]
-    async fn empty_queried_list_short_circuits() {
-        let result = lookup_domains(Path::new("/nonexistent"), &[]).await;
-        assert!(result.is_empty());
-    }
-
     #[test]
     fn describe_known_feeds() {
-        assert_eq!(describe("urlhaus"), "Malware distribution host (abuse.ch URLhaus)");
+        assert_eq!(
+            describe("urlhaus"),
+            "Malware distribution host (abuse.ch URLhaus)"
+        );
         assert_eq!(describe("openphish"), "Phishing host (OpenPhish)");
     }
 

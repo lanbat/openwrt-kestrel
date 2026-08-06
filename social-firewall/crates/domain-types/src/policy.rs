@@ -4,8 +4,8 @@
 //! design requirement is that the router must be able to explain which
 //! opinions contributed, which were ignored, and why, for every decision.
 
-use crate::opinion::{LocalOverride, PolicyOpinion, Reason, Stance, Timestamp};
 use crate::opinion::StatementAuthor;
+use crate::opinion::{LocalOverride, PolicyOpinion, Reason, Stance, Timestamp};
 use crate::target::TargetSelector;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,10 +1,13 @@
 pub mod canonical;
 pub mod device;
+pub mod fingerprint;
 pub mod group;
 pub mod ids;
 pub mod list;
 pub mod opinion;
 pub mod policy;
+pub mod route;
+pub mod shared_policy;
 pub mod sharing;
 pub mod target;
 pub mod trust;
@@ -12,7 +15,11 @@ pub mod tunnel;
 
 pub use canonical::CanonicalEncode;
 pub use device::{DeviceApprovalOpinion, MAX_DEVICE_LABEL_LEN};
-pub use group::{Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupVote, PartyLineMessage, MAX_JOIN_PROMPT_LEN};
+pub use fingerprint::{FingerprintComment, FingerprintObservation};
+pub use group::{
+    Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupVote, PartyLineMessage,
+    MAX_JOIN_PROMPT_LEN,
+};
 pub use ids::{FederationId, Hash32, NodeId, PublicKeyBytes, SignatureBytes, UserId};
 pub use list::{SharedRuleEntry, SharedRuleList};
 pub use opinion::{
@@ -23,6 +30,8 @@ pub use policy::{
     Contribution, Decision, DecisionTier, EffectivePolicyDecision, Explanation, IgnoredInput,
     IgnoredReason,
 };
+pub use route::LocalRouteProfile;
+pub use shared_policy::{LocalProfile, PolicyAction, PolicyEntry, PolicyVote, SharedPolicy};
 pub use sharing::{MessagingPublicKeyBytes, StatementRef, Visibility, WgPublicKeyBytes};
 pub use target::TargetSelector;
 pub use trust::{FederationTrustRule, GroupTrustRule, LocalTrustRule, TunnelTrustRule};

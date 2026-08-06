@@ -1,8 +1,8 @@
+use askama::Template;
 use axum::{
     extract::{Query, State},
     response::Html,
 };
-use askama::Template;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -57,7 +57,11 @@ fn valid_id(id: &str) -> bool {
 }
 
 fn dash_if_empty(s: String) -> String {
-    if s.is_empty() { "\u{2014}".into() } else { s }
+    if s.is_empty() {
+        "\u{2014}".into()
+    } else {
+        s
+    }
 }
 
 // ── GET handler ───────────────────────────────────────────────────────────────
@@ -82,8 +86,7 @@ pub async fn get(
     }
     drop(snap);
 
-    let fp_path = state.base_dir.join(format!("{net}-device-fingerprints"));
-    let records = crate::data::fingerprint::read_registry(&fp_path).await;
+    let records = crate::data::fingerprint::read_registry(&state.store, net).await;
 
     let record = match records.iter().find(|r| r.id == id) {
         Some(r) => r.clone(),
@@ -92,11 +95,20 @@ pub async fn get(
 
     let similar = crate::data::fingerprint::similar_identities(&record, &records)
         .into_iter()
-        .map(|(r, score)| SimilarRow { id: r.id, label: r.label, score })
+        .map(|(r, score)| SimilarRow {
+            id: r.id,
+            label: r.label,
+            score,
+        })
         .collect();
 
-    let label_history = record.label_history.iter()
-        .map(|(label, ts)| LabelHistoryRow { label: label.clone(), until: rel_time(*ts) })
+    let label_history = record
+        .label_history
+        .iter()
+        .map(|(label, ts)| LabelHistoryRow {
+            label: label.clone(),
+            until: rel_time(*ts),
+        })
         .collect();
 
     let tmpl = IdentityTmpl {
@@ -115,7 +127,10 @@ pub async fn get(
         similar,
     };
 
-    Html(tmpl.render().unwrap_or_else(|e| format!("Template error: {e}")))
+    Html(
+        tmpl.render()
+            .unwrap_or_else(|e| format!("Template error: {e}")),
+    )
 }
 
 #[cfg(test)]

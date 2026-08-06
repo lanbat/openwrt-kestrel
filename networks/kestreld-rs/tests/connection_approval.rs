@@ -18,7 +18,6 @@ use axum::Form;
 use cucumber::{given, then, when, World};
 use std::path::PathBuf;
 
-use kestreld::data::files;
 use kestreld::routes::device::{self, DeviceForm, DeviceQuery};
 use kestreld::state::AppState;
 
@@ -83,7 +82,12 @@ async fn approve_domain(world: &mut ConnectionApprovalWorld, net: &str, domain: 
         label: None,
         limit: None,
         domain: Some(domain.to_string()),
-        route: if route.is_empty() { None } else { Some(route.to_string()) },
+        route: if route.is_empty() {
+            None
+        } else {
+            Some(route.to_string())
+        },
+        duration: None,
         dst_ip: None,
         dst_port: None,
         dst_proto: None,
@@ -91,7 +95,17 @@ async fn approve_domain(world: &mut ConnectionApprovalWorld, net: &str, domain: 
         port: None,
         proto: None,
     };
-    let result = device::post(State(state), HeaderMap::new(), Query(DeviceQuery { net: None, mac: None }), Form(form)).await.0;
+    let result = device::post(
+        State(state),
+        HeaderMap::new(),
+        Query(DeviceQuery {
+            net: None,
+            mac: None,
+        }),
+        Form(form),
+    )
+    .await
+    .0;
     world.last_ok = result.ok;
     world.last_error = result.error;
 }
@@ -103,12 +117,16 @@ async fn network_installed(world: &mut ConnectionApprovalWorld, net: String) {
         other => panic!("no fixture notify.conf for network {other:?}"),
     };
     let path = world.base_dir.join(format!("{net}-notify.conf"));
-    tokio::fs::write(&path, conf).await.expect("write notify.conf");
+    tokio::fs::write(&path, conf)
+        .await
+        .expect("write notify.conf");
 }
 
 #[given(expr = "a VPN tier {string} is configured with fwmark {string}")]
 async fn vpn_tier_configured(world: &mut ConnectionApprovalWorld, name: String, fwmark: String) {
-    tokio::fs::create_dir_all(&world.split_routing_dir).await.expect("create split-routing dir");
+    tokio::fs::create_dir_all(&world.split_routing_dir)
+        .await
+        .expect("create split-routing dir");
     let conf = format!("VPN_IFACE=mv_{name}\nROUTE_TABLE=100\nFWMARK={fwmark}\n");
     let path = world.split_routing_dir.join(format!("vpn-{name}.conf"));
     tokio::fs::write(&path, conf).await.expect("write vpn conf");
@@ -125,37 +143,79 @@ async fn approve_domain_no_route(world: &mut ConnectionApprovalWorld, domain: St
 }
 
 #[when(expr = "the device approves domain {string} on {string} routed via {string}")]
-async fn approve_domain_with_route(world: &mut ConnectionApprovalWorld, domain: String, net: String, route: String) {
+async fn approve_domain_with_route(
+    world: &mut ConnectionApprovalWorld,
+    domain: String,
+    net: String,
+    route: String,
+) {
     approve_domain(world, &net, &domain, &route).await;
 }
 
 #[then("the request succeeds")]
 async fn request_succeeds(world: &mut ConnectionApprovalWorld) {
-    assert!(world.last_ok, "expected success, got error: {:?}", world.last_error);
+    assert!(
+        world.last_ok,
+        "expected success, got error: {:?}",
+        world.last_error
+    );
 }
 
 #[then(expr = "the request is rejected with error {string}")]
 async fn request_rejected(world: &mut ConnectionApprovalWorld, expected: String) {
-    assert!(!world.last_ok, "expected the request to be rejected but it succeeded");
+    assert!(
+        !world.last_ok,
+        "expected the request to be rejected but it succeeded"
+    );
     assert_eq!(world.last_error.as_deref(), Some(expected.as_str()));
 }
 
 #[then(expr = "the {string} rules file has a rule for domain {string} routed via {string}")]
-async fn rules_file_has_route(world: &mut ConnectionApprovalWorld, net: String, domain: String, route: String) {
-    let path = world.base_dir.join(format!("{net}-device-rules"));
-    let rules = files::read_device_rules(&path).await;
+async fn rules_file_has_route(
+    world: &mut ConnectionApprovalWorld,
+    net: String,
+    domain: String,
+    route: String,
+) {
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let rules = store
+        .list_device_rules(&net)
+        .await
+        .expect("read device_rules");
     let expected_route = if route == "WAN" { "" } else { route.as_str() };
-    let found = rules.iter().find(|r| r.mac == world.current_mac && r.dst == domain);
-    assert!(found.is_some(), "no rule found for domain {domain:?}; rules: {rules:?}");
+    let found = rules
+        .iter()
+        .find(|r| r.mac == world.current_mac && r.dst == domain);
+    assert!(
+        found.is_some(),
+        "no rule found for domain {domain:?}; rules: {rules:?}"
+    );
     assert_eq!(found.unwrap().route, expected_route);
 }
 
 #[then(expr = "the {string} rules file has exactly one rule for domain {string}")]
-async fn rules_file_has_exactly_one(world: &mut ConnectionApprovalWorld, net: String, domain: String) {
-    let path = world.base_dir.join(format!("{net}-device-rules"));
-    let rules = files::read_device_rules(&path).await;
-    let count = rules.iter().filter(|r| r.mac == world.current_mac && r.dst == domain).count();
-    assert_eq!(count, 1, "expected exactly one rule for domain {domain:?}, found {count}; rules: {rules:?}");
+async fn rules_file_has_exactly_one(
+    world: &mut ConnectionApprovalWorld,
+    net: String,
+    domain: String,
+) {
+    let store = kestreld::db::Store::open(&world.base_dir)
+        .await
+        .expect("open store");
+    let rules = store
+        .list_device_rules(&net)
+        .await
+        .expect("read device_rules");
+    let count = rules
+        .iter()
+        .filter(|r| r.mac == world.current_mac && r.dst == domain)
+        .count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one rule for domain {domain:?}, found {count}; rules: {rules:?}"
+    );
 }
 
 #[tokio::main]

@@ -1,20 +1,43 @@
 use thiserror::Error;
 
 /// Which existing `ingest_X` function a received envelope should be
-/// dispatched to. Scoped to this plan's one proven flow for now — more
-/// variants are added as more send paths get wired (see this plan's
-/// Global Constraints).
+/// dispatched to. Every variant maps to an already-supported signed
+/// statement ingest path; the transport only moves its bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementKind {
     TunnelConnectionRequest,
     TunnelConnectionAccept,
+    GroupJoinRequest,
+    Group,
+    PartyLineMessage,
+    RestrictedTunnelAdvertisement,
+    RestrictedTunnelServiceRequest,
+    RestrictedSharedRuleList,
+    SyncGroupRequest,
+    SyncGroupResponse,
+    SharedPolicy,
+    PolicyVote,
+    FingerprintObservation,
+    FingerprintComment,
 }
 
 impl StatementKind {
-    fn tag(self) -> u8 {
+    pub fn wire_tag(self) -> u8 {
         match self {
             StatementKind::TunnelConnectionRequest => 1,
             StatementKind::TunnelConnectionAccept => 2,
+            StatementKind::GroupJoinRequest => 3,
+            StatementKind::Group => 4,
+            StatementKind::PartyLineMessage => 5,
+            StatementKind::RestrictedTunnelAdvertisement => 6,
+            StatementKind::RestrictedTunnelServiceRequest => 7,
+            StatementKind::RestrictedSharedRuleList => 8,
+            StatementKind::SyncGroupRequest => 9,
+            StatementKind::SyncGroupResponse => 10,
+            StatementKind::SharedPolicy => 11,
+            StatementKind::PolicyVote => 12,
+            StatementKind::FingerprintObservation => 13,
+            StatementKind::FingerprintComment => 14,
         }
     }
 
@@ -22,6 +45,18 @@ impl StatementKind {
         match tag {
             1 => Some(StatementKind::TunnelConnectionRequest),
             2 => Some(StatementKind::TunnelConnectionAccept),
+            3 => Some(StatementKind::GroupJoinRequest),
+            4 => Some(StatementKind::Group),
+            5 => Some(StatementKind::PartyLineMessage),
+            6 => Some(StatementKind::RestrictedTunnelAdvertisement),
+            7 => Some(StatementKind::RestrictedTunnelServiceRequest),
+            8 => Some(StatementKind::RestrictedSharedRuleList),
+            9 => Some(StatementKind::SyncGroupRequest),
+            10 => Some(StatementKind::SyncGroupResponse),
+            11 => Some(StatementKind::SharedPolicy),
+            12 => Some(StatementKind::PolicyVote),
+            13 => Some(StatementKind::FingerprintObservation),
+            14 => Some(StatementKind::FingerprintComment),
             _ => None,
         }
     }
@@ -51,7 +86,7 @@ impl Envelope {
     /// reads to end-of-stream, not to a declared length).
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(1 + self.payload.len());
-        out.push(self.kind.tag());
+        out.push(self.kind.wire_tag());
         out.extend_from_slice(&self.payload);
         out
     }
@@ -59,7 +94,10 @@ impl Envelope {
     pub fn decode(bytes: &[u8]) -> Result<Envelope, EnvelopeError> {
         let (tag, payload) = bytes.split_first().ok_or(EnvelopeError::TooShort)?;
         let kind = StatementKind::from_tag(*tag).ok_or(EnvelopeError::UnknownKind(*tag))?;
-        Ok(Envelope { kind, payload: payload.to_vec() })
+        Ok(Envelope {
+            kind,
+            payload: payload.to_vec(),
+        })
     }
 }
 
@@ -69,7 +107,10 @@ mod tests {
 
     #[test]
     fn envelope_round_trips_through_encode_decode() {
-        let original = Envelope { kind: StatementKind::TunnelConnectionRequest, payload: b"{\"hello\":true}".to_vec() };
+        let original = Envelope {
+            kind: StatementKind::TunnelConnectionRequest,
+            payload: b"{\"hello\":true}".to_vec(),
+        };
         let decoded = Envelope::decode(&original.encode()).unwrap();
         assert_eq!(decoded, original);
     }
@@ -77,7 +118,10 @@ mod tests {
     #[test]
     fn envelope_decode_rejects_an_unknown_kind_tag() {
         let bytes = vec![99u8, b'{', b'}'];
-        assert_eq!(Envelope::decode(&bytes), Err(EnvelopeError::UnknownKind(99)));
+        assert_eq!(
+            Envelope::decode(&bytes),
+            Err(EnvelopeError::UnknownKind(99))
+        );
     }
 
     #[test]

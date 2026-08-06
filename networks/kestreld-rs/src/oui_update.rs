@@ -25,9 +25,18 @@ use crate::cmd;
 const WIRESHARK_URL: &str = "https://www.wireshark.org/download/automated/data/manuf";
 
 const IEEE_SOURCES: &[(&str, &str)] = &[
-    ("https://standards-oui.ieee.org/oui/oui.csv", "ieee MA-L (24-bit)"),
-    ("https://standards-oui.ieee.org/oui28/mam.csv", "ieee MA-M (28-bit)"),
-    ("https://standards-oui.ieee.org/oui36/oui36.csv", "ieee MA-S (36-bit)"),
+    (
+        "https://standards-oui.ieee.org/oui/oui.csv",
+        "ieee MA-L (24-bit)",
+    ),
+    (
+        "https://standards-oui.ieee.org/oui28/mam.csv",
+        "ieee MA-M (28-bit)",
+    ),
+    (
+        "https://standards-oui.ieee.org/oui36/oui36.csv",
+        "ieee MA-S (36-bit)",
+    ),
 ];
 
 /// Strips a leading/trailing run of whitespace-or-`"` characters — matches
@@ -57,7 +66,11 @@ fn parse_wireshark(body: &str) -> Vec<(String, String)> {
             }
         }
         let raw = raw.replace(':', "").to_uppercase();
-        let name = if fields.len() >= 3 && !fields[2].trim().is_empty() { fields[2] } else { fields[1] };
+        let name = if fields.len() >= 3 && !fields[2].trim().is_empty() {
+            fields[2]
+        } else {
+            fields[1]
+        };
         let name = trim_space_quote(name);
         if raw.len() >= 6 && !name.is_empty() {
             out.push((raw, name.to_string()));
@@ -95,7 +108,11 @@ fn parse_ieee(body: &str) -> Vec<(String, String)> {
 
 async fn fetch(url: &str, timeout_secs: &str) -> Option<String> {
     let (ok, out) = cmd::run("curl", &["-sf", "--max-time", timeout_secs, url]).await;
-    if ok { Some(out) } else { None }
+    if ok {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Runs the full update; returns the process exit code (0 success, 1 all
@@ -142,10 +159,16 @@ pub async fn run(base_dir: &Path) -> i32 {
         }
     }
 
-    let out_path = base_dir.join("oui.txt");
-    let body: String = deduped.iter().map(|(p, n)| format!("{p}\t{n}\n")).collect();
-    if tokio::fs::write(&out_path, &body).await.is_err() {
-        println!("ERROR: failed to write {}", out_path.display());
+    let store = match crate::db::Store::open(base_dir).await {
+        Ok(s) => s,
+        Err(e) => {
+            println!("ERROR: failed to open kestrel.sqlite: {e}");
+            return 1;
+        }
+    };
+    let map: std::collections::HashMap<String, String> = deduped.iter().cloned().collect();
+    if store.replace_oui(&map).await.is_err() {
+        println!("ERROR: failed to write OUI database");
         return 1;
     }
 
@@ -161,7 +184,10 @@ mod tests {
     fn wireshark_strips_prefix_length_suffix_and_colons() {
         let body = "AA:BB:CC:00:00:00/28\tShort\tLong Name\n";
         let out = parse_wireshark(body);
-        assert_eq!(out, vec![("AABBCC000000".to_string(), "Long Name".to_string())]);
+        assert_eq!(
+            out,
+            vec![("AABBCC000000".to_string(), "Long Name".to_string())]
+        );
     }
 
     #[test]
@@ -188,7 +214,10 @@ mod tests {
     fn ieee_skips_header_row() {
         let body = "Registry,Assignment,Organization Name\nMA-L,AABBCC,Example Corp\n";
         let out = parse_ieee(body);
-        assert_eq!(out, vec![("AABBCC".to_string(), "Example Corp".to_string())]);
+        assert_eq!(
+            out,
+            vec![("AABBCC".to_string(), "Example Corp".to_string())]
+        );
     }
 
     #[test]
@@ -211,7 +240,10 @@ mod tests {
                 deduped.push((prefix, name));
             }
         }
-        assert_eq!(deduped, vec![("AABBCC".to_string(), "Wireshark Name".to_string())]);
+        assert_eq!(
+            deduped,
+            vec![("AABBCC".to_string(), "Wireshark Name".to_string())]
+        );
     }
 }
 
@@ -227,11 +259,12 @@ mod network_tests {
         let dir = tempfile::tempdir().unwrap();
         let code = run(dir.path()).await;
         assert_eq!(code, 0);
-        let contents = tokio::fs::read_to_string(dir.path().join("oui.txt")).await.unwrap();
-        let lines: Vec<&str> = contents.lines().collect();
-        assert!(lines.len() > 10_000, "expected a substantial merged database, got {} lines", lines.len());
-        for line in lines.iter().take(20) {
-            assert!(line.contains('\t'), "line missing tab separator: {line:?}");
-        }
+        let store = crate::db::Store::open(dir.path()).await.unwrap();
+        let entries = store.all_oui().await.unwrap();
+        assert!(
+            entries.len() > 10_000,
+            "expected a substantial merged database, got {} entries",
+            entries.len()
+        );
     }
 }

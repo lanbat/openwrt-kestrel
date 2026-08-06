@@ -19,9 +19,10 @@
 
 use domain_types::{
     Contribution, DeviceApprovalOpinion, FederationId, FederationStatement, FederationTrustRule,
-    Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupTrustRule, GroupVote, Hash32,
-    LocalOverride, LocalTrustRule, MessagingPublicKeyBytes, OpinionRef, OverrideKind,
-    PartyLineMessage, PolicyOpinion, PublicKeyBytes, Reason, ReasonCode, SharedRuleEntry,
+    FingerprintComment, FingerprintObservation, Group, GroupBlockReport, GroupId, GroupJoinRequest,
+    GroupTrustRule, GroupVote, Hash32, LocalOverride, LocalProfile, LocalRouteProfile, LocalTrustRule,
+    MessagingPublicKeyBytes, OpinionRef, OverrideKind, PartyLineMessage, PolicyAction, PolicyEntry,
+    PolicyOpinion, PolicyVote, PublicKeyBytes, Reason, ReasonCode, SharedPolicy, SharedRuleEntry,
     SharedRuleList, SignatureBytes, Stance, StatementAuthor, StatementRef, TargetSelector,
     TunnelAdvertisement, TunnelConnectionAccept, TunnelConnectionRequest, TunnelServiceRequest,
     TunnelTrustRule, UserId, Visibility, WgPublicKeyBytes,
@@ -35,22 +36,68 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../migrations/0002_nft_enforcement.sql")),
     (3, include_str!("../migrations/0003_tunnels.sql")),
     (4, include_str!("../migrations/0004_shared_rule_lists.sql")),
-    (5, include_str!("../migrations/0005_enforced_decision_contributors.sql")),
-    (6, include_str!("../migrations/0006_follow_display_names.sql")),
+    (
+        5,
+        include_str!("../migrations/0005_enforced_decision_contributors.sql"),
+    ),
+    (
+        6,
+        include_str!("../migrations/0006_follow_display_names.sql"),
+    ),
     (7, include_str!("../migrations/0007_tunnel_tags.sql")),
     (8, include_str!("../migrations/0008_tunnel_limits.sql")),
     (9, include_str!("../migrations/0009_groups.sql")),
-    (10, include_str!("../migrations/0010_group_contributions.sql")),
+    (
+        10,
+        include_str!("../migrations/0010_group_contributions.sql"),
+    ),
     (11, include_str!("../migrations/0011_device_approvals.sql")),
-    (12, include_str!("../migrations/0012_group_join_features.sql")),
-    (13, include_str!("../migrations/0013_group_block_reports.sql")),
-    (14, include_str!("../migrations/0014_group_party_line_voice.sql")),
+    (
+        12,
+        include_str!("../migrations/0012_group_join_features.sql"),
+    ),
+    (
+        13,
+        include_str!("../migrations/0013_group_block_reports.sql"),
+    ),
+    (
+        14,
+        include_str!("../migrations/0014_group_party_line_voice.sql"),
+    ),
     (15, include_str!("../migrations/0015_tunnel_ipv6.sql")),
-    (16, include_str!("../migrations/0016_group_membership_events.sql")),
-    (17, include_str!("../migrations/0017_tunnel_transfer_totals.sql")),
-    (18, include_str!("../migrations/0018_tunnel_reciprocity.sql")),
-    (19, include_str!("../migrations/0019_party_line_reply_target.sql")),
+    (
+        16,
+        include_str!("../migrations/0016_group_membership_events.sql"),
+    ),
+    (
+        17,
+        include_str!("../migrations/0017_tunnel_transfer_totals.sql"),
+    ),
+    (
+        18,
+        include_str!("../migrations/0018_tunnel_reciprocity.sql"),
+    ),
+    (
+        19,
+        include_str!("../migrations/0019_party_line_reply_target.sql"),
+    ),
     (20, include_str!("../migrations/0020_iroh_addressing.sql")),
+    (21, include_str!("../migrations/0021_notified_items.sql")),
+    (22, include_str!("../migrations/0022_ntfy_config.sql")),
+    (23, include_str!("../migrations/0023_outbox.sql")),
+    (
+        24,
+        include_str!("../migrations/0024_party_line_author_keys.sql"),
+    ),
+    (25, include_str!("../migrations/0025_shared_policies.sql")),
+    (26, include_str!("../migrations/0026_policy_votes.sql")),
+    (
+        27,
+        include_str!("../migrations/0027_fingerprint_group_data.sql"),
+    ),
+    (28, include_str!("../migrations/0028_local_profiles.sql")),
+    (29, include_str!("../migrations/0029_route_profiles.sql")),
+    (30, include_str!("../migrations/0030_group_fingerprint_keys.sql")),
 ];
 
 #[derive(thiserror::Error, Debug)]
@@ -73,7 +120,69 @@ pub struct StateStore {
     conn: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxEnvelope {
+    pub id: i64,
+    pub destination_node_id: String,
+    pub statement_kind: i64,
+    pub payload: Vec<u8>,
+    pub attempts: i64,
+    pub next_retry: i64,
+    pub last_error: Option<String>,
+    pub delivered: bool,
+}
+
 impl StateStore {
+    pub fn enqueue_outbox(
+        &self,
+        destination_node_id: &str,
+        statement_kind: i64,
+        payload: &[u8],
+        next_retry: i64,
+    ) -> Result<i64, StoreError> {
+        self.conn.execute(
+            "INSERT INTO outbound_outbox (destination_node_id, statement_kind, payload, next_retry, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![destination_node_id, statement_kind, payload, next_retry, now_unix()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_due_outbox(&self, now: i64) -> Result<Vec<OutboxEnvelope>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT outbox_id, destination_node_id, statement_kind, payload, attempts, next_retry, last_error, delivered FROM outbound_outbox WHERE delivered = 0 AND next_retry <= ?1 ORDER BY outbox_id",
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            Ok(OutboxEnvelope {
+                id: row.get(0)?,
+                destination_node_id: row.get(1)?,
+                statement_kind: row.get(2)?,
+                payload: row.get(3)?,
+                attempts: row.get(4)?,
+                next_retry: row.get(5)?,
+                last_error: row.get(6)?,
+                delivered: row.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn mark_outbox_success(&self, id: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE outbound_outbox SET delivered = 1, last_error = NULL WHERE outbox_id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_outbox_failure(&self, id: i64, error: &str, now: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE outbound_outbox SET attempts = attempts + 1, next_retry = ?2 + (1 << MIN(attempts, 10)), last_error = ?, delivered = 0 WHERE outbox_id = ?1",
+            params![id, now, error],
+        )?;
+        Ok(())
+    }
+
     /// Opens (creating if absent) a SQLite database at `path` and applies
     /// any outstanding migrations. `path` must be on persistent storage —
     /// this never opens on tmpfs, and it's the caller's job to pass a real
@@ -108,13 +217,11 @@ impl StateStore {
                  applied_at INTEGER NOT NULL
              );",
         )?;
-        let current: i64 = self
-            .conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-                [],
-                |row| row.get(0),
-            )?;
+        let current: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
         for (version, sql) in MIGRATIONS {
             if *version <= current {
                 continue;
@@ -146,7 +253,7 @@ impl StateStore {
         self.conn.execute(
             "INSERT INTO users (federation_id, local_id, current_pubkey, display_name, is_self, secret_seed)
              VALUES (?1, ?2, ?3, ?4, 1, ?5)
-             ON CONFLICT(federation_id, local_id) DO UPDATE SET current_pubkey = excluded.current_pubkey, secret_seed = excluded.secret_seed",
+             ON CONFLICT(federation_id, local_id) DO UPDATE SET current_pubkey = excluded.current_pubkey, display_name = excluded.display_name, secret_seed = excluded.secret_seed",
             params![
                 user.federation.0 .0.as_slice(),
                 user.local_id.0.as_slice(),
@@ -193,10 +300,88 @@ impl StateStore {
             .transpose()
     }
 
-    pub fn next_own_sequence(&self) -> Result<u64, StoreError> {
-        let max: Option<i64> = self
+    /// Returns the locally stored public nickname for a known user. For the
+    /// local identity this is the name supplied to `init-identity`; foreign
+    /// users may have a value if a future identity/profile exchange stores
+    /// one. Local follow labels remain separate and take precedence in the
+    /// CLI display layer.
+    pub fn get_user_display_name(&self, user: &UserId) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT display_name FROM users WHERE federation_id = ?1 AND local_id = ?2",
+                params![user.federation.0 .0.as_slice(), user.local_id.0.as_slice()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|name| name.flatten())
+            .map_err(Into::into)
+    }
+
+    pub fn set_self_display_name(&self, display_name: Option<&str>) -> Result<(), StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE users SET display_name = ?1 WHERE is_self = 1",
+            params![display_name],
+        )?;
+        if rows == 0 {
+            return Err(StoreError::NoSelfIdentity);
+        }
+        Ok(())
+    }
+
+    pub fn has_been_notified(&self, item_kind: &str, item_key: &str) -> Result<bool, StoreError> {
+        Ok(self
             .conn
-            .query_row("SELECT MAX(sequence) FROM own_opinion_log", [], |row| row.get(0))?;
+            .query_row(
+                "SELECT 1 FROM notified_items WHERE item_kind = ?1 AND item_key = ?2",
+                params![item_kind, item_key],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn mark_notified(
+        &self,
+        item_kind: &str,
+        item_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO notified_items (item_kind, item_key, notified_at) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+            params![item_kind, item_key, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_ntfy_topic_url(&self, url: Option<&str>) -> Result<(), StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE users SET ntfy_topic_url = ?1 WHERE is_self = 1",
+            params![url],
+        )?;
+        if rows == 0 {
+            return Err(StoreError::NoSelfIdentity);
+        }
+        Ok(())
+    }
+
+    pub fn get_ntfy_topic_url(&self) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT ntfy_topic_url FROM users WHERE is_self = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn next_own_sequence(&self) -> Result<u64, StoreError> {
+        let max: Option<i64> =
+            self.conn
+                .query_row("SELECT MAX(sequence) FROM own_opinion_log", [], |row| {
+                    row.get(0)
+                })?;
         Ok(max.map(|m| m as u64 + 1).unwrap_or(0))
     }
 
@@ -221,7 +406,10 @@ impl StateStore {
         Ok(max.map(|m| m as u64 + 1).unwrap_or(0))
     }
 
-    pub fn next_tunnel_connection_request_sequence(&self, author: &UserId) -> Result<u64, StoreError> {
+    pub fn next_tunnel_connection_request_sequence(
+        &self,
+        author: &UserId,
+    ) -> Result<u64, StoreError> {
         let max: Option<i64> = self.conn.query_row(
             "SELECT MAX(sequence) FROM tunnel_connection_requests WHERE requester_federation_id = ?1 AND requester_local_id = ?2",
             params![author.federation.0 .0.as_slice(), author.local_id.0.as_slice()],
@@ -268,11 +456,34 @@ impl StateStore {
     /// all yet, so `None` here is the common case, not an edge case.
     /// Callers (see the IRC-style party-line formatting in `cli`) are
     /// expected to fall back to the raw hex id when this returns `None`.
-    pub fn get_federation_display_name(&self, federation: &FederationId) -> Result<Option<String>, StoreError> {
+    pub fn get_federation_display_name(
+        &self,
+        federation: &FederationId,
+    ) -> Result<Option<String>, StoreError> {
         self.conn
-            .query_row("SELECT display_name FROM federations WHERE federation_id = ?1", params![federation.0 .0.as_slice()], |row| row.get(0))
+            .query_row(
+                "SELECT display_name FROM federations WHERE federation_id = ?1",
+                params![federation.0 .0.as_slice()],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn set_home_federation_display_name(
+        &self,
+        display_name: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE federations
+             SET display_name = CASE WHEN ?1 IS NULL THEN lower(hex(federation_id)) ELSE ?1 END
+             WHERE is_home = 1",
+            params![display_name],
+        )?;
+        if rows == 0 {
+            return Err(StoreError::NoSelfIdentity);
+        }
+        Ok(())
     }
 
     pub fn get_follow(&self, user: &UserId) -> Result<Option<LocalTrustRule>, StoreError> {
@@ -310,9 +521,35 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, iroh_node_id, expires_at, created_at) = r?;
-            let user = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
-            out.push(LocalTrustRule { user, allow_weight, deny_weight, advisory_only, excluded, category_filter, display_name, iroh_node_id, expires_at, created_at });
+            let (
+                fed,
+                local,
+                allow_weight,
+                deny_weight,
+                advisory_only,
+                excluded,
+                category_filter,
+                display_name,
+                iroh_node_id,
+                expires_at,
+                created_at,
+            ) = r?;
+            let user = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
+            out.push(LocalTrustRule {
+                user,
+                allow_weight,
+                deny_weight,
+                advisory_only,
+                excluded,
+                category_filter,
+                display_name,
+                iroh_node_id,
+                expires_at,
+                created_at,
+            });
         }
         Ok(out)
     }
@@ -321,7 +558,11 @@ impl StateStore {
     /// names, scoped to one federation — the lookup half of
     /// `LocalTrustRule::display_name`'s address-book model. `None` if no
     /// follow in this federation has been given exactly this name.
-    pub fn resolve_user_by_name(&self, federation: &FederationId, name: &str) -> Result<Option<UserId>, StoreError> {
+    pub fn resolve_user_by_name(
+        &self,
+        federation: &FederationId,
+        name: &str,
+    ) -> Result<Option<UserId>, StoreError> {
         self.conn
             .query_row(
                 "SELECT local_id FROM follows WHERE federation_id = ?1 AND display_name = ?2",
@@ -329,7 +570,12 @@ impl StateStore {
                 |row| row.get::<_, Vec<u8>>(0),
             )
             .optional()?
-            .map(|local| Ok(UserId { federation: *federation, local_id: bytes_to_hash32(&local)? }))
+            .map(|local| {
+                Ok(UserId {
+                    federation: *federation,
+                    local_id: bytes_to_hash32(&local)?,
+                })
+            })
             .transpose()
     }
 
@@ -350,7 +596,12 @@ impl StateStore {
                 |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )
             .optional()?
-            .map(|(fed, local)| Ok(UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? }))
+            .map(|(fed, local)| {
+                Ok(UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                })
+            })
             .transpose()
     }
 
@@ -377,7 +628,10 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_federation_trust(&self, federation: &FederationId) -> Result<Option<FederationTrustRule>, StoreError> {
+    pub fn get_federation_trust(
+        &self,
+        federation: &FederationId,
+    ) -> Result<Option<FederationTrustRule>, StoreError> {
         self.conn
             .query_row(
                 "SELECT allow_weight, deny_weight, via_relay_full_membership, category_filter, expires_at, created_at
@@ -429,7 +683,10 @@ impl StateStore {
     /// At most one row, by construction (natural-key primary key) — a
     /// `Vec` here purely so it slots directly into `policy_engine::PolicyInputs`
     /// without an extra `Option`-to-slice conversion at every call site.
-    pub fn get_local_overrides_for(&self, target: &TargetSelector) -> Result<Vec<LocalOverride>, StoreError> {
+    pub fn get_local_overrides_for(
+        &self,
+        target: &TargetSelector,
+    ) -> Result<Vec<LocalOverride>, StoreError> {
         let (kind, value) = target_to_kv(target)?;
         let row = self
             .conn
@@ -484,7 +741,10 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn list_own_opinions_for(&self, target: &TargetSelector) -> Result<Vec<PolicyOpinion>, StoreError> {
+    pub fn list_own_opinions_for(
+        &self,
+        target: &TargetSelector,
+    ) -> Result<Vec<PolicyOpinion>, StoreError> {
         let self_id = self.get_self_identity()?.map(|(u, _)| u);
         let (kind, value) = target_to_kv(target)?;
         let mut stmt = self.conn.prepare(
@@ -506,16 +766,34 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (sequence, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, signature) = r?;
+            let (
+                sequence,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                expires_at,
+                supersedes_sequence,
+                signature,
+            ) = r?;
             out.push(PolicyOpinion {
-                author: self_id.ok_or_else(|| StoreError::Encoding("no self identity set".into()))?,
+                author: self_id
+                    .ok_or_else(|| StoreError::Encoding("no self identity set".into()))?,
                 sequence: sequence as u64,
                 target: target.clone(),
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 issued_at,
                 expires_at,
-                supersedes: supersedes_sequence.map(|s| OpinionRef { author: self_id.unwrap(), sequence: s as u64 }),
+                supersedes: supersedes_sequence.map(|s| OpinionRef {
+                    author: self_id.unwrap(),
+                    sequence: s as u64,
+                }),
                 signature: SignatureBytes(bytes_to_64(&signature)?),
             });
         }
@@ -550,7 +828,10 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn list_followed_opinions_for(&self, target: &TargetSelector) -> Result<Vec<(PolicyOpinion, Option<LocalTrustRule>)>, StoreError> {
+    pub fn list_followed_opinions_for(
+        &self,
+        target: &TargetSelector,
+    ) -> Result<Vec<(PolicyOpinion, Option<LocalTrustRule>)>, StoreError> {
         let (kind, value) = target_to_kv(target)?;
         let mut stmt = self.conn.prepare(
             "SELECT author_federation_id, author_local_id, sequence, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, signature
@@ -573,17 +854,39 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, sequence, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, signature) = r?;
-            let author = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let (
+                fed,
+                local,
+                sequence,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                expires_at,
+                supersedes_sequence,
+                signature,
+            ) = r?;
+            let author = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
             let opinion = PolicyOpinion {
                 author,
                 sequence: sequence as u64,
                 target: target.clone(),
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 issued_at,
                 expires_at,
-                supersedes: supersedes_sequence.map(|s| OpinionRef { author, sequence: s as u64 }),
+                supersedes: supersedes_sequence.map(|s| OpinionRef {
+                    author,
+                    sequence: s as u64,
+                }),
                 signature: SignatureBytes(bytes_to_64(&signature)?),
             };
             let trust = self.get_follow(&author)?;
@@ -619,7 +922,10 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn list_federation_statements_for(&self, target: &TargetSelector) -> Result<Vec<(FederationStatement, Option<FederationTrustRule>)>, StoreError> {
+    pub fn list_federation_statements_for(
+        &self,
+        target: &TargetSelector,
+    ) -> Result<Vec<(FederationStatement, Option<FederationTrustRule>)>, StoreError> {
         let (kind, value) = target_to_kv(target)?;
         let mut stmt = self.conn.prepare(
             "SELECT federation_id, sequence, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, commitment
@@ -641,14 +947,29 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, sequence, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, commitment) = r?;
+            let (
+                fed,
+                sequence,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                expires_at,
+                supersedes_sequence,
+                commitment,
+            ) = r?;
             let federation = FederationId(bytes_to_hash32(&fed)?);
             let statement = FederationStatement {
                 federation,
                 sequence: sequence as u64,
                 target: target.clone(),
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 issued_at,
                 expires_at,
                 supersedes: supersedes_sequence.map(|s| s as u64),
@@ -674,7 +995,9 @@ impl StateStore {
              UNION SELECT target_kind, target_value FROM federation_statements
              UNION SELECT target_kind, target_value FROM shared_rule_list_entries",
         )?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         let mut out = Vec::new();
         for r in rows {
             let (kind, value) = r?;
@@ -700,7 +1023,10 @@ impl StateStore {
         // and a caller like `ensure_interface_and_keypair` would silently
         // regenerate a fresh key every single time it's called instead of
         // reusing one. Fail loudly instead.
-        let rows = self.conn.execute("UPDATE users SET messaging_secret_seed = ?1 WHERE is_self = 1", params![seed.as_slice()])?;
+        let rows = self.conn.execute(
+            "UPDATE users SET messaging_secret_seed = ?1 WHERE is_self = 1",
+            params![seed.as_slice()],
+        )?;
         if rows == 0 {
             return Err(StoreError::NoSelfIdentity);
         }
@@ -709,9 +1035,11 @@ impl StateStore {
 
     pub fn get_messaging_keypair_seed(&self) -> Result<Option<[u8; 32]>, StoreError> {
         self.conn
-            .query_row("SELECT messaging_secret_seed FROM users WHERE is_self = 1", [], |row| {
-                row.get::<_, Option<Vec<u8>>>(0)
-            })
+            .query_row(
+                "SELECT messaging_secret_seed FROM users WHERE is_self = 1",
+                [],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
             .optional()?
             .flatten()
             .map(|v| bytes_to_32(&v))
@@ -724,7 +1052,10 @@ impl StateStore {
     pub fn set_wg_keypair_seed(&self, seed: &[u8; 32]) -> Result<(), StoreError> {
         // See `set_messaging_keypair_seed`'s comment — same silent-no-op
         // risk, same fix.
-        let rows = self.conn.execute("UPDATE users SET wg_secret_seed = ?1 WHERE is_self = 1", params![seed.as_slice()])?;
+        let rows = self.conn.execute(
+            "UPDATE users SET wg_secret_seed = ?1 WHERE is_self = 1",
+            params![seed.as_slice()],
+        )?;
         if rows == 0 {
             return Err(StoreError::NoSelfIdentity);
         }
@@ -733,7 +1064,11 @@ impl StateStore {
 
     pub fn get_wg_keypair_seed(&self) -> Result<Option<[u8; 32]>, StoreError> {
         self.conn
-            .query_row("SELECT wg_secret_seed FROM users WHERE is_self = 1", [], |row| row.get::<_, Option<Vec<u8>>>(0))
+            .query_row(
+                "SELECT wg_secret_seed FROM users WHERE is_self = 1",
+                [],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
             .optional()?
             .flatten()
             .map(|v| bytes_to_32(&v))
@@ -744,7 +1079,10 @@ impl StateStore {
     /// `0020_iroh_addressing.sql`'s own doc on why this is a fourth,
     /// dedicated key rather than reusing an existing one.
     pub fn set_iroh_keypair_seed(&self, seed: &[u8; 32]) -> Result<(), StoreError> {
-        let rows = self.conn.execute("UPDATE users SET iroh_secret_seed = ?1 WHERE is_self = 1", params![seed.as_slice()])?;
+        let rows = self.conn.execute(
+            "UPDATE users SET iroh_secret_seed = ?1 WHERE is_self = 1",
+            params![seed.as_slice()],
+        )?;
         if rows == 0 {
             return Err(StoreError::NoSelfIdentity);
         }
@@ -753,7 +1091,11 @@ impl StateStore {
 
     pub fn get_iroh_keypair_seed(&self) -> Result<Option<[u8; 32]>, StoreError> {
         self.conn
-            .query_row("SELECT iroh_secret_seed FROM users WHERE is_self = 1", [], |row| row.get::<_, Option<Vec<u8>>>(0))
+            .query_row(
+                "SELECT iroh_secret_seed FROM users WHERE is_self = 1",
+                [],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
             .optional()?
             .flatten()
             .map(|v| bytes_to_32(&v))
@@ -766,7 +1108,10 @@ impl StateStore {
     /// security cost, not just a weighted vote.
     pub fn ingest_tunnel_advertisement(&self, ad: &TunnelAdvertisement) -> Result<(), StoreError> {
         if self.get_follow(&ad.provider)?.is_none() {
-            return Err(StoreError::NotFollowed(format!("{}/{}", ad.provider.federation.0, ad.provider.local_id)));
+            return Err(StoreError::NotFollowed(format!(
+                "{}/{}",
+                ad.provider.federation.0, ad.provider.local_id
+            )));
         }
         self.store_tunnel_advertisement_row(ad)
     }
@@ -778,15 +1123,23 @@ impl StateStore {
     /// two here was a real bug caught during manual end-to-end testing
     /// (offering a tunnel failed with "not a followed user" — about
     /// yourself).
-    pub fn store_own_tunnel_advertisement(&self, ad: &TunnelAdvertisement) -> Result<(), StoreError> {
+    pub fn store_own_tunnel_advertisement(
+        &self,
+        ad: &TunnelAdvertisement,
+    ) -> Result<(), StoreError> {
         self.store_tunnel_advertisement_row(ad)
     }
 
     fn store_tunnel_advertisement_row(&self, ad: &TunnelAdvertisement) -> Result<(), StoreError> {
-        let (in_resp_fed, in_resp_local, in_resp_seq): (Option<&[u8]>, Option<&[u8]>, Option<i64>) = match &ad.in_response_to {
-            Some(r) => (Some(r.author.federation.0 .0.as_slice()), Some(r.author.local_id.0.as_slice()), Some(r.sequence as i64)),
-            None => (None, None, None),
-        };
+        let (in_resp_fed, in_resp_local, in_resp_seq): (Option<&[u8]>, Option<&[u8]>, Option<i64>) =
+            match &ad.in_response_to {
+                Some(r) => (
+                    Some(r.author.federation.0 .0.as_slice()),
+                    Some(r.author.local_id.0.as_slice()),
+                    Some(r.sequence as i64),
+                ),
+                None => (None, None, None),
+            };
         self.conn.execute(
             "INSERT INTO tunnel_advertisements (provider_federation_id, provider_local_id, sequence, description, limitations, visibility, in_response_to_federation_id, in_response_to_local_id, in_response_to_sequence, messaging_pubkey, wg_pubkey, endpoint_hint, max_connections, max_bandwidth_kbps, issued_at, expires_at, supersedes_sequence, signature, ingested_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
@@ -831,7 +1184,11 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_tunnel_advertisement(&self, provider: UserId, sequence: u64) -> Result<Option<TunnelAdvertisement>, StoreError> {
+    pub fn get_tunnel_advertisement(
+        &self,
+        provider: UserId,
+        sequence: u64,
+    ) -> Result<Option<TunnelAdvertisement>, StoreError> {
         let row = self.conn.query_row(
             "SELECT description, limitations, visibility, in_response_to_federation_id, in_response_to_local_id, in_response_to_sequence, messaging_pubkey, wg_pubkey, endpoint_hint, max_connections, max_bandwidth_kbps, issued_at, expires_at, supersedes_sequence, signature
              FROM tunnel_advertisements WHERE provider_federation_id = ?1 AND provider_local_id = ?2 AND sequence = ?3",
@@ -856,14 +1213,34 @@ impl StateStore {
                 ))
             },
         ).optional()?;
-        let Some((description, limitations, visibility, ir_fed, ir_local, ir_seq, messaging_pubkey, wg_pubkey, endpoint_hint, max_connections, max_bandwidth_kbps, issued_at, expires_at, supersedes, signature)) = row else {
+        let Some((
+            description,
+            limitations,
+            visibility,
+            ir_fed,
+            ir_local,
+            ir_seq,
+            messaging_pubkey,
+            wg_pubkey,
+            endpoint_hint,
+            max_connections,
+            max_bandwidth_kbps,
+            issued_at,
+            expires_at,
+            supersedes,
+            signature,
+        )) = row
+        else {
             return Ok(None);
         };
         let route_scope = self.tunnel_advertisement_targets(&provider, sequence)?;
         let tags = self.tunnel_advertisement_tags(&provider, sequence)?;
         let in_response_to = match (ir_fed, ir_local, ir_seq) {
             (Some(f), Some(l), Some(s)) => Some(StatementRef {
-                author: UserId { federation: FederationId(bytes_to_hash32(&f)?), local_id: bytes_to_hash32(&l)? },
+                author: UserId {
+                    federation: FederationId(bytes_to_hash32(&f)?),
+                    local_id: bytes_to_hash32(&l)?,
+                },
                 sequence: s as u64,
             }),
             _ => None,
@@ -889,11 +1266,22 @@ impl StateStore {
         }))
     }
 
-    fn tunnel_advertisement_tags(&self, provider: &UserId, sequence: u64) -> Result<Vec<String>, StoreError> {
+    fn tunnel_advertisement_tags(
+        &self,
+        provider: &UserId,
+        sequence: u64,
+    ) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT tag FROM tunnel_advertisement_tags WHERE provider_federation_id = ?1 AND provider_local_id = ?2 AND sequence = ?3",
         )?;
-        let rows = stmt.query_map(params![provider.federation.0 .0.as_slice(), provider.local_id.0.as_slice(), sequence as i64], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(
+            params![
+                provider.federation.0 .0.as_slice(),
+                provider.local_id.0.as_slice(),
+                sequence as i64
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -901,13 +1289,22 @@ impl StateStore {
         Ok(out)
     }
 
-    fn tunnel_advertisement_targets(&self, provider: &UserId, sequence: u64) -> Result<Vec<TargetSelector>, StoreError> {
+    fn tunnel_advertisement_targets(
+        &self,
+        provider: &UserId,
+        sequence: u64,
+    ) -> Result<Vec<TargetSelector>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT target_kind, target_value FROM tunnel_advertisement_targets WHERE provider_federation_id = ?1 AND provider_local_id = ?2 AND sequence = ?3",
         )?;
-        let rows = stmt.query_map(params![provider.federation.0 .0.as_slice(), provider.local_id.0.as_slice(), sequence as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                provider.federation.0 .0.as_slice(),
+                provider.local_id.0.as_slice(),
+                sequence as i64
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
         let mut out = Vec::new();
         for r in rows {
             let (kind, value) = r?;
@@ -921,13 +1318,18 @@ impl StateStore {
     /// Every known advertisement — the browsing surface `list-tunnels`
     /// draws from.
     pub fn list_tunnel_advertisements(&self) -> Result<Vec<TunnelAdvertisement>, StoreError> {
-        let mut stmt = self.conn.prepare("SELECT provider_federation_id, provider_local_id, sequence FROM tunnel_advertisements")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT provider_federation_id, provider_local_id, sequence FROM tunnel_advertisements",
+        )?;
         let keys: Vec<(Vec<u8>, Vec<u8>, i64)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<_, _>>()?;
         let mut out = Vec::new();
         for (fed, local, seq) in keys {
-            let provider = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let provider = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
             if let Some(ad) = self.get_tunnel_advertisement(provider, seq as u64)? {
                 out.push(ad);
             }
@@ -938,20 +1340,32 @@ impl StateStore {
     /// Same flood-resistance gate as `ingest_tunnel_advertisement`, for
     /// the same reason — acting on a want-ad (auto-responding with an
     /// advertisement) has real effect, not just zero weight.
-    pub fn ingest_tunnel_service_request(&self, req: &TunnelServiceRequest) -> Result<(), StoreError> {
+    pub fn ingest_tunnel_service_request(
+        &self,
+        req: &TunnelServiceRequest,
+    ) -> Result<(), StoreError> {
         if self.get_follow(&req.requester)?.is_none() {
-            return Err(StoreError::NotFollowed(format!("{}/{}", req.requester.federation.0, req.requester.local_id)));
+            return Err(StoreError::NotFollowed(format!(
+                "{}/{}",
+                req.requester.federation.0, req.requester.local_id
+            )));
         }
         self.store_tunnel_service_request_row(req)
     }
 
     /// This router's own service request — no follow-gate, same reason
     /// as `store_own_tunnel_advertisement` above.
-    pub fn store_own_tunnel_service_request(&self, req: &TunnelServiceRequest) -> Result<(), StoreError> {
+    pub fn store_own_tunnel_service_request(
+        &self,
+        req: &TunnelServiceRequest,
+    ) -> Result<(), StoreError> {
         self.store_tunnel_service_request_row(req)
     }
 
-    fn store_tunnel_service_request_row(&self, req: &TunnelServiceRequest) -> Result<(), StoreError> {
+    fn store_tunnel_service_request_row(
+        &self,
+        req: &TunnelServiceRequest,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO tunnel_service_requests (requester_federation_id, requester_local_id, sequence, description, visibility, issued_at, expires_at, supersedes_sequence, signature, ingested_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -1003,15 +1417,29 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, seq, description, visibility, issued_at, expires_at, supersedes, signature) = r?;
-            let requester = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let (
+                fed,
+                local,
+                seq,
+                description,
+                visibility,
+                issued_at,
+                expires_at,
+                supersedes,
+                signature,
+            ) = r?;
+            let requester = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
             let desired_route_scope = {
                 let mut stmt = self.conn.prepare(
                     "SELECT target_kind, target_value FROM tunnel_service_request_targets WHERE requester_federation_id = ?1 AND requester_local_id = ?2 AND sequence = ?3",
                 )?;
-                let target_rows = stmt.query_map(params![fed.as_slice(), local.as_slice(), seq], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?;
+                let target_rows = stmt
+                    .query_map(params![fed.as_slice(), local.as_slice(), seq], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?;
                 let mut targets = Vec::new();
                 for tr in target_rows {
                     let (kind, value) = tr?;
@@ -1043,7 +1471,10 @@ impl StateStore {
     /// request is inherently a response to something this router itself
     /// published, and whether to actually honor it is `TunnelTrustRule`'s
     /// job at reconciliation time (Phase E), not ingest time.
-    pub fn store_tunnel_connection_request(&self, req: &TunnelConnectionRequest) -> Result<(), StoreError> {
+    pub fn store_tunnel_connection_request(
+        &self,
+        req: &TunnelConnectionRequest,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO tunnel_connection_requests (requester_federation_id, requester_local_id, sequence, advertisement_provider_federation_id, advertisement_provider_local_id, advertisement_sequence, requester_wg_pubkey, requester_messaging_pubkey, requested_at, signature, ingested_at, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'pending')
@@ -1065,7 +1496,11 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_tunnel_connection_request(&self, requester: &UserId, sequence: u64) -> Result<Option<TunnelConnectionRequest>, StoreError> {
+    pub fn get_tunnel_connection_request(
+        &self,
+        requester: &UserId,
+        sequence: u64,
+    ) -> Result<Option<TunnelConnectionRequest>, StoreError> {
         self.conn
             .query_row(
                 "SELECT advertisement_provider_federation_id, advertisement_provider_local_id, advertisement_sequence, requester_wg_pubkey, requester_messaging_pubkey, requested_at, signature
@@ -1104,7 +1539,11 @@ impl StateStore {
     /// trusted provider's tunnel automatically, so a repeated
     /// reconciliation run never sends a second, duplicate request for
     /// something already requested (accepted, pending, or otherwise).
-    pub fn has_tunnel_connection_request_for(&self, requester: &UserId, advertisement: &StatementRef) -> Result<bool, StoreError> {
+    pub fn has_tunnel_connection_request_for(
+        &self,
+        requester: &UserId,
+        advertisement: &StatementRef,
+    ) -> Result<bool, StoreError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tunnel_connection_requests
              WHERE requester_federation_id = ?1 AND requester_local_id = ?2
@@ -1121,7 +1560,9 @@ impl StateStore {
         Ok(count > 0)
     }
 
-    pub fn list_pending_tunnel_connection_requests(&self) -> Result<Vec<TunnelConnectionRequest>, StoreError> {
+    pub fn list_pending_tunnel_connection_requests(
+        &self,
+    ) -> Result<Vec<TunnelConnectionRequest>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT requester_federation_id, requester_local_id, sequence, advertisement_provider_federation_id, advertisement_provider_local_id, advertisement_sequence, requester_wg_pubkey, requester_messaging_pubkey, requested_at, signature
              FROM tunnel_connection_requests WHERE status = 'pending'",
@@ -1142,12 +1583,29 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (r_fed, r_local, r_seq, a_fed, a_local, a_seq, wg_pk, msg_pk, requested_at, signature) = r?;
+            let (
+                r_fed,
+                r_local,
+                r_seq,
+                a_fed,
+                a_local,
+                a_seq,
+                wg_pk,
+                msg_pk,
+                requested_at,
+                signature,
+            ) = r?;
             out.push(TunnelConnectionRequest {
-                requester: UserId { federation: FederationId(bytes_to_hash32(&r_fed)?), local_id: bytes_to_hash32(&r_local)? },
+                requester: UserId {
+                    federation: FederationId(bytes_to_hash32(&r_fed)?),
+                    local_id: bytes_to_hash32(&r_local)?,
+                },
                 sequence: r_seq as u64,
                 advertisement: StatementRef {
-                    author: UserId { federation: FederationId(bytes_to_hash32(&a_fed)?), local_id: bytes_to_hash32(&a_local)? },
+                    author: UserId {
+                        federation: FederationId(bytes_to_hash32(&a_fed)?),
+                        local_id: bytes_to_hash32(&a_local)?,
+                    },
                     sequence: a_seq as u64,
                 },
                 requester_wg_pubkey: WgPublicKeyBytes(bytes_to_32(&wg_pk)?),
@@ -1159,7 +1617,12 @@ impl StateStore {
         Ok(out)
     }
 
-    pub fn set_tunnel_connection_request_status(&self, requester: &UserId, sequence: u64, status: &str) -> Result<(), StoreError> {
+    pub fn set_tunnel_connection_request_status(
+        &self,
+        requester: &UserId,
+        sequence: u64,
+        status: &str,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE tunnel_connection_requests SET status = ?1 WHERE requester_federation_id = ?2 AND requester_local_id = ?3 AND sequence = ?4",
             params![status, requester.federation.0 .0.as_slice(), requester.local_id.0.as_slice(), sequence as i64],
@@ -1167,7 +1630,10 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn store_tunnel_connection_accept(&self, accept: &TunnelConnectionAccept) -> Result<(), StoreError> {
+    pub fn store_tunnel_connection_accept(
+        &self,
+        accept: &TunnelConnectionAccept,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO tunnel_connection_accepts (provider_federation_id, provider_local_id, request_requester_federation_id, request_requester_local_id, request_sequence, assigned_tunnel_ip, assigned_tunnel_ip6, accepted_at, signature, ingested_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -1188,7 +1654,11 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_tunnel_connection_accept_for(&self, requester: &UserId, sequence: u64) -> Result<Option<TunnelConnectionAccept>, StoreError> {
+    pub fn get_tunnel_connection_accept_for(
+        &self,
+        requester: &UserId,
+        sequence: u64,
+    ) -> Result<Option<TunnelConnectionAccept>, StoreError> {
         self.conn
             .query_row(
                 "SELECT provider_federation_id, provider_local_id, assigned_tunnel_ip, assigned_tunnel_ip6, accepted_at, signature FROM tunnel_connection_accepts
@@ -1240,7 +1710,10 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_tunnel_trust_rule(&self, user: &UserId) -> Result<Option<TunnelTrustRule>, StoreError> {
+    pub fn get_tunnel_trust_rule(
+        &self,
+        user: &UserId,
+    ) -> Result<Option<TunnelTrustRule>, StoreError> {
         self.conn
             .query_row(
                 "SELECT auto_accept_requests, auto_consume_advertisements, auto_respond_to_service_requests, excluded, tag_filter, min_reciprocity_ratio, expires_at, created_at
@@ -1284,9 +1757,23 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, auto_accept, auto_consume, auto_respond, excluded, tag_filter, min_reciprocity_ratio, expires_at, created_at) = r?;
+            let (
+                fed,
+                local,
+                auto_accept,
+                auto_consume,
+                auto_respond,
+                excluded,
+                tag_filter,
+                min_reciprocity_ratio,
+                expires_at,
+                created_at,
+            ) = r?;
             out.push(TunnelTrustRule {
-                user: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
+                user: UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                },
                 auto_accept_requests: auto_accept,
                 auto_consume_advertisements: auto_consume,
                 auto_respond_to_service_requests: auto_respond,
@@ -1330,6 +1817,591 @@ impl StateStore {
 
 // ── Shared rule lists ────────────────────────────────────────────────────
 
+impl StateStore {
+    pub fn next_shared_policy_sequence(
+        &self,
+        author: &UserId,
+        policy_id: &Hash32,
+    ) -> Result<u64, StoreError> {
+        let max: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM shared_policies
+             WHERE author_federation_id = ?1 AND author_local_id = ?2 AND policy_id = ?3",
+            params![
+                author.federation.0 .0.as_slice(),
+                author.local_id.0.as_slice(),
+                policy_id.0.as_slice()
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(max.map(|value| value as u64 + 1).unwrap_or(0))
+    }
+
+    pub fn store_own_shared_policy(&self, policy: &SharedPolicy) -> Result<(), StoreError> {
+        self.store_shared_policy_row(policy)
+    }
+
+    pub fn ingest_shared_policy(&self, policy: &SharedPolicy) -> Result<(), StoreError> {
+        if self.get_follow(&policy.author)?.is_none() {
+            return Err(StoreError::NotFollowed(format!(
+                "{}/{}",
+                policy.author.federation.0, policy.author.local_id
+            )));
+        }
+        self.store_shared_policy_row(policy)
+    }
+
+    fn store_shared_policy_row(&self, policy: &SharedPolicy) -> Result<(), StoreError> {
+        let author_fed = policy.author.federation.0 .0.as_slice();
+        let author_local = policy.author.local_id.0.as_slice();
+        let policy_id = policy.policy_id.0.as_slice();
+        let max: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM shared_policies
+             WHERE author_federation_id = ?1 AND author_local_id = ?2 AND policy_id = ?3",
+            params![author_fed, author_local, policy_id],
+            |row| row.get(0),
+        )?;
+        if max.is_some_and(|value| (policy.sequence as i64) < value) {
+            return Err(StoreError::Encoding(format!(
+                "shared policy sequence {} rolls back from {}",
+                policy.sequence,
+                max.unwrap()
+            )));
+        }
+
+        if let Some(existing) =
+            self.get_shared_policy(policy.policy_id, policy.author, policy.sequence)?
+        {
+            if existing == *policy {
+                return Ok(());
+            }
+            return Err(StoreError::Encoding(
+                "conflicting shared policy at the same sequence".into(),
+            ));
+        }
+        if policy.supersedes.is_some_and(|old| old >= policy.sequence) {
+            return Err(StoreError::Encoding(
+                "shared policy supersedes a non-older sequence".into(),
+            ));
+        }
+
+        self.conn.execute(
+            "INSERT INTO shared_policies
+             (author_federation_id, author_local_id, policy_id, sequence, name, description,
+              visibility, issued_at, expires_at, supersedes_sequence, signature, ingested_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                author_fed,
+                author_local,
+                policy_id,
+                policy.sequence as i64,
+                policy.name,
+                policy.description,
+                visibility_to_i64(policy.visibility),
+                policy.issued_at,
+                policy.expires_at,
+                policy.supersedes.map(|value| value as i64),
+                policy.signature.0.as_slice(),
+                now_unix(),
+            ],
+        )?;
+        for (ordinal, category) in policy.categories.iter().enumerate() {
+            self.conn.execute(
+                "INSERT INTO shared_policy_categories
+                 (author_federation_id, author_local_id, policy_id, sequence, ordinal, category)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    author_fed,
+                    author_local,
+                    policy_id,
+                    policy.sequence as i64,
+                    ordinal as i64,
+                    category
+                ],
+            )?;
+        }
+        for (ordinal, entry) in policy.entries.iter().enumerate() {
+            let (target_kind, target_value) = target_to_kv(&entry.target)?;
+            let (action_kind, action_value, action_ttl) = policy_action_to_columns(&entry.action);
+            self.conn.execute(
+                "INSERT INTO shared_policy_entries
+                 (author_federation_id, author_local_id, policy_id, sequence, ordinal, entry_id,
+                  target_kind, target_value, action_kind, action_value, action_ttl_seconds,
+                  category, reason_code, reason_note, reason_evidence, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                params![
+                    author_fed,
+                    author_local,
+                    policy_id,
+                    policy.sequence as i64,
+                    ordinal as i64,
+                    entry.entry_id.0.as_slice(),
+                    target_kind,
+                    target_value,
+                    action_kind,
+                    action_value,
+                    action_ttl,
+                    entry.category,
+                    reason_code_to_i64(entry.reason.code),
+                    entry.reason.note,
+                    encode_evidence(&entry.reason.evidence),
+                    entry.expires_at,
+                ],
+            )?;
+        }
+        if let Some(old_sequence) = policy.supersedes {
+            self.conn.execute(
+                "DELETE FROM shared_policies
+                 WHERE author_federation_id = ?1 AND author_local_id = ?2 AND policy_id = ?3 AND sequence = ?4",
+                params![author_fed, author_local, policy_id, old_sequence as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_shared_policy(
+        &self,
+        policy_id: Hash32,
+        author: UserId,
+        sequence: u64,
+    ) -> Result<Option<SharedPolicy>, StoreError> {
+        let metadata = self.conn.query_row(
+            "SELECT name, description, visibility, issued_at, expires_at, supersedes_sequence, signature
+             FROM shared_policies
+             WHERE author_federation_id = ?1 AND author_local_id = ?2 AND policy_id = ?3 AND sequence = ?4",
+            params![author.federation.0 .0.as_slice(), author.local_id.0.as_slice(), policy_id.0.as_slice(), sequence as i64],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Vec<u8>>(6)?)),
+        ).optional()?;
+        let Some((name, description, visibility, issued_at, expires_at, supersedes, signature)) =
+            metadata
+        else {
+            return Ok(None);
+        };
+        let categories = self.conn.prepare(
+            "SELECT category FROM shared_policy_categories
+             WHERE author_federation_id = ?1 AND author_local_id = ?2 AND policy_id = ?3 AND sequence = ?4
+             ORDER BY ordinal",
+        )?.query_map(params![author.federation.0 .0.as_slice(), author.local_id.0.as_slice(), policy_id.0.as_slice(), sequence as i64], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT entry_id, target_kind, target_value, action_kind, action_value, action_ttl_seconds,
+                    category, reason_code, reason_note, reason_evidence, expires_at
+             FROM shared_policy_entries
+             WHERE author_federation_id = ?1 AND author_local_id = ?2 AND policy_id = ?3 AND sequence = ?4
+             ORDER BY ordinal",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                author.federation.0 .0.as_slice(),
+                author.local_id.0.as_slice(),
+                policy_id.0.as_slice(),
+                sequence as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Vec<u8>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                ))
+            },
+        )?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (
+                entry_id,
+                target_kind,
+                target_value,
+                action_kind,
+                action_value,
+                action_ttl,
+                category,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                entry_expires,
+            ) = row?;
+            let target = kv_to_target(&target_kind, &target_value).ok_or_else(|| {
+                StoreError::Encoding(format!("invalid policy target kind {target_kind}"))
+            })?;
+            entries.push(PolicyEntry {
+                entry_id: bytes_to_hash32(&entry_id)?,
+                target,
+                action: policy_action_from_columns(&action_kind, action_value, action_ttl)?,
+                category,
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
+                expires_at: entry_expires,
+            });
+        }
+        Ok(Some(SharedPolicy {
+            policy_id,
+            author,
+            sequence,
+            name,
+            description,
+            categories,
+            visibility: visibility_from_i64(visibility)?,
+            entries,
+            issued_at,
+            expires_at,
+            supersedes: supersedes.map(|value| value as u64),
+            signature: SignatureBytes(bytes_to_64(&signature)?),
+        }))
+    }
+
+    pub fn list_shared_policies(&self) -> Result<Vec<SharedPolicy>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT author_federation_id, author_local_id, policy_id, sequence
+             FROM shared_policies ORDER BY author_federation_id, author_local_id, policy_id, sequence",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut policies = Vec::new();
+        for row in rows {
+            let (fed, local, id, sequence) = row?;
+            let author = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
+            if let Some(policy) =
+                self.get_shared_policy(bytes_to_hash32(&id)?, author, sequence as u64)?
+            {
+                policies.push(policy);
+            }
+        }
+        Ok(policies)
+    }
+
+    pub fn create_local_profile(&self, profile: &LocalProfile) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO local_profiles (profile_id, name, description, active) VALUES (?1, ?2, ?3, ?4)",
+            params![profile.profile_id.0.as_slice(), profile.name, profile.description, profile.active as i64],
+        )?;
+        for policy_id in &profile.policy_ids {
+            self.conn.execute(
+                "INSERT INTO local_profile_policies (profile_id, policy_id) VALUES (?1, ?2)",
+                params![profile.profile_id.0.as_slice(), policy_id.0.as_slice()],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_local_profiles(&self) -> Result<Vec<LocalProfile>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT profile_id, name, description, active FROM local_profiles ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut profiles = Vec::new();
+        for row in rows {
+            let (id, name, description, active) = row?;
+            let profile_id = bytes_to_hash32(&id)?;
+            let mut policies = self.conn.prepare("SELECT policy_id FROM local_profile_policies WHERE profile_id = ?1 ORDER BY policy_id")?;
+            let policy_bytes = policies
+                .query_map(params![profile_id.0.as_slice()], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let policy_ids = policy_bytes
+                .iter()
+                .map(|bytes| bytes_to_hash32(bytes))
+                .collect::<Result<Vec<_>, _>>()?;
+            profiles.push(LocalProfile {
+                profile_id,
+                name,
+                description,
+                active: active != 0,
+                policy_ids,
+            });
+        }
+        Ok(profiles)
+    }
+
+    pub fn add_policy_to_profile(
+        &self,
+        profile_id: Hash32,
+        policy_id: Hash32,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO local_profile_policies (profile_id, policy_id) VALUES (?1, ?2)",
+            params![profile_id.0.as_slice(), policy_id.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_active_profile(&self, profile_id: Hash32) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE local_profiles SET active = 0", [])?;
+        let changed = tx.execute(
+            "UPDATE local_profiles SET active = 1 WHERE profile_id = ?1",
+            params![profile_id.0.as_slice()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::Encoding("unknown local profile".into()));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn active_local_profile(&self) -> Result<Option<LocalProfile>, StoreError> {
+        Ok(self
+            .list_local_profiles()?
+            .into_iter()
+            .find(|profile| profile.active))
+    }
+
+    pub fn upsert_local_route_profile(&self, profile: &LocalRouteProfile) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO local_route_profiles (name, table_id, interface, enabled, vpn)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(name) DO UPDATE SET table_id = excluded.table_id,
+               interface = excluded.interface, enabled = excluded.enabled, vpn = excluded.vpn",
+            params![profile.name, profile.table as i64, profile.interface, profile.enabled as i64, profile.vpn as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_local_route_profiles(&self) -> Result<Vec<LocalRouteProfile>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, table_id, interface, enabled, vpn FROM local_route_profiles ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LocalRouteProfile {
+                name: row.get(0)?,
+                table: row.get::<_, i64>(1)? as u32,
+                interface: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                vpn: row.get::<_, i64>(4)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    }
+
+    pub fn local_route_profile(&self, name: &str) -> Result<Option<LocalRouteProfile>, StoreError> {
+        Ok(self.list_local_route_profiles()?.into_iter().find(|p| p.name == name))
+    }
+
+    pub fn list_active_shared_policies(&self) -> Result<Vec<SharedPolicy>, StoreError> {
+        let Some(profile) = self.active_local_profile()? else {
+            return Ok(Vec::new());
+        };
+        let policies = self.list_shared_policies()?;
+        Ok(policies
+            .into_iter()
+            .filter(|policy| profile.policy_ids.contains(&policy.policy_id))
+            .collect())
+    }
+
+    pub fn next_policy_vote_sequence(
+        &self,
+        policy_id: Hash32,
+        entry_id: Hash32,
+        policy_sequence: u64,
+        group_id: GroupId,
+        voter: &UserId,
+    ) -> Result<u64, StoreError> {
+        let max: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM policy_votes
+             WHERE policy_id = ?1 AND entry_id = ?2 AND policy_sequence = ?3
+               AND group_id = ?4 AND voter_federation_id = ?5 AND voter_local_id = ?6",
+            params![
+                policy_id.0.as_slice(),
+                entry_id.0.as_slice(),
+                policy_sequence as i64,
+                group_id.0 .0.as_slice(),
+                voter.federation.0 .0.as_slice(),
+                voter.local_id.0.as_slice(),
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(max.map(|value| value as u64 + 1).unwrap_or(0))
+    }
+
+    /// Policy votes are never gated at ingest. Whether a vote counts is
+    /// determined from the group's current voting membership by the helper
+    /// methods below, just like `GroupVote`.
+    pub fn store_policy_vote(&self, vote: &PolicyVote) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO policy_votes
+             (policy_id, entry_id, policy_sequence, group_id, voter_federation_id,
+              voter_local_id, sequence, stance, reason_code, reason_note,
+              reason_evidence, issued_at, expires_at, signature, ingested_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(policy_id, entry_id, policy_sequence, group_id,
+                         voter_federation_id, voter_local_id, sequence) DO NOTHING",
+            params![
+                vote.policy_id.0.as_slice(),
+                vote.entry_id.0.as_slice(),
+                vote.policy_sequence as i64,
+                vote.group_id.0 .0.as_slice(),
+                vote.voter.federation.0 .0.as_slice(),
+                vote.voter.local_id.0.as_slice(),
+                vote.sequence as i64,
+                stance_to_i64(vote.stance),
+                reason_code_to_i64(vote.reason.code),
+                vote.reason.note,
+                encode_evidence(&vote.reason.evidence),
+                vote.issued_at,
+                vote.expires_at,
+                vote.signature.0.as_slice(),
+                now_unix(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_policy_votes(
+        &self,
+        policy_id: Hash32,
+        entry_id: Hash32,
+        group_id: GroupId,
+    ) -> Result<Vec<PolicyVote>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT policy_sequence, voter_federation_id, voter_local_id, sequence,
+                    stance, reason_code, reason_note, reason_evidence, issued_at,
+                    expires_at, signature
+             FROM policy_votes
+             WHERE policy_id = ?1 AND entry_id = ?2 AND group_id = ?3
+             ORDER BY issued_at ASC, policy_sequence ASC, sequence ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                policy_id.0.as_slice(),
+                entry_id.0.as_slice(),
+                group_id.0 .0.as_slice()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Vec<u8>>(10)?,
+                ))
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (
+                policy_sequence,
+                voter_fed,
+                voter_local,
+                sequence,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                expires_at,
+                signature,
+            ) = row?;
+            out.push(PolicyVote {
+                policy_id,
+                entry_id,
+                policy_sequence: policy_sequence as u64,
+                group_id,
+                voter: UserId {
+                    federation: FederationId(bytes_to_hash32(&voter_fed)?),
+                    local_id: bytes_to_hash32(&voter_local)?,
+                },
+                sequence: sequence as u64,
+                stance: stance_from_i64(stance)?,
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
+                issued_at,
+                expires_at,
+                signature: SignatureBytes(bytes_to_64(&signature)?),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The latest vote from each current voting member for one policy entry.
+    /// The boolean says whether that vote is non-expired at `now`.
+    pub fn policy_vote_breakdown_for(
+        &self,
+        policy_id: Hash32,
+        entry_id: Hash32,
+        policy_sequence: u64,
+        group_id: GroupId,
+        now: i64,
+    ) -> Result<Vec<(UserId, Option<PolicyVote>, bool)>, StoreError> {
+        let Some(group) = self.get_group(group_id)? else {
+            return Ok(vec![]);
+        };
+        let mut out = Vec::new();
+        for member in &group.voting_members {
+            let vote = self
+                .list_policy_votes(policy_id, entry_id, group_id)?
+                .into_iter()
+                .filter(|vote| vote.policy_sequence == policy_sequence && vote.voter == *member)
+                .max_by_key(|vote| vote.sequence);
+            let counts = vote.as_ref().is_some_and(|vote| !vote.is_expired(now));
+            out.push((*member, vote, counts));
+        }
+        Ok(out)
+    }
+
+    pub fn policy_stance_for(
+        &self,
+        policy_id: Hash32,
+        entry_id: Hash32,
+        policy_sequence: u64,
+        group_id: GroupId,
+        now: i64,
+    ) -> Result<Option<(Stance, usize, usize)>, StoreError> {
+        let mut allow = 0;
+        let mut deny = 0;
+        for (_, vote, counts) in
+            self.policy_vote_breakdown_for(policy_id, entry_id, policy_sequence, group_id, now)?
+        {
+            if !counts {
+                continue;
+            }
+            match vote.map(|vote| vote.stance) {
+                Some(Stance::Allow) => allow += 1,
+                Some(Stance::Deny) => deny += 1,
+                Some(Stance::Ask) | None => {}
+            }
+        }
+        match allow.cmp(&deny) {
+            std::cmp::Ordering::Greater => Ok(Some((Stance::Allow, allow, deny))),
+            std::cmp::Ordering::Less => Ok(Some((Stance::Deny, allow, deny))),
+            _ => Ok(None),
+        }
+    }
+}
+
 /// One list entry alongside the context `policy-engine` needs to weigh
 /// it: the list's author (whose `LocalTrustRule` applies), the list's
 /// own categories (so `category_filter` can be checked), and that
@@ -1357,7 +2429,10 @@ impl StateStore {
     /// rejected outright rather than silently stored at no weight.
     pub fn ingest_shared_rule_list(&self, list: &SharedRuleList) -> Result<(), StoreError> {
         if self.get_follow(&list.author)?.is_none() {
-            return Err(StoreError::NotFollowed(format!("{}/{}", list.author.federation.0, list.author.local_id)));
+            return Err(StoreError::NotFollowed(format!(
+                "{}/{}",
+                list.author.federation.0, list.author.local_id
+            )));
         }
         self.store_shared_rule_list_row(list)
     }
@@ -1427,7 +2502,11 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_shared_rule_list(&self, author: UserId, sequence: u64) -> Result<Option<SharedRuleList>, StoreError> {
+    pub fn get_shared_rule_list(
+        &self,
+        author: UserId,
+        sequence: u64,
+    ) -> Result<Option<SharedRuleList>, StoreError> {
         let meta = self
             .conn
             .query_row(
@@ -1447,7 +2526,16 @@ impl StateStore {
                 },
             )
             .optional()?;
-        let Some((name, description, visibility, issued_at, expires_at, supersedes_sequence, signature)) = meta else {
+        let Some((
+            name,
+            description,
+            visibility,
+            issued_at,
+            expires_at,
+            supersedes_sequence,
+            signature,
+        )) = meta
+        else {
             return Ok(None);
         };
         Ok(Some(SharedRuleList {
@@ -1473,11 +2561,22 @@ impl StateStore {
     /// against a value reconstructed from storage — verification happens
     /// once, against the freshly-parsed wire format, before it's ever
     /// stored), but worth a real ordinal column if that ever changes.
-    fn shared_rule_list_categories(&self, author: &UserId, sequence: u64) -> Result<Vec<String>, StoreError> {
+    fn shared_rule_list_categories(
+        &self,
+        author: &UserId,
+        sequence: u64,
+    ) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT category FROM shared_rule_list_categories WHERE author_federation_id = ?1 AND author_local_id = ?2 AND sequence = ?3",
         )?;
-        let rows = stmt.query_map(params![author.federation.0 .0.as_slice(), author.local_id.0.as_slice(), sequence as i64], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(
+            params![
+                author.federation.0 .0.as_slice(),
+                author.local_id.0.as_slice(),
+                sequence as i64
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1485,34 +2584,72 @@ impl StateStore {
         Ok(out)
     }
 
-    fn shared_rule_list_entries_for_list(&self, author: &UserId, sequence: u64) -> Result<Vec<SharedRuleEntry>, StoreError> {
+    fn shared_rule_list_entries_for_list(
+        &self,
+        author: &UserId,
+        sequence: u64,
+    ) -> Result<Vec<SharedRuleEntry>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT target_kind, target_value, stance, reason_code, reason_note, reason_evidence
              FROM shared_rule_list_entries WHERE author_federation_id = ?1 AND author_local_id = ?2 AND sequence = ?3",
         )?;
-        let rows = stmt.query_map(params![author.federation.0 .0.as_slice(), author.local_id.0.as_slice(), sequence as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Vec<u8>>(5)?))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                author.federation.0 .0.as_slice(),
+                author.local_id.0.as_slice(),
+                sequence as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for r in rows {
             let (kind, value, stance, reason_code, reason_note, reason_evidence) = r?;
-            let Some(target) = kv_to_target(&kind, &value) else { continue };
+            let Some(target) = kv_to_target(&kind, &value) else {
+                continue;
+            };
             out.push(SharedRuleEntry {
                 target,
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
             });
         }
         Ok(out)
     }
 
     pub fn list_shared_rule_lists(&self) -> Result<Vec<SharedRuleList>, StoreError> {
-        let mut stmt = self.conn.prepare("SELECT author_federation_id, author_local_id, sequence FROM shared_rule_lists")?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?)))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT author_federation_id, author_local_id, sequence FROM shared_rule_lists",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
         let mut refs = Vec::new();
         for r in rows {
             let (fed, local, sequence) = r?;
-            refs.push((UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? }, sequence as u64));
+            refs.push((
+                UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                },
+                sequence as u64,
+            ));
         }
         let mut out = Vec::new();
         for (author, sequence) in refs {
@@ -1538,7 +2675,11 @@ impl StateStore {
     /// way individual opinions are), so "stop counting an expired list's
     /// entries" is a storage-layer concern here, not something
     /// `policy-engine`'s explanation needs to narrate per-entry.
-    pub fn list_entries_for(&self, target: &TargetSelector, now: i64) -> Result<Vec<ListEntryContext>, StoreError> {
+    pub fn list_entries_for(
+        &self,
+        target: &TargetSelector,
+        now: i64,
+    ) -> Result<Vec<ListEntryContext>, StoreError> {
         let (kind, value) = target_to_kv(target)?;
         let mut stmt = self.conn.prepare(
             "SELECT e.author_federation_id, e.author_local_id, e.sequence, e.stance, e.reason_code, e.reason_note, e.reason_evidence
@@ -1561,11 +2702,18 @@ impl StateStore {
         let mut out = Vec::new();
         for r in rows {
             let (fed, local, sequence, stance, reason_code, reason_note, reason_evidence) = r?;
-            let author = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let author = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
             let entry = SharedRuleEntry {
                 target: target.clone(),
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
             };
             let categories = self.shared_rule_list_categories(&author, sequence as u64)?;
             let trust = self.get_follow(&author)?;
@@ -1617,7 +2765,15 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn append_apply_log(&self, revision: i64, digest: &str, decision_count: i64, summary: &str, outcome: &str, applied_at: i64) -> Result<(), StoreError> {
+    pub fn append_apply_log(
+        &self,
+        revision: i64,
+        digest: &str,
+        decision_count: i64,
+        summary: &str,
+        outcome: &str,
+        applied_at: i64,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO apply_log (revision, digest, decision_count, summary, outcome, applied_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![revision, digest, decision_count, summary, outcome, applied_at],
@@ -1631,7 +2787,8 @@ impl StateStore {
     /// target. Never called from a dry run (see `apply_all`'s own
     /// dry-run branch, which never touches state at all).
     pub fn clear_enforced_decision_contributors(&self) -> Result<(), StoreError> {
-        self.conn.execute("DELETE FROM enforced_decision_contributors", [])?;
+        self.conn
+            .execute("DELETE FROM enforced_decision_contributors", [])?;
         Ok(())
     }
 
@@ -1639,14 +2796,23 @@ impl StateStore {
     /// decision — called once per enforced target, after
     /// `clear_enforced_decision_contributors`, while repopulating the
     /// snapshot for a fresh `sf apply` run.
-    pub fn record_enforced_decision_contributors(&self, target: &TargetSelector, contributing: &[Contribution]) -> Result<(), StoreError> {
+    pub fn record_enforced_decision_contributors(
+        &self,
+        target: &TargetSelector,
+        contributing: &[Contribution],
+    ) -> Result<(), StoreError> {
         let (kind, value) = target_to_kv(target)?;
         for c in contributing {
-            let (source_kind, source_fed, source_local): (&str, &[u8], Option<&[u8]>) = match &c.source {
-                StatementAuthor::User(u) => ("user", u.federation.0 .0.as_slice(), Some(u.local_id.0.as_slice())),
-                StatementAuthor::Federation(f) => ("federation", f.0 .0.as_slice(), None),
-                StatementAuthor::Group(g) => ("group", g.0 .0.as_slice(), None),
-            };
+            let (source_kind, source_fed, source_local): (&str, &[u8], Option<&[u8]>) =
+                match &c.source {
+                    StatementAuthor::User(u) => (
+                        "user",
+                        u.federation.0 .0.as_slice(),
+                        Some(u.local_id.0.as_slice()),
+                    ),
+                    StatementAuthor::Federation(f) => ("federation", f.0 .0.as_slice(), None),
+                    StatementAuthor::Group(g) => ("group", g.0 .0.as_slice(), None),
+                };
             self.conn.execute(
                 "INSERT INTO enforced_decision_contributors (target_kind, target_value, source_kind, source_federation_id, source_local_id, stance, weight, reason_code, reason_note, reason_evidence)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -1661,7 +2827,10 @@ impl StateStore {
     /// isn't currently enforced, or its decision came from a tier that
     /// doesn't have contributors at all (a `LocalOverride`/owner-opinion
     /// decision, which `policy-engine` never populates `contributing` for).
-    pub fn enforced_decision_contributors_for(&self, target: &TargetSelector) -> Result<Vec<Contribution>, StoreError> {
+    pub fn enforced_decision_contributors_for(
+        &self,
+        target: &TargetSelector,
+    ) -> Result<Vec<Contribution>, StoreError> {
         let (kind, value) = target_to_kv(target)?;
         let mut stmt = self.conn.prepare(
             "SELECT source_kind, source_federation_id, source_local_id, stance, weight, reason_code, reason_note, reason_evidence
@@ -1678,7 +2847,9 @@ impl StateStore {
     /// Every currently-enforced target with at least one contributor,
     /// paired with its contributors — the "browse everything" surface,
     /// `sf list-enforced-decisions`.
-    pub fn list_all_enforced_decision_contributors(&self) -> Result<Vec<(TargetSelector, Contribution)>, StoreError> {
+    pub fn list_all_enforced_decision_contributors(
+        &self,
+    ) -> Result<Vec<(TargetSelector, Contribution)>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT target_kind, target_value, source_kind, source_federation_id, source_local_id, stance, weight, reason_code, reason_note, reason_evidence
              FROM enforced_decision_contributors",
@@ -1692,17 +2863,24 @@ impl StateStore {
         let mut out = Vec::new();
         for r in rows {
             let (kind, value, contribution) = r?;
-            let Some(target) = kv_to_target(&kind, &value) else { continue };
+            let Some(target) = kv_to_target(&kind, &value) else {
+                continue;
+            };
             out.push((target, contribution?));
         }
         Ok(out)
     }
 
-    fn row_to_contribution(row: &rusqlite::Row) -> rusqlite::Result<Result<Contribution, StoreError>> {
+    fn row_to_contribution(
+        row: &rusqlite::Row,
+    ) -> rusqlite::Result<Result<Contribution, StoreError>> {
         Self::row_to_contribution_from(row, 0)
     }
 
-    fn row_to_contribution_from(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<Result<Contribution, StoreError>> {
+    fn row_to_contribution_from(
+        row: &rusqlite::Row,
+        offset: usize,
+    ) -> rusqlite::Result<Result<Contribution, StoreError>> {
         let source_kind: String = row.get(offset)?;
         let source_fed: Vec<u8> = row.get(offset + 1)?;
         let source_local: Option<Vec<u8>> = row.get(offset + 2)?;
@@ -1714,18 +2892,29 @@ impl StateStore {
 
         Ok((|| -> Result<Contribution, StoreError> {
             let source = match source_kind.as_str() {
-                "federation" => StatementAuthor::Federation(FederationId(bytes_to_hash32(&source_fed)?)),
+                "federation" => {
+                    StatementAuthor::Federation(FederationId(bytes_to_hash32(&source_fed)?))
+                }
                 "group" => StatementAuthor::Group(GroupId(bytes_to_hash32(&source_fed)?)),
                 _ => {
-                    let local = source_local.ok_or_else(|| StoreError::Encoding("user contribution row missing source_local_id".into()))?;
-                    StatementAuthor::User(UserId { federation: FederationId(bytes_to_hash32(&source_fed)?), local_id: bytes_to_hash32(&local)? })
+                    let local = source_local.ok_or_else(|| {
+                        StoreError::Encoding("user contribution row missing source_local_id".into())
+                    })?;
+                    StatementAuthor::User(UserId {
+                        federation: FederationId(bytes_to_hash32(&source_fed)?),
+                        local_id: bytes_to_hash32(&local)?,
+                    })
                 }
             };
             Ok(Contribution {
                 source,
                 stance: stance_from_i64(stance)?,
                 weight,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
             })
         })())
     }
@@ -1755,7 +2944,9 @@ impl TunnelDirection {
         match s {
             "providing" => Ok(TunnelDirection::Providing),
             "consuming" => Ok(TunnelDirection::Consuming),
-            other => Err(StoreError::Encoding(format!("invalid tunnel direction {other}"))),
+            other => Err(StoreError::Encoding(format!(
+                "invalid tunnel direction {other}"
+            ))),
         }
     }
 }
@@ -1821,7 +3012,11 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_provisioned_tunnel(&self, peer: &UserId, direction: TunnelDirection) -> Result<Option<ProvisionedTunnel>, StoreError> {
+    pub fn get_provisioned_tunnel(
+        &self,
+        peer: &UserId,
+        direction: TunnelDirection,
+    ) -> Result<Option<ProvisionedTunnel>, StoreError> {
         self.conn
             .query_row(
                 "SELECT peer_wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, tunnel_ip6, status, created_at, advertisement_sequence FROM provisioned_tunnels
@@ -1860,7 +3055,11 @@ impl StateStore {
             .transpose()
     }
 
-    pub fn remove_provisioned_tunnel(&self, peer: &UserId, direction: TunnelDirection) -> Result<(), StoreError> {
+    pub fn remove_provisioned_tunnel(
+        &self,
+        peer: &UserId,
+        direction: TunnelDirection,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "DELETE FROM provisioned_tunnels WHERE peer_federation_id = ?1 AND peer_local_id = ?2 AND direction = ?3",
             params![peer.federation.0 .0.as_slice(), peer.local_id.0.as_slice(), direction.as_str()],
@@ -1890,9 +3089,25 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, direction, wg_pubkey, interface_name, fwmark, route_table, tunnel_ip, tunnel_ip6, status, created_at, advertisement_sequence) = r?;
+            let (
+                fed,
+                local,
+                direction,
+                wg_pubkey,
+                interface_name,
+                fwmark,
+                route_table,
+                tunnel_ip,
+                tunnel_ip6,
+                status,
+                created_at,
+                advertisement_sequence,
+            ) = r?;
             out.push(ProvisionedTunnel {
-                peer: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
+                peer: UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                },
                 direction: TunnelDirection::from_str(&direction)?,
                 peer_wg_pubkey: WgPublicKeyBytes(bytes_to_32(&wg_pubkey)?),
                 interface_name,
@@ -1917,7 +3132,14 @@ impl StateStore {
     /// recreated, router rebooted): if the new raw value is lower than
     /// what was last seen, the whole new value is treated as a fresh
     /// delta rather than going negative.
-    pub fn record_transfer_sample(&self, peer: &UserId, direction: TunnelDirection, raw_rx: u64, raw_tx: u64, now: i64) -> Result<(), StoreError> {
+    pub fn record_transfer_sample(
+        &self,
+        peer: &UserId,
+        direction: TunnelDirection,
+        raw_rx: u64,
+        raw_tx: u64,
+        now: i64,
+    ) -> Result<(), StoreError> {
         let existing: Option<(i64, i64, i64, i64)> = self
             .conn
             .query_row(
@@ -1926,11 +3148,20 @@ impl StateStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let (last_raw_rx, last_raw_tx, cumulative_rx, cumulative_tx) = existing.unwrap_or((0, 0, 0, 0));
+        let (last_raw_rx, last_raw_tx, cumulative_rx, cumulative_tx) =
+            existing.unwrap_or((0, 0, 0, 0));
         let raw_rx = raw_rx as i64;
         let raw_tx = raw_tx as i64;
-        let delta_rx = if raw_rx >= last_raw_rx { raw_rx - last_raw_rx } else { raw_rx };
-        let delta_tx = if raw_tx >= last_raw_tx { raw_tx - last_raw_tx } else { raw_tx };
+        let delta_rx = if raw_rx >= last_raw_rx {
+            raw_rx - last_raw_rx
+        } else {
+            raw_rx
+        };
+        let delta_tx = if raw_tx >= last_raw_tx {
+            raw_tx - last_raw_tx
+        } else {
+            raw_tx
+        };
         self.conn.execute(
             "INSERT INTO tunnel_transfer_totals (peer_federation_id, peer_local_id, direction, last_raw_rx, last_raw_tx, cumulative_rx, cumulative_tx, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -1964,12 +3195,22 @@ impl StateStore {
     pub fn list_tunnel_balances(&self) -> Result<Vec<TunnelBalance>, StoreError> {
         let mut stmt = self.conn.prepare("SELECT peer_federation_id, peer_local_id, direction, cumulative_rx, cumulative_tx FROM tunnel_transfer_totals")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?))
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
         })?;
-        let mut by_peer: std::collections::HashMap<UserId, (u64, u64)> = std::collections::HashMap::new();
+        let mut by_peer: std::collections::HashMap<UserId, (u64, u64)> =
+            std::collections::HashMap::new();
         for r in rows {
             let (fed, local, direction, cumulative_rx, cumulative_tx) = r?;
-            let peer = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let peer = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
             let total = (cumulative_rx + cumulative_tx) as u64;
             let entry = by_peer.entry(peer).or_insert((0, 0));
             match TunnelDirection::from_str(&direction)? {
@@ -1977,14 +3218,26 @@ impl StateStore {
                 TunnelDirection::Consuming => entry.1 = total,
             }
         }
-        Ok(by_peer.into_iter().map(|(peer, (given_to, taken_from))| TunnelBalance { peer, given_to, taken_from }).collect())
+        Ok(by_peer
+            .into_iter()
+            .map(|(peer, (given_to, taken_from))| TunnelBalance {
+                peer,
+                given_to,
+                taken_from,
+            })
+            .collect())
     }
 
     /// Wholesale-replaces the selected-target list for a consuming
     /// tunnel — same "new version replaces the old one" idiom used
     /// elsewhere, appropriate here since selection is always "here is the
     /// full current set," not an incremental diff.
-    pub fn set_provisioned_tunnel_selected_targets(&self, peer: &UserId, direction: TunnelDirection, targets: &[TargetSelector]) -> Result<(), StoreError> {
+    pub fn set_provisioned_tunnel_selected_targets(
+        &self,
+        peer: &UserId,
+        direction: TunnelDirection,
+        targets: &[TargetSelector],
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "DELETE FROM provisioned_tunnel_selected_targets WHERE peer_federation_id = ?1 AND peer_local_id = ?2 AND direction = ?3",
             params![peer.federation.0 .0.as_slice(), peer.local_id.0.as_slice(), direction.as_str()],
@@ -2000,13 +3253,22 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_provisioned_tunnel_selected_targets(&self, peer: &UserId, direction: TunnelDirection) -> Result<Vec<TargetSelector>, StoreError> {
+    pub fn get_provisioned_tunnel_selected_targets(
+        &self,
+        peer: &UserId,
+        direction: TunnelDirection,
+    ) -> Result<Vec<TargetSelector>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT target_kind, target_value FROM provisioned_tunnel_selected_targets WHERE peer_federation_id = ?1 AND peer_local_id = ?2 AND direction = ?3",
         )?;
-        let rows = stmt.query_map(params![peer.federation.0 .0.as_slice(), peer.local_id.0.as_slice(), direction.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                peer.federation.0 .0.as_slice(),
+                peer.local_id.0.as_slice(),
+                direction.as_str()
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
         let mut out = Vec::new();
         for r in rows {
             let (kind, value) = r?;
@@ -2054,7 +3316,9 @@ impl NetworkHealthSummary {
     /// displaying this should label that specific contribution as a
     /// lower bound rather than presenting all three as equally certain.
     pub fn attention_items(&self) -> usize {
-        self.owned_groups_single_owner + self.own_votes_expired + self.trusted_peers_with_block_reports
+        self.owned_groups_single_owner
+            + self.own_votes_expired
+            + self.trusted_peers_with_block_reports
     }
 }
 
@@ -2074,7 +3338,11 @@ impl StateStore {
     /// current owner/admin can publish the next version, unlike every
     /// other sequence in this crate.
     pub fn next_group_sequence(&self, group_id: GroupId) -> Result<u64, StoreError> {
-        let max: Option<i64> = self.conn.query_row("SELECT MAX(sequence) FROM groups WHERE group_id = ?1", params![group_id.0 .0.as_slice()], |row| row.get(0))?;
+        let max: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM groups WHERE group_id = ?1",
+            params![group_id.0 .0.as_slice()],
+            |row| row.get(0),
+        )?;
         Ok(max.map(|m| m as u64 + 1).unwrap_or(0))
     }
 
@@ -2126,10 +3394,26 @@ impl StateStore {
                 // uses (owners ∪ admins ∪ voting ∪ non-voting) — a pure
                 // role change (e.g. voting -> non-voting, or gaining
                 // admin) within that union is not a join or a leave.
-                let previous_members: HashSet<UserId> =
-                    [&current.owners, &current.admins, &current.voting_members, &current.non_voting_members].into_iter().flatten().copied().collect();
-                let new_members: HashSet<UserId> =
-                    [&group.owners, &group.admins, &group.voting_members, &group.non_voting_members].into_iter().flatten().copied().collect();
+                let previous_members: HashSet<UserId> = [
+                    &current.owners,
+                    &current.admins,
+                    &current.voting_members,
+                    &current.non_voting_members,
+                ]
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect();
+                let new_members: HashSet<UserId> = [
+                    &group.owners,
+                    &group.admins,
+                    &group.voting_members,
+                    &group.non_voting_members,
+                ]
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect();
                 for u in new_members.difference(&previous_members) {
                     membership_events.push((*u, "joined"));
                 }
@@ -2139,12 +3423,18 @@ impl StateStore {
             }
             None => {
                 if !group.owners.contains(&group.published_by) {
-                    return Err(StoreError::Unauthorized("a brand-new group's publisher must be one of its own listed owners".to_string()));
+                    return Err(StoreError::Unauthorized(
+                        "a brand-new group's publisher must be one of its own listed owners"
+                            .to_string(),
+                    ));
                 }
             }
         }
         if let Some(old_seq) = group.supersedes {
-            self.conn.execute("DELETE FROM groups WHERE group_id = ?1 AND sequence = ?2", params![group.group_id.0 .0.as_slice(), old_seq as i64])?;
+            self.conn.execute(
+                "DELETE FROM groups WHERE group_id = ?1 AND sequence = ?2",
+                params![group.group_id.0 .0.as_slice(), old_seq as i64],
+            )?;
         }
         self.conn.execute(
             "INSERT INTO groups (group_id, sequence, published_by_federation_id, published_by_local_id, name, description, join_prompt, party_line_moderated, issued_at, expires_at, supersedes_sequence, signature, ingested_at)
@@ -2194,15 +3484,26 @@ impl StateStore {
     /// chronologically so a caller can merge this with
     /// `list_party_line_messages` into one timeline, same as a real IRC
     /// client interleaves join/part notices with chat.
-    pub fn list_group_membership_events(&self, group_id: GroupId) -> Result<Vec<(UserId, MembershipEventKind, i64)>, StoreError> {
+    pub fn list_group_membership_events(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Vec<(UserId, MembershipEventKind, i64)>, StoreError> {
         let mut stmt = self.conn.prepare("SELECT user_federation_id, user_local_id, kind, at FROM group_membership_events WHERE group_id = ?1 ORDER BY at ASC, id ASC")?;
         let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
             let (fed, local, kind, at) = r?;
-            let user = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let user = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
             let kind = match kind.as_str() {
                 "joined" => MembershipEventKind::Joined,
                 _ => MembershipEventKind::Left,
@@ -2213,8 +3514,14 @@ impl StateStore {
     }
 
     pub fn get_group(&self, group_id: GroupId) -> Result<Option<Group>, StoreError> {
-        let latest_sequence: Option<i64> = self.conn.query_row("SELECT MAX(sequence) FROM groups WHERE group_id = ?1", params![group_id.0 .0.as_slice()], |row| row.get(0))?;
-        let Some(sequence) = latest_sequence else { return Ok(None) };
+        let latest_sequence: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM groups WHERE group_id = ?1",
+            params![group_id.0 .0.as_slice()],
+            |row| row.get(0),
+        )?;
+        let Some(sequence) = latest_sequence else {
+            return Ok(None);
+        };
         let row = self
             .conn
             .query_row(
@@ -2237,10 +3544,27 @@ impl StateStore {
                 },
             )
             .optional()?;
-        let Some((pb_fed, pb_local, name, description, join_prompt, party_line_moderated, issued_at, expires_at, supersedes, signature)) = row else { return Ok(None) };
+        let Some((
+            pb_fed,
+            pb_local,
+            name,
+            description,
+            join_prompt,
+            party_line_moderated,
+            issued_at,
+            expires_at,
+            supersedes,
+            signature,
+        )) = row
+        else {
+            return Ok(None);
+        };
         Ok(Some(Group {
             group_id,
-            published_by: UserId { federation: FederationId(bytes_to_hash32(&pb_fed)?), local_id: bytes_to_hash32(&pb_local)? },
+            published_by: UserId {
+                federation: FederationId(bytes_to_hash32(&pb_fed)?),
+                local_id: bytes_to_hash32(&pb_local)?,
+            },
             sequence: sequence as u64,
             name,
             description,
@@ -2248,7 +3572,11 @@ impl StateStore {
             owners: self.group_members(group_id, sequence, "group_owners")?,
             admins: self.group_members(group_id, sequence, "group_admins")?,
             voting_members: self.group_members(group_id, sequence, "group_voting_members")?,
-            non_voting_members: self.group_members(group_id, sequence, "group_non_voting_members")?,
+            non_voting_members: self.group_members(
+                group_id,
+                sequence,
+                "group_non_voting_members",
+            )?,
             party_line_moderated,
             voiced_members: self.group_members(group_id, sequence, "group_voiced_members")?,
             issued_at,
@@ -2258,20 +3586,32 @@ impl StateStore {
         }))
     }
 
-    fn group_members(&self, group_id: GroupId, sequence: i64, table: &str) -> Result<Vec<UserId>, StoreError> {
+    fn group_members(
+        &self,
+        group_id: GroupId,
+        sequence: i64,
+        table: &str,
+    ) -> Result<Vec<UserId>, StoreError> {
         let mut stmt = self.conn.prepare(&format!("SELECT user_federation_id, user_local_id FROM {table} WHERE group_id = ?1 AND sequence = ?2"))?;
-        let rows = stmt.query_map(params![group_id.0 .0.as_slice(), sequence], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let rows = stmt.query_map(params![group_id.0 .0.as_slice(), sequence], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
         let mut out = Vec::new();
         for r in rows {
             let (fed, local) = r?;
-            out.push(UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? });
+            out.push(UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            });
         }
         Ok(out)
     }
 
     pub fn list_groups(&self) -> Result<Vec<Group>, StoreError> {
         let mut stmt = self.conn.prepare("SELECT DISTINCT group_id FROM groups")?;
-        let ids: Vec<Vec<u8>> = stmt.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
+        let ids: Vec<Vec<u8>> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
         let mut out = Vec::new();
         for id in ids {
             if let Some(g) = self.get_group(GroupId(bytes_to_hash32(&id)?))? {
@@ -2301,7 +3641,11 @@ impl StateStore {
     /// instead of `'pending'`, so a blocked user's repeat attempts never
     /// need the owner to reject them by hand each time.
     pub fn store_group_join_request(&self, req: &GroupJoinRequest) -> Result<(), StoreError> {
-        let status = if self.is_group_user_blocked(req.group_id, &req.requester)? { "blocked" } else { "pending" };
+        let status = if self.is_group_user_blocked(req.group_id, &req.requester)? {
+            "blocked"
+        } else {
+            "pending"
+        };
         self.conn.execute(
             "INSERT INTO group_join_requests (requester_federation_id, requester_local_id, sequence, group_id, answer, issued_at, signature, ingested_at, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -2321,19 +3665,32 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn list_pending_group_join_requests(&self, group_id: GroupId) -> Result<Vec<GroupJoinRequest>, StoreError> {
+    pub fn list_pending_group_join_requests(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Vec<GroupJoinRequest>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT requester_federation_id, requester_local_id, sequence, answer, issued_at, signature
              FROM group_join_requests WHERE group_id = ?1 AND status = 'pending'",
         )?;
         let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?, row.get::<_, Vec<u8>>(5)?))
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
             let (fed, local, sequence, answer, issued_at, signature) = r?;
             out.push(GroupJoinRequest {
-                requester: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
+                requester: UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                },
                 group_id,
                 sequence: sequence as u64,
                 answer,
@@ -2344,7 +3701,12 @@ impl StateStore {
         Ok(out)
     }
 
-    pub fn set_group_join_request_status(&self, requester: &UserId, sequence: u64, status: &str) -> Result<(), StoreError> {
+    pub fn set_group_join_request_status(
+        &self,
+        requester: &UserId,
+        sequence: u64,
+        status: &str,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE group_join_requests SET status = ?1 WHERE requester_federation_id = ?2 AND requester_local_id = ?3 AND sequence = ?4",
             params![status, requester.federation.0 .0.as_slice(), requester.local_id.0.as_slice(), sequence as i64],
@@ -2362,10 +3724,17 @@ impl StateStore {
     /// a voter. Not (yet) something a prospective member on a different
     /// router can query remotely — that would need the owner to actively
     /// export it, which this doesn't do.
-    pub fn group_join_track_record(&self, group_id: GroupId) -> Result<GroupJoinTrackRecord, StoreError> {
+    pub fn group_join_track_record(
+        &self,
+        group_id: GroupId,
+    ) -> Result<GroupJoinTrackRecord, StoreError> {
         let mut record = GroupJoinTrackRecord::default();
-        let mut stmt = self.conn.prepare("SELECT status, COUNT(*) FROM group_join_requests WHERE group_id = ?1 GROUP BY status")?;
-        let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT status, COUNT(*) FROM group_join_requests WHERE group_id = ?1 GROUP BY status",
+        )?;
+        let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
         for r in rows {
             let (status, count) = r?;
             match status.as_str() {
@@ -2397,7 +3766,13 @@ impl StateStore {
     /// step first), and any future `GroupJoinRequest` from them for this
     /// group is auto-stored as `'blocked'` rather than `'pending'` from
     /// then on — see `store_group_join_request`.
-    pub fn block_group_user(&self, group_id: GroupId, user: &UserId, reason: &Reason, now: i64) -> Result<(), StoreError> {
+    pub fn block_group_user(
+        &self,
+        group_id: GroupId,
+        user: &UserId,
+        reason: &Reason,
+        now: i64,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO group_blocked_users (group_id, user_federation_id, user_local_id, blocked_at, reason_code, reason_note, reason_evidence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(group_id, user_federation_id, user_local_id) DO UPDATE SET blocked_at = excluded.blocked_at, reason_code = excluded.reason_code, reason_note = excluded.reason_note, reason_evidence = excluded.reason_evidence",
@@ -2427,7 +3802,11 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn is_group_user_blocked(&self, group_id: GroupId, user: &UserId) -> Result<bool, StoreError> {
+    pub fn is_group_user_blocked(
+        &self,
+        group_id: GroupId,
+        user: &UserId,
+    ) -> Result<bool, StoreError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM group_blocked_users WHERE group_id = ?1 AND user_federation_id = ?2 AND user_local_id = ?3",
             params![group_id.0 .0.as_slice(), user.federation.0 .0.as_slice(), user.local_id.0.as_slice()],
@@ -2438,18 +3817,34 @@ impl StateStore {
 
     /// Every user this router itself has blocked from `group_id`, paired
     /// with the reason given at block time.
-    pub fn list_blocked_group_users(&self, group_id: GroupId) -> Result<Vec<(UserId, Reason)>, StoreError> {
+    pub fn list_blocked_group_users(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Vec<(UserId, Reason)>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT user_federation_id, user_local_id, reason_code, reason_note, reason_evidence FROM group_blocked_users WHERE group_id = ?1",
         )?;
         let rows = stmt.query_map(params![group_id.0 .0.as_slice()], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Vec<u8>>(4)?))
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
             let (fed, local, reason_code, reason_note, reason_evidence) = r?;
-            let user = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
-            let reason = Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? };
+            let user = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
+            let reason = Reason {
+                code: reason_code_from_i64(reason_code)?,
+                note: reason_note,
+                evidence: decode_evidence(&reason_evidence)?,
+            };
             out.push((user, reason));
         }
         Ok(out)
@@ -2457,7 +3852,11 @@ impl StateStore {
 
     // ── Group block reports (signed, attributable, exportable) ─────────
 
-    pub fn next_group_block_report_sequence(&self, group_id: GroupId, reporter: &UserId) -> Result<u64, StoreError> {
+    pub fn next_group_block_report_sequence(
+        &self,
+        group_id: GroupId,
+        reporter: &UserId,
+    ) -> Result<u64, StoreError> {
         let max: Option<i64> = self.conn.query_row(
             "SELECT MAX(sequence) FROM group_block_reports WHERE group_id = ?1 AND reporter_federation_id = ?2 AND reporter_local_id = ?3",
             params![group_id.0 .0.as_slice(), reporter.federation.0 .0.as_slice(), reporter.local_id.0.as_slice()],
@@ -2501,32 +3900,59 @@ impl StateStore {
     /// that `blocked_user` has been blocked from `group_id` — the "roll
     /// up into attribution" view: an owner or reviewer can see how many
     /// independent routers have reported this same user, and why.
-    pub fn list_group_block_reports_for(&self, group_id: GroupId, blocked_user: &UserId) -> Result<Vec<GroupBlockReport>, StoreError> {
+    pub fn list_group_block_reports_for(
+        &self,
+        group_id: GroupId,
+        blocked_user: &UserId,
+    ) -> Result<Vec<GroupBlockReport>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT reporter_federation_id, reporter_local_id, sequence, reason_code, reason_note, reason_evidence, issued_at, signature
              FROM group_block_reports WHERE group_id = ?1 AND blocked_user_federation_id = ?2 AND blocked_user_local_id = ?3",
         )?;
-        let rows = stmt.query_map(params![group_id.0 .0.as_slice(), blocked_user.federation.0 .0.as_slice(), blocked_user.local_id.0.as_slice()], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Vec<u8>>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, Vec<u8>>(7)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                group_id.0 .0.as_slice(),
+                blocked_user.federation.0 .0.as_slice(),
+                blocked_user.local_id.0.as_slice()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, sequence, reason_code, reason_note, reason_evidence, issued_at, signature) = r?;
+            let (
+                fed,
+                local,
+                sequence,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                signature,
+            ) = r?;
             out.push(GroupBlockReport {
                 group_id,
-                reporter: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
+                reporter: UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                },
                 sequence: sequence as u64,
                 blocked_user: *blocked_user,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 issued_at,
                 signature: SignatureBytes(bytes_to_64(&signature)?),
             });
@@ -2560,13 +3986,35 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (group_id, reporter_fed, reporter_local, sequence, blocked_fed, blocked_local, reason_code, reason_note, reason_evidence, issued_at, signature) = r?;
+            let (
+                group_id,
+                reporter_fed,
+                reporter_local,
+                sequence,
+                blocked_fed,
+                blocked_local,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                signature,
+            ) = r?;
             out.push(GroupBlockReport {
                 group_id: GroupId(bytes_to_hash32(&group_id)?),
-                reporter: UserId { federation: FederationId(bytes_to_hash32(&reporter_fed)?), local_id: bytes_to_hash32(&reporter_local)? },
+                reporter: UserId {
+                    federation: FederationId(bytes_to_hash32(&reporter_fed)?),
+                    local_id: bytes_to_hash32(&reporter_local)?,
+                },
                 sequence: sequence as u64,
-                blocked_user: UserId { federation: FederationId(bytes_to_hash32(&blocked_fed)?), local_id: bytes_to_hash32(&blocked_local)? },
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                blocked_user: UserId {
+                    federation: FederationId(bytes_to_hash32(&blocked_fed)?),
+                    local_id: bytes_to_hash32(&blocked_local)?,
+                },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 issued_at,
                 signature: SignatureBytes(bytes_to_64(&signature)?),
             });
@@ -2574,7 +4022,11 @@ impl StateStore {
         Ok(out)
     }
 
-    pub fn next_group_vote_sequence(&self, group_id: GroupId, voter: &UserId) -> Result<u64, StoreError> {
+    pub fn next_group_vote_sequence(
+        &self,
+        group_id: GroupId,
+        voter: &UserId,
+    ) -> Result<u64, StoreError> {
         let max: Option<i64> = self.conn.query_row(
             "SELECT MAX(sequence) FROM group_votes WHERE group_id = ?1 AND voter_federation_id = ?2 AND voter_local_id = ?3",
             params![group_id.0 .0.as_slice(), voter.federation.0 .0.as_slice(), voter.local_id.0.as_slice()],
@@ -2629,32 +4081,56 @@ impl StateStore {
                      AND gv2.voter_local_id = gv1.voter_local_id AND gv2.target_kind = gv1.target_kind AND gv2.target_value = gv1.target_value
                )",
         )?;
-        let rows = stmt.query_map(params![self_user.federation.0 .0.as_slice(), self_user.local_id.0.as_slice()], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Vec<u8>>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, Option<i64>>(9)?,
-                row.get::<_, Vec<u8>>(10)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                self_user.federation.0 .0.as_slice(),
+                self_user.local_id.0.as_slice()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Vec<u8>>(10)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for r in rows {
-            let (group_id, sequence, target_kind, target_value, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, signature) = r?;
-            let Some(target) = kv_to_target(&target_kind, &target_value) else { continue };
+            let (
+                group_id,
+                sequence,
+                target_kind,
+                target_value,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                expires_at,
+                signature,
+            ) = r?;
+            let Some(target) = kv_to_target(&target_kind, &target_value) else {
+                continue;
+            };
             out.push(GroupVote {
                 group_id: GroupId(bytes_to_hash32(&group_id)?),
                 voter: *self_user,
                 sequence: sequence as u64,
                 target,
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 issued_at,
                 expires_at,
                 signature: SignatureBytes(bytes_to_64(&signature)?),
@@ -2668,8 +4144,15 @@ impl StateStore {
     /// one collective stance. A tie, or no votes at all, is `None` (no
     /// contribution either way, not a coin flip — same "no signal" ethos
     /// `policy-engine` already applies everywhere else).
-    pub fn group_stance_for(&self, group_id: GroupId, target: &TargetSelector, now: i64) -> Result<Option<(Stance, usize, usize)>, StoreError> {
-        let Some(group) = self.get_group(group_id)? else { return Ok(None) };
+    pub fn group_stance_for(
+        &self,
+        group_id: GroupId,
+        target: &TargetSelector,
+        now: i64,
+    ) -> Result<Option<(Stance, usize, usize)>, StoreError> {
+        let Some(group) = self.get_group(group_id)? else {
+            return Ok(None);
+        };
         let (kind, value) = target_to_kv(target)?;
         let mut allow = 0usize;
         let mut deny = 0usize;
@@ -2684,7 +4167,9 @@ impl StateStore {
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
                 )
                 .optional()?;
-            let Some((stance, expires_at)) = row else { continue };
+            let Some((stance, expires_at)) = row else {
+                continue;
+            };
             if matches!(expires_at, Some(exp) if exp <= now) {
                 continue;
             }
@@ -2747,15 +4232,37 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, sequence, target_kind, target_value, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, signature) = r?;
-            let Some(target) = kv_to_target(&target_kind, &target_value) else { continue };
+            let (
+                fed,
+                local,
+                sequence,
+                target_kind,
+                target_value,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                expires_at,
+                signature,
+            ) = r?;
+            let Some(target) = kv_to_target(&target_kind, &target_value) else {
+                continue;
+            };
             out.push(GroupVote {
                 group_id,
-                voter: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
+                voter: UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                },
                 sequence: sequence as u64,
                 target,
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 issued_at,
                 expires_at,
                 signature: SignatureBytes(bytes_to_64(&signature)?),
@@ -2764,8 +4271,15 @@ impl StateStore {
         Ok(out)
     }
 
-    pub fn group_vote_breakdown_for(&self, group_id: GroupId, target: &TargetSelector, now: i64) -> Result<Vec<(UserId, Option<GroupVote>, bool)>, StoreError> {
-        let Some(group) = self.get_group(group_id)? else { return Ok(vec![]) };
+    pub fn group_vote_breakdown_for(
+        &self,
+        group_id: GroupId,
+        target: &TargetSelector,
+        now: i64,
+    ) -> Result<Vec<(UserId, Option<GroupVote>, bool)>, StoreError> {
+        let Some(group) = self.get_group(group_id)? else {
+            return Ok(vec![]);
+        };
         let (kind, value) = target_to_kv(target)?;
         let mut out = Vec::new();
         for member in &group.voting_members {
@@ -2791,7 +4305,17 @@ impl StateStore {
                     },
                 )
                 .optional()?;
-            let Some((sequence, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, signature)) = row else {
+            let Some((
+                sequence,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                issued_at,
+                expires_at,
+                signature,
+            )) = row
+            else {
                 out.push((*member, None, false));
                 continue;
             };
@@ -2801,7 +4325,11 @@ impl StateStore {
                 sequence: sequence as u64,
                 target: target.clone(),
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 issued_at,
                 expires_at,
                 signature: SignatureBytes(bytes_to_64(&signature)?),
@@ -2817,13 +4345,20 @@ impl StateStore {
     /// `list_entries_for`. `(group_id, stance, allow_votes, deny_votes,
     /// trust_rule)`; the vote counts let a caller build a human-readable
     /// reason ("3 of 4 voting members voted Deny").
-    pub fn list_group_contributions_for(&self, target: &TargetSelector, now: i64) -> Result<Vec<(GroupId, Stance, usize, usize, GroupTrustRule)>, StoreError> {
+    #[allow(clippy::type_complexity)]
+    pub fn list_group_contributions_for(
+        &self,
+        target: &TargetSelector,
+        now: i64,
+    ) -> Result<Vec<(GroupId, Stance, usize, usize, GroupTrustRule)>, StoreError> {
         let mut out = Vec::new();
         for rule in self.list_group_trust_rules()? {
             if rule.excluded || rule.is_expired(now) {
                 continue;
             }
-            if let Some((stance, allow, deny)) = self.group_stance_for(rule.group_id, target, now)? {
+            if let Some((stance, allow, deny)) =
+                self.group_stance_for(rule.group_id, target, now)?
+            {
                 out.push((rule.group_id, stance, allow, deny, rule));
             }
         }
@@ -2840,7 +4375,10 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn get_group_trust_rule(&self, group_id: GroupId) -> Result<Option<GroupTrustRule>, StoreError> {
+    pub fn get_group_trust_rule(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Option<GroupTrustRule>, StoreError> {
         self.conn
             .query_row(
                 "SELECT allow_weight, deny_weight, excluded, expires_at, created_at FROM group_trust_rules WHERE group_id = ?1",
@@ -2854,17 +4392,35 @@ impl StateStore {
     pub fn list_group_trust_rules(&self) -> Result<Vec<GroupTrustRule>, StoreError> {
         let mut stmt = self.conn.prepare("SELECT group_id, allow_weight, deny_weight, excluded, expires_at, created_at FROM group_trust_rules")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, bool>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, i64>(5)?))
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
             let (id, allow_weight, deny_weight, excluded, expires_at, created_at) = r?;
-            out.push(GroupTrustRule { group_id: GroupId(bytes_to_hash32(&id)?), allow_weight, deny_weight, excluded, expires_at, created_at });
+            out.push(GroupTrustRule {
+                group_id: GroupId(bytes_to_hash32(&id)?),
+                allow_weight,
+                deny_weight,
+                excluded,
+                expires_at,
+                created_at,
+            });
         }
         Ok(out)
     }
 
-    pub fn next_party_line_sequence(&self, group_id: GroupId, author: &UserId) -> Result<u64, StoreError> {
+    pub fn next_party_line_sequence(
+        &self,
+        group_id: GroupId,
+        author: &UserId,
+    ) -> Result<u64, StoreError> {
         let max: Option<i64> = self.conn.query_row(
             "SELECT MAX(sequence) FROM party_line_messages WHERE group_id = ?1 AND author_federation_id = ?2 AND author_local_id = ?3",
             params![group_id.0 .0.as_slice(), author.federation.0 .0.as_slice(), author.local_id.0.as_slice()],
@@ -2874,10 +4430,18 @@ impl StateStore {
     }
 
     pub fn store_party_line_message(&self, msg: &PartyLineMessage) -> Result<(), StoreError> {
+        self.store_party_line_message_with_pubkey(msg, None)
+    }
+
+    pub fn store_party_line_message_with_pubkey(
+        &self,
+        msg: &PartyLineMessage,
+        author_pubkey: Option<&PublicKeyBytes>,
+    ) -> Result<(), StoreError> {
         let reply_target = msg.in_reply_to.as_ref().map(target_to_kv).transpose()?;
         self.conn.execute(
-            "INSERT INTO party_line_messages (group_id, author_federation_id, author_local_id, sequence, body, in_reply_to_target_kind, in_reply_to_target_value, issued_at, signature, ingested_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO party_line_messages (group_id, author_federation_id, author_local_id, sequence, body, in_reply_to_target_kind, in_reply_to_target_value, issued_at, signature, ingested_at, author_pubkey)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(group_id, author_federation_id, author_local_id, sequence) DO NOTHING",
             params![
                 msg.group_id.0 .0.as_slice(),
@@ -2890,9 +4454,21 @@ impl StateStore {
                 msg.issued_at,
                 msg.signature.0.as_slice(),
                 now_unix(),
+                author_pubkey.map(|key| key.0.as_slice()),
             ],
         )?;
         Ok(())
+    }
+
+    pub fn party_line_message_author_pubkey(
+        &self,
+        msg: &PartyLineMessage,
+    ) -> Result<Option<PublicKeyBytes>, StoreError> {
+        self.conn.query_row(
+            "SELECT author_pubkey FROM party_line_messages WHERE group_id = ?1 AND author_federation_id = ?2 AND author_local_id = ?3 AND sequence = ?4",
+            params![msg.group_id.0 .0.as_slice(), msg.author.federation.0 .0.as_slice(), msg.author.local_id.0.as_slice(), msg.sequence as i64],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        ).optional()?.flatten().map(|bytes| bytes_to_32(&bytes).map(PublicKeyBytes)).transpose()
     }
 
     /// Filters against the group's *current* posting permissions
@@ -2905,8 +4481,13 @@ impl StateStore {
     /// ungated, same as votes/join-requests — this is where permission
     /// is actually enforced, at read time. An unknown group filters to
     /// nothing, the same safe-default `group_stance_for` uses.
-    pub fn list_party_line_messages(&self, group_id: GroupId) -> Result<Vec<PartyLineMessage>, StoreError> {
-        let Some(group) = self.get_group(group_id)? else { return Ok(vec![]) };
+    pub fn list_party_line_messages(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Vec<PartyLineMessage>, StoreError> {
+        let Some(group) = self.get_group(group_id)? else {
+            return Ok(vec![]);
+        };
         let mut stmt = self.conn.prepare(
             "SELECT author_federation_id, author_local_id, sequence, body, in_reply_to_target_kind, in_reply_to_target_value, issued_at, signature FROM party_line_messages WHERE group_id = ?1 ORDER BY issued_at ASC",
         )?;
@@ -2925,7 +4506,10 @@ impl StateStore {
         let mut out = Vec::new();
         for r in rows {
             let (fed, local, sequence, body, reply_kind, reply_value, issued_at, signature) = r?;
-            let author = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let author = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
             if !group.can_post_party_line(&author) {
                 continue;
             }
@@ -2933,7 +4517,15 @@ impl StateStore {
                 (Some(k), Some(v)) => kv_to_target(&k, &v),
                 _ => None,
             };
-            out.push(PartyLineMessage { group_id, author, sequence: sequence as u64, body, in_reply_to, issued_at, signature: SignatureBytes(bytes_to_64(&signature)?) });
+            out.push(PartyLineMessage {
+                group_id,
+                author,
+                sequence: sequence as u64,
+                body,
+                in_reply_to,
+                issued_at,
+                signature: SignatureBytes(bytes_to_64(&signature)?),
+            });
         }
         Ok(out)
     }
@@ -2951,8 +4543,15 @@ impl StateStore {
 
         let (owned_groups_total, owned_groups_single_owner) = match self_user {
             Some(u) => {
-                let owned: Vec<Group> = self.list_groups()?.into_iter().filter(|g| g.owners.contains(&u)).collect();
-                (owned.len(), owned.iter().filter(|g| g.owners.len() == 1).count())
+                let owned: Vec<Group> = self
+                    .list_groups()?
+                    .into_iter()
+                    .filter(|g| g.owners.contains(&u))
+                    .collect();
+                (
+                    owned.len(),
+                    owned.iter().filter(|g| g.owners.len() == 1).count(),
+                )
             }
             None => (0, 0),
         };
@@ -2973,7 +4572,10 @@ impl StateStore {
         // "no P2P in this pass" scoping). A follow with zero reports here
         // means "none reached this router," not "none exist."
         let all_reports = self.list_all_group_block_reports()?;
-        let trusted_peers_with_block_reports = follows.iter().filter(|f| all_reports.iter().any(|r| r.blocked_user == f.user)).count();
+        let trusted_peers_with_block_reports = follows
+            .iter()
+            .filter(|f| all_reports.iter().any(|r| r.blocked_user == f.user))
+            .count();
 
         Ok(NetworkHealthSummary {
             owned_groups_total,
@@ -2990,7 +4592,10 @@ impl StateStore {
 
     /// Same MAX-based counter pattern used for every other per-author
     /// sequence (see `next_tunnel_advertisement_sequence`).
-    pub fn next_device_approval_opinion_sequence(&self, author: &UserId) -> Result<u64, StoreError> {
+    pub fn next_device_approval_opinion_sequence(
+        &self,
+        author: &UserId,
+    ) -> Result<u64, StoreError> {
         let max: Option<i64> = self.conn.query_row(
             "SELECT MAX(sequence) FROM device_approval_opinions WHERE author_federation_id = ?1 AND author_local_id = ?2",
             params![author.federation.0 .0.as_slice(), author.local_id.0.as_slice()],
@@ -3006,9 +4611,15 @@ impl StateStore {
     /// contribute a weighted data point, so an unfollowed stranger's
     /// opinion about some MAC address is refused, not silently stored at
     /// zero weight.
-    pub fn ingest_device_approval_opinion(&self, o: &DeviceApprovalOpinion) -> Result<(), StoreError> {
+    pub fn ingest_device_approval_opinion(
+        &self,
+        o: &DeviceApprovalOpinion,
+    ) -> Result<(), StoreError> {
         if self.get_follow(&o.author)?.is_none() {
-            return Err(StoreError::NotFollowed(format!("{}/{}", o.author.federation.0, o.author.local_id)));
+            return Err(StoreError::NotFollowed(format!(
+                "{}/{}",
+                o.author.federation.0, o.author.local_id
+            )));
         }
         self.store_device_approval_opinion_row(o)
     }
@@ -3016,11 +4627,17 @@ impl StateStore {
     /// This router's own opinion, published under its own identity — no
     /// follow-gate, the same distinction `store_own_tunnel_advertisement`
     /// draws from `ingest_tunnel_advertisement`.
-    pub fn store_own_device_approval_opinion(&self, o: &DeviceApprovalOpinion) -> Result<(), StoreError> {
+    pub fn store_own_device_approval_opinion(
+        &self,
+        o: &DeviceApprovalOpinion,
+    ) -> Result<(), StoreError> {
         self.store_device_approval_opinion_row(o)
     }
 
-    fn store_device_approval_opinion_row(&self, o: &DeviceApprovalOpinion) -> Result<(), StoreError> {
+    fn store_device_approval_opinion_row(
+        &self,
+        o: &DeviceApprovalOpinion,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO device_approval_opinions (author_federation_id, author_local_id, sequence, mac, stance, reason_code, reason_note, reason_evidence, device_label, issued_at, expires_at, supersedes_sequence, signature, ingested_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
@@ -3048,7 +4665,10 @@ impl StateStore {
     /// Every stored opinion about `mac`, paired with the author's
     /// `LocalTrustRule` if this router follows them — the device-approval
     /// analogue of `list_followed_opinions_for`.
-    pub fn list_device_approval_opinions_for(&self, mac: &str) -> Result<Vec<(DeviceApprovalOpinion, Option<LocalTrustRule>)>, StoreError> {
+    pub fn list_device_approval_opinions_for(
+        &self,
+        mac: &str,
+    ) -> Result<Vec<(DeviceApprovalOpinion, Option<LocalTrustRule>)>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT author_federation_id, author_local_id, sequence, stance, reason_code, reason_note, reason_evidence, device_label, issued_at, expires_at, supersedes_sequence, signature
              FROM device_approval_opinions WHERE mac = ?1",
@@ -3071,14 +4691,34 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, sequence, stance, reason_code, reason_note, reason_evidence, device_label, issued_at, expires_at, supersedes_sequence, signature) = r?;
-            let author = UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? };
+            let (
+                fed,
+                local,
+                sequence,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                device_label,
+                issued_at,
+                expires_at,
+                supersedes_sequence,
+                signature,
+            ) = r?;
+            let author = UserId {
+                federation: FederationId(bytes_to_hash32(&fed)?),
+                local_id: bytes_to_hash32(&local)?,
+            };
             let opinion = DeviceApprovalOpinion {
                 author,
                 sequence: sequence as u64,
                 mac: mac.to_string(),
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 device_label,
                 issued_at,
                 expires_at,
@@ -3101,7 +4741,12 @@ impl StateStore {
     /// pending kestreld join request, or (future work, not this pass) a
     /// real bridge feeding kestreld's own approval UI as one more
     /// suggestion — never an auto-write of `join_approved`/`join_denied`.
-    pub fn device_approval_stance_for(&self, mac: &str, now: i64, threshold: f64) -> Result<(domain_types::Decision, f64, f64), StoreError> {
+    pub fn device_approval_stance_for(
+        &self,
+        mac: &str,
+        now: i64,
+        threshold: f64,
+    ) -> Result<(domain_types::Decision, f64, f64), StoreError> {
         let mut allow_total = 0.0f64;
         let mut deny_total = 0.0f64;
         for (opinion, rule) in self.list_device_approval_opinions_for(mac)? {
@@ -3132,7 +4777,9 @@ impl StateStore {
     /// Every stored device-approval opinion across every MAC — the
     /// dashboard's "browse everything" entry point, the same role
     /// `list_all_enforced_decision_contributors` plays for contributors.
-    pub fn list_all_device_approval_opinions(&self) -> Result<Vec<DeviceApprovalOpinion>, StoreError> {
+    pub fn list_all_device_approval_opinions(
+        &self,
+    ) -> Result<Vec<DeviceApprovalOpinion>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT author_federation_id, author_local_id, sequence, mac, stance, reason_code, reason_note, reason_evidence, device_label, issued_at, expires_at, supersedes_sequence, signature
              FROM device_approval_opinions ORDER BY mac, sequence",
@@ -3156,17 +4803,269 @@ impl StateStore {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (fed, local, sequence, mac, stance, reason_code, reason_note, reason_evidence, device_label, issued_at, expires_at, supersedes_sequence, signature) = r?;
+            let (
+                fed,
+                local,
+                sequence,
+                mac,
+                stance,
+                reason_code,
+                reason_note,
+                reason_evidence,
+                device_label,
+                issued_at,
+                expires_at,
+                supersedes_sequence,
+                signature,
+            ) = r?;
             out.push(DeviceApprovalOpinion {
-                author: UserId { federation: FederationId(bytes_to_hash32(&fed)?), local_id: bytes_to_hash32(&local)? },
+                author: UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                },
                 sequence: sequence as u64,
                 mac,
                 stance: stance_from_i64(stance)?,
-                reason: Reason { code: reason_code_from_i64(reason_code)?, note: reason_note, evidence: decode_evidence(&reason_evidence)? },
+                reason: Reason {
+                    code: reason_code_from_i64(reason_code)?,
+                    note: reason_note,
+                    evidence: decode_evidence(&reason_evidence)?,
+                },
                 device_label,
                 issued_at,
                 expires_at,
                 supersedes: supersedes_sequence.map(|s| s as u64),
+                signature: SignatureBytes(bytes_to_64(&signature)?),
+            });
+        }
+        Ok(out)
+    }
+}
+
+// ── Fingerprint group data ─────────────────────────────────────────────────
+
+impl StateStore {
+    pub fn store_fingerprint_observation(
+        &self,
+        observation: &FingerprintObservation,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO fingerprint_observations
+             (group_id, fingerprint_id, fingerprint_revision, observer_federation_id,
+              observer_local_id, signal_family, evidence_digest, confidence, issued_at,
+              expires_at, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(group_id, fingerprint_id, fingerprint_revision,
+                         observer_federation_id, observer_local_id, signal_family)
+             DO NOTHING",
+            params![
+                observation.group_id.0 .0.as_slice(),
+                observation.fingerprint_id.0.as_slice(),
+                observation.fingerprint_revision as i64,
+                observation.observer.federation.0 .0.as_slice(),
+                observation.observer.local_id.0.as_slice(),
+                observation.signal_family,
+                observation.evidence_digest.0.as_slice(),
+                observation.confidence as i64,
+                observation.issued_at,
+                observation.expires_at,
+                observation.signature.0.as_slice(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_fingerprint_observations(
+        &self,
+        group_id: GroupId,
+        fingerprint_id: Hash32,
+        fingerprint_revision: u64,
+    ) -> Result<Vec<FingerprintObservation>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT observer_federation_id, observer_local_id, signal_family,
+                    evidence_digest, confidence, issued_at, expires_at, signature
+             FROM fingerprint_observations
+             WHERE group_id = ?1 AND fingerprint_id = ?2 AND fingerprint_revision = ?3
+             ORDER BY issued_at, observer_federation_id, observer_local_id, signal_family",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                group_id.0 .0.as_slice(),
+                fingerprint_id.0.as_slice(),
+                fingerprint_revision as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                ))
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (
+                observer_fed,
+                observer_local,
+                signal_family,
+                evidence_digest,
+                confidence,
+                issued_at,
+                expires_at,
+                signature,
+            ) = row?;
+            out.push(FingerprintObservation {
+                group_id,
+                fingerprint_id,
+                fingerprint_revision,
+                observer: UserId {
+                    federation: FederationId(bytes_to_hash32(&observer_fed)?),
+                    local_id: bytes_to_hash32(&observer_local)?,
+                },
+                signal_family,
+                evidence_digest: bytes_to_hash32(&evidence_digest)?,
+                confidence: u8::try_from(confidence).map_err(|_| {
+                    StoreError::Encoding(format!("invalid fingerprint confidence {confidence}"))
+                })?,
+                issued_at,
+                expires_at,
+                signature: SignatureBytes(bytes_to_64(&signature)?),
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn set_group_fingerprint_key(
+        &self,
+        group_id: GroupId,
+        key: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO group_fingerprint_keys (group_id, key) VALUES (?1, ?2)
+             ON CONFLICT(group_id) DO UPDATE SET key = excluded.key",
+            params![group_id.0 .0.as_slice(), key.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    pub fn group_fingerprint_key(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Option<[u8; 32]>, StoreError> {
+        let key = self
+            .conn
+            .query_row(
+                "SELECT key FROM group_fingerprint_keys WHERE group_id = ?1",
+                params![group_id.0 .0.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        key.map(|bytes| {
+            bytes.try_into().map_err(|_| {
+                StoreError::Encoding("group fingerprint key must be exactly 32 bytes".into())
+            })
+        })
+        .transpose()
+    }
+
+    pub fn next_fingerprint_comment_sequence(
+        &self,
+        group_id: GroupId,
+        fingerprint_id: Hash32,
+        fingerprint_revision: u64,
+        author: &UserId,
+    ) -> Result<u64, StoreError> {
+        let max: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM fingerprint_comments
+             WHERE group_id = ?1 AND fingerprint_id = ?2 AND fingerprint_revision = ?3
+               AND author_federation_id = ?4 AND author_local_id = ?5",
+            params![
+                group_id.0 .0.as_slice(),
+                fingerprint_id.0.as_slice(),
+                fingerprint_revision as i64,
+                author.federation.0 .0.as_slice(),
+                author.local_id.0.as_slice(),
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(max.map(|value| value as u64 + 1).unwrap_or(0))
+    }
+
+    pub fn store_fingerprint_comment(
+        &self,
+        comment: &FingerprintComment,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO fingerprint_comments
+             (group_id, fingerprint_id, fingerprint_revision, author_federation_id,
+              author_local_id, sequence, body, issued_at, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(group_id, fingerprint_id, fingerprint_revision,
+                         author_federation_id, author_local_id, sequence)
+             DO NOTHING",
+            params![
+                comment.group_id.0 .0.as_slice(),
+                comment.fingerprint_id.0.as_slice(),
+                comment.fingerprint_revision as i64,
+                comment.author.federation.0 .0.as_slice(),
+                comment.author.local_id.0.as_slice(),
+                comment.sequence as i64,
+                comment.body,
+                comment.issued_at,
+                comment.signature.0.as_slice(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_fingerprint_comments(
+        &self,
+        group_id: GroupId,
+        fingerprint_id: Hash32,
+        fingerprint_revision: u64,
+    ) -> Result<Vec<FingerprintComment>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT author_federation_id, author_local_id, sequence, body, issued_at, signature
+             FROM fingerprint_comments
+             WHERE group_id = ?1 AND fingerprint_id = ?2 AND fingerprint_revision = ?3
+             ORDER BY issued_at, author_federation_id, author_local_id, sequence",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                group_id.0 .0.as_slice(),
+                fingerprint_id.0.as_slice(),
+                fingerprint_revision as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (author_fed, author_local, sequence, body, issued_at, signature) = row?;
+            out.push(FingerprintComment {
+                group_id,
+                fingerprint_id,
+                fingerprint_revision,
+                author: UserId {
+                    federation: FederationId(bytes_to_hash32(&author_fed)?),
+                    local_id: bytes_to_hash32(&author_local)?,
+                },
+                sequence: sequence as u64,
+                body,
+                issued_at,
                 signature: SignatureBytes(bytes_to_64(&signature)?),
             });
         }
@@ -3207,7 +5106,67 @@ fn visibility_from_i64(v: i64) -> Result<Visibility, StoreError> {
     match v {
         0 => Ok(Visibility::Public),
         1 => Ok(Visibility::Restricted),
-        other => Err(StoreError::Encoding(format!("invalid visibility value {other}"))),
+        other => Err(StoreError::Encoding(format!(
+            "invalid visibility value {other}"
+        ))),
+    }
+}
+
+fn policy_action_to_columns(action: &PolicyAction) -> (&'static str, Option<String>, Option<i64>) {
+    match action {
+        PolicyAction::Block => ("block", None, None),
+        PolicyAction::Allow => ("allow", None, None),
+        PolicyAction::Route { profile } => ("route", Some(profile.clone()), None),
+        PolicyAction::DnsBlock => ("dns_block", None, None),
+        PolicyAction::DnsRedirect { address } => ("dns_redirect", Some(address.clone()), None),
+        PolicyAction::DnsRecord {
+            record_type,
+            value,
+            ttl_seconds,
+        } => (
+            "dns_record",
+            Some(format!("{record_type}\n{value}")),
+            Some(*ttl_seconds as i64),
+        ),
+    }
+}
+
+fn policy_action_from_columns(
+    kind: &str,
+    value: Option<String>,
+    ttl_seconds: Option<i64>,
+) -> Result<PolicyAction, StoreError> {
+    match kind {
+        "block" => Ok(PolicyAction::Block),
+        "allow" => Ok(PolicyAction::Allow),
+        "route" => Ok(PolicyAction::Route {
+            profile: value
+                .ok_or_else(|| StoreError::Encoding("route action has no profile".into()))?,
+        }),
+        "dns_block" => Ok(PolicyAction::DnsBlock),
+        "dns_redirect" => Ok(PolicyAction::DnsRedirect {
+            address: value
+                .ok_or_else(|| StoreError::Encoding("dns_redirect action has no address".into()))?,
+        }),
+        "dns_record" => {
+            let encoded = value.ok_or_else(|| {
+                StoreError::Encoding("dns_record action has no record type/value".into())
+            })?;
+            let (record_type, value) = encoded.split_once('\n').ok_or_else(|| {
+                StoreError::Encoding("dns_record action has no record type".into())
+            })?;
+            Ok(PolicyAction::DnsRecord {
+                record_type: record_type.to_string(),
+                value: value.to_string(),
+                ttl_seconds: ttl_seconds
+                    .ok_or_else(|| StoreError::Encoding("dns_record action has no TTL".into()))?
+                    .try_into()
+                    .map_err(|_| StoreError::Encoding("dns_record TTL is out of range".into()))?,
+            })
+        }
+        other => Err(StoreError::Encoding(format!(
+            "invalid policy action kind {other}"
+        ))),
     }
 }
 
@@ -3224,7 +5183,9 @@ fn stance_from_i64(v: i64) -> Result<Stance, StoreError> {
         0 => Ok(Stance::Allow),
         1 => Ok(Stance::Deny),
         2 => Ok(Stance::Ask),
-        other => Err(StoreError::Encoding(format!("invalid stance discriminant {other}"))),
+        other => Err(StoreError::Encoding(format!(
+            "invalid stance discriminant {other}"
+        ))),
     }
 }
 
@@ -3239,7 +5200,9 @@ fn override_kind_from_i64(v: i64) -> Result<OverrideKind, StoreError> {
     match v {
         0 => Ok(OverrideKind::Normal),
         1 => Ok(OverrideKind::Emergency),
-        other => Err(StoreError::Encoding(format!("invalid override kind discriminant {other}"))),
+        other => Err(StoreError::Encoding(format!(
+            "invalid override kind discriminant {other}"
+        ))),
     }
 }
 
@@ -3270,7 +5233,9 @@ fn reason_code_from_i64(v: i64) -> Result<ReasonCode, StoreError> {
         7 => Ok(ReasonCode::PersonalPreference),
         8 => Ok(ReasonCode::AbuseReport),
         9 => Ok(ReasonCode::Other),
-        other => Err(StoreError::Encoding(format!("invalid reason code discriminant {other}"))),
+        other => Err(StoreError::Encoding(format!(
+            "invalid reason code discriminant {other}"
+        ))),
     }
 }
 
@@ -3318,10 +5283,15 @@ fn encode_evidence(evidence: &[Hash32]) -> Vec<u8> {
 }
 
 fn decode_evidence(bytes: &[u8]) -> Result<Vec<Hash32>, StoreError> {
-    if bytes.len() % 32 != 0 {
-        return Err(StoreError::Encoding("evidence blob length not a multiple of 32".into()));
+    if !bytes.len().is_multiple_of(32) {
+        return Err(StoreError::Encoding(
+            "evidence blob length not a multiple of 32".into(),
+        ));
     }
-    Ok(bytes.chunks_exact(32).map(|c| Hash32(c.try_into().unwrap())).collect())
+    Ok(bytes
+        .chunks_exact(32)
+        .map(|c| Hash32(c.try_into().unwrap()))
+        .collect())
 }
 
 fn bytes_to_hash32(bytes: &[u8]) -> Result<Hash32, StoreError> {
@@ -3329,11 +5299,15 @@ fn bytes_to_hash32(bytes: &[u8]) -> Result<Hash32, StoreError> {
 }
 
 fn bytes_to_32(bytes: &[u8]) -> Result<[u8; 32], StoreError> {
-    bytes.try_into().map_err(|_| StoreError::Encoding(format!("expected 32 bytes, got {}", bytes.len())))
+    bytes
+        .try_into()
+        .map_err(|_| StoreError::Encoding(format!("expected 32 bytes, got {}", bytes.len())))
 }
 
 fn bytes_to_64(bytes: &[u8]) -> Result<[u8; 64], StoreError> {
-    bytes.try_into().map_err(|_| StoreError::Encoding(format!("expected 64 bytes, got {}", bytes.len())))
+    bytes
+        .try_into()
+        .map_err(|_| StoreError::Encoding(format!("expected 64 bytes, got {}", bytes.len())))
 }
 
 #[cfg(test)]
@@ -3345,55 +5319,258 @@ mod tests {
         FederationId(Hash32([n; 32]))
     }
     fn user(fed_n: u8, local_n: u8) -> UserId {
-        UserId { federation: fed(fed_n), local_id: Hash32([local_n; 32]) }
+        UserId {
+            federation: fed(fed_n),
+            local_id: Hash32([local_n; 32]),
+        }
     }
     fn target() -> TargetSelector {
         TargetSelector::Domain("ads.example".into())
     }
 
     #[test]
+    fn fingerprint_group_data_round_trips_and_is_scoped_by_revision() {
+        let store = StateStore::open_in_memory().unwrap();
+        let group = GroupId(Hash32([3; 32]));
+        let fingerprint = Hash32([4; 32]);
+        let observer = user(1, 2);
+        let observation = FingerprintObservation {
+            group_id: group,
+            fingerprint_id: fingerprint,
+            fingerprint_revision: 7,
+            observer,
+            signal_family: "dhcp_vendor".into(),
+            evidence_digest: Hash32([5; 32]),
+            confidence: 88,
+            issued_at: 100,
+            expires_at: Some(200),
+            signature: SignatureBytes([6; 64]),
+        };
+        store.store_fingerprint_observation(&observation).unwrap();
+        store.store_fingerprint_observation(&observation).unwrap();
+
+        assert_eq!(
+            store
+                .list_fingerprint_observations(group, fingerprint, 7)
+                .unwrap(),
+            vec![observation]
+        );
+        assert!(store
+            .list_fingerprint_observations(group, fingerprint, 8)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_fingerprint_observations(GroupId(Hash32([9; 32])), fingerprint, 7)
+            .unwrap()
+            .is_empty());
+
+        let comment = FingerprintComment {
+            group_id: group,
+            fingerprint_id: fingerprint,
+            fingerprint_revision: 7,
+            author: observer,
+            sequence: store
+                .next_fingerprint_comment_sequence(group, fingerprint, 7, &observer)
+                .unwrap(),
+            body: "confirmed device".into(),
+            issued_at: 101,
+            signature: SignatureBytes([7; 64]),
+        };
+        assert_eq!(comment.sequence, 0);
+        store.store_fingerprint_comment(&comment).unwrap();
+        assert_eq!(
+            store
+                .next_fingerprint_comment_sequence(group, fingerprint, 7, &observer)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_fingerprint_comments(group, fingerprint, 7)
+                .unwrap(),
+            vec![comment]
+        );
+        assert_eq!(
+            store
+                .next_fingerprint_comment_sequence(group, fingerprint, 8, &observer)
+                .unwrap(),
+            0
+        );
+        assert!(store
+            .list_fingerprint_comments(GroupId(Hash32([9; 32])), fingerprint, 7)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn group_fingerprint_keys_round_trip_and_are_scoped() {
+        let store = StateStore::open_in_memory().unwrap();
+        let first = GroupId(Hash32([11; 32]));
+        let second = GroupId(Hash32([12; 32]));
+        let key = [13; 32];
+        assert!(store.group_fingerprint_key(first).unwrap().is_none());
+        store.set_group_fingerprint_key(first, &key).unwrap();
+        assert_eq!(store.group_fingerprint_key(first).unwrap(), Some(key));
+        assert!(store.group_fingerprint_key(second).unwrap().is_none());
+        let replacement = [14; 32];
+        store.set_group_fingerprint_key(first, &replacement).unwrap();
+        assert_eq!(store.group_fingerprint_key(first).unwrap(), Some(replacement));
+    }
+
+    #[test]
     fn migrations_apply_cleanly_on_a_fresh_database() {
         let store = StateStore::open_in_memory().unwrap();
-        let count: i64 = store.conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0)).unwrap();
+        let count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn notified_items_round_trip() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert!(!store.has_been_notified("group_join", "abc/0").unwrap());
+        store.mark_notified("group_join", "abc/0", 100).unwrap();
+        assert!(store.has_been_notified("group_join", "abc/0").unwrap());
+        assert!(!store.has_been_notified("group_join", "abc/1").unwrap());
+    }
+
+    #[test]
+    fn mark_notified_is_idempotent() {
+        let store = StateStore::open_in_memory().unwrap();
+        store.mark_notified("tunnel_request", "x/0", 100).unwrap();
+        store.mark_notified("tunnel_request", "x/0", 200).unwrap();
+        assert!(store.has_been_notified("tunnel_request", "x/0").unwrap());
+    }
+
+    #[test]
+    fn ntfy_topic_url_round_trips() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None)
+            .unwrap();
+        assert_eq!(store.get_ntfy_topic_url().unwrap(), None);
+        store
+            .set_ntfy_topic_url(Some("http://ntfy.example.lan/social-firewall"))
+            .unwrap();
+        assert_eq!(
+            store.get_ntfy_topic_url().unwrap().as_deref(),
+            Some("http://ntfy.example.lan/social-firewall")
+        );
+        store.set_ntfy_topic_url(None).unwrap();
+        assert_eq!(store.get_ntfy_topic_url().unwrap(), None);
     }
 
     #[test]
     fn self_identity_round_trips() {
         let store = StateStore::open_in_memory().unwrap();
         let u = user(1, 2);
-        store.set_self_identity(u, PublicKeyBytes([9; 32]), &[3; 32], Some("me")).unwrap();
+        store
+            .set_self_identity(u, PublicKeyBytes([9; 32]), &[3; 32], Some("me"))
+            .unwrap();
         let (got_user, got_pk) = store.get_self_identity().unwrap().unwrap();
         assert_eq!(got_user, u);
         assert_eq!(got_pk, PublicKeyBytes([9; 32]));
+        assert_eq!(
+            store.get_user_display_name(&u).unwrap().as_deref(),
+            Some("me")
+        );
+    }
+
+    #[test]
+    fn local_identity_and_home_federation_names_can_be_changed_or_cleared() {
+        let store = StateStore::open_in_memory().unwrap();
+        let u = user(3, 4);
+        store
+            .set_self_identity(u, PublicKeyBytes([8; 32]), &[7; 32], Some("router"))
+            .unwrap();
+
+        store.set_self_display_name(Some("demo")).unwrap();
+        store
+            .set_home_federation_display_name(Some("home"))
+            .unwrap();
+        assert_eq!(
+            store.get_user_display_name(&u).unwrap().as_deref(),
+            Some("demo")
+        );
+        assert_eq!(
+            store
+                .get_federation_display_name(&u.federation)
+                .unwrap()
+                .as_deref(),
+            Some("home")
+        );
+
+        store.set_self_display_name(None).unwrap();
+        store.set_home_federation_display_name(None).unwrap();
+        assert_eq!(store.get_user_display_name(&u).unwrap(), None);
+        assert_eq!(
+            store
+                .get_federation_display_name(&u.federation)
+                .unwrap()
+                .as_deref(),
+            Some(u.federation.0.to_string().as_str())
+        );
     }
 
     #[test]
     fn get_federation_display_name_resolves_the_home_federation_set_at_self_identity_time() {
         let store = StateStore::open_in_memory().unwrap();
         let u = user(1, 2);
-        store.set_self_identity(u, PublicKeyBytes([9; 32]), &[3; 32], None).unwrap();
+        store
+            .set_self_identity(u, PublicKeyBytes([9; 32]), &[3; 32], None)
+            .unwrap();
         // set_self_identity defaults a federation's display_name to its
         // own hex id when no explicit federation name was chosen.
-        assert_eq!(store.get_federation_display_name(&u.federation).unwrap().as_deref(), Some(u.federation.0.to_string().as_str()));
+        assert_eq!(
+            store
+                .get_federation_display_name(&u.federation)
+                .unwrap()
+                .as_deref(),
+            Some(u.federation.0.to_string().as_str())
+        );
     }
 
     #[test]
     fn get_federation_display_name_is_none_for_an_unknown_federation() {
         let store = StateStore::open_in_memory().unwrap();
         let stranger_federation = FederationId(Hash32([7; 32]));
-        assert_eq!(store.get_federation_display_name(&stranger_federation).unwrap(), None);
+        assert_eq!(
+            store
+                .get_federation_display_name(&stranger_federation)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
     fn local_override_upsert_is_idempotent_and_natural_keyed() {
         let store = StateStore::open_in_memory().unwrap();
-        let o1 = LocalOverride { target: target(), stance: Stance::Allow, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None };
-        let o2 = LocalOverride { target: target(), stance: Stance::Deny, kind: OverrideKind::Normal, note: Some("changed my mind".into()), created_at: 2, expires_at: None };
+        let o1 = LocalOverride {
+            target: target(),
+            stance: Stance::Allow,
+            kind: OverrideKind::Normal,
+            note: None,
+            created_at: 1,
+            expires_at: None,
+        };
+        let o2 = LocalOverride {
+            target: target(),
+            stance: Stance::Deny,
+            kind: OverrideKind::Normal,
+            note: Some("changed my mind".into()),
+            created_at: 2,
+            expires_at: None,
+        };
         store.set_local_override(&o1).unwrap();
         store.set_local_override(&o2).unwrap();
         let got = store.get_local_overrides_for(&target()).unwrap();
-        assert_eq!(got.len(), 1, "natural key must prevent two active overrides for the same target");
+        assert_eq!(
+            got.len(),
+            1,
+            "natural key must prevent two active overrides for the same target"
+        );
         assert_eq!(got[0].stance, Stance::Deny);
     }
 
@@ -3401,15 +5578,52 @@ mod tests {
     fn follow_upsert_updates_weights_in_place() {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.5, deny_weight: 0.5, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.9, deny_weight: 0.1, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: alice,
+                allow_weight: 0.5,
+                deny_weight: 0.5,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: alice,
+                allow_weight: 0.9,
+                deny_weight: 0.1,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         let got = store.get_follow(&alice).unwrap().unwrap();
         assert_eq!(got.allow_weight, 0.9);
         assert_eq!(store.list_follows().unwrap().len(), 1);
     }
 
     fn named_follow(u: UserId, name: &str) -> LocalTrustRule {
-        LocalTrustRule { user: u, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: Some(name.to_string()), iroh_node_id: None, expires_at: None, created_at: 0 }
+        LocalTrustRule {
+            user: u,
+            allow_weight: 1.0,
+            deny_weight: 1.0,
+            advisory_only: false,
+            excluded: false,
+            category_filter: None,
+            display_name: Some(name.to_string()),
+            iroh_node_id: None,
+            expires_at: None,
+            created_at: 0,
+        }
     }
 
     #[test]
@@ -3418,7 +5632,15 @@ mod tests {
         let alice = user(1, 1);
         store.upsert_follow(&named_follow(alice, "alice")).unwrap();
 
-        assert_eq!(store.get_follow(&alice).unwrap().unwrap().display_name.as_deref(), Some("alice"));
+        assert_eq!(
+            store
+                .get_follow(&alice)
+                .unwrap()
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("alice")
+        );
     }
 
     #[test]
@@ -3427,7 +5649,10 @@ mod tests {
         let alice = user(1, 1);
         store.upsert_follow(&named_follow(alice, "alice")).unwrap();
 
-        assert_eq!(store.resolve_user_by_name(&fed(1), "alice").unwrap(), Some(alice));
+        assert_eq!(
+            store.resolve_user_by_name(&fed(1), "alice").unwrap(),
+            Some(alice)
+        );
         assert_eq!(store.resolve_user_by_name(&fed(1), "nobody").unwrap(), None);
     }
 
@@ -3435,7 +5660,9 @@ mod tests {
     fn resolve_user_by_name_is_scoped_to_the_federation() {
         let store = StateStore::open_in_memory().unwrap();
         let alice_in_fed1 = user(1, 1);
-        store.upsert_follow(&named_follow(alice_in_fed1, "alice")).unwrap();
+        store
+            .upsert_follow(&named_follow(alice_in_fed1, "alice"))
+            .unwrap();
 
         // Same name, different federation — must not resolve at all, not
         // accidentally cross-match `alice_in_fed1`.
@@ -3447,13 +5674,23 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice_in_fed1 = user(1, 1);
         let alice_in_fed2 = user(2, 2);
-        store.upsert_follow(&named_follow(alice_in_fed1, "alice")).unwrap();
+        store
+            .upsert_follow(&named_follow(alice_in_fed1, "alice"))
+            .unwrap();
 
         // "Not globally unique" is the point — this must succeed.
-        store.upsert_follow(&named_follow(alice_in_fed2, "alice")).unwrap();
+        store
+            .upsert_follow(&named_follow(alice_in_fed2, "alice"))
+            .unwrap();
 
-        assert_eq!(store.resolve_user_by_name(&fed(1), "alice").unwrap(), Some(alice_in_fed1));
-        assert_eq!(store.resolve_user_by_name(&fed(2), "alice").unwrap(), Some(alice_in_fed2));
+        assert_eq!(
+            store.resolve_user_by_name(&fed(1), "alice").unwrap(),
+            Some(alice_in_fed1)
+        );
+        assert_eq!(
+            store.resolve_user_by_name(&fed(2), "alice").unwrap(),
+            Some(alice_in_fed2)
+        );
     }
 
     #[test]
@@ -3463,7 +5700,9 @@ mod tests {
         let mallory = user(1, 2);
         store.upsert_follow(&named_follow(alice, "alice")).unwrap();
 
-        let err = store.upsert_follow(&named_follow(mallory, "alice")).unwrap_err();
+        let err = store
+            .upsert_follow(&named_follow(mallory, "alice"))
+            .unwrap_err();
         assert!(matches!(err, StoreError::Sqlite(_)), "a duplicate name within one federation must be rejected, not silently accepted: {err:?}");
     }
 
@@ -3476,7 +5715,15 @@ mod tests {
         let alice = user(1, 1);
         store.upsert_follow(&named_follow(alice, "alice")).unwrap();
         store.upsert_follow(&named_follow(alice, "alice")).unwrap();
-        assert_eq!(store.get_follow(&alice).unwrap().unwrap().display_name.as_deref(), Some("alice"));
+        assert_eq!(
+            store
+                .get_follow(&alice)
+                .unwrap()
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("alice")
+        );
     }
 
     #[test]
@@ -3487,8 +5734,34 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         let bob = user(1, 2);
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
-        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: alice,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: bob,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         assert_eq!(store.list_follows().unwrap().len(), 2);
     }
 
@@ -3496,7 +5769,9 @@ mod tests {
     fn own_opinion_log_appends_and_lists_by_target() {
         let store = StateStore::open_in_memory().unwrap();
         let me = user(1, 1);
-        store.set_self_identity(me, PublicKeyBytes([1; 32]), &[4; 32], None).unwrap();
+        store
+            .set_self_identity(me, PublicKeyBytes([1; 32]), &[4; 32], None)
+            .unwrap();
         let seq = store.next_own_sequence().unwrap();
         assert_eq!(seq, 0);
         let opinion = PolicyOpinion {
@@ -3504,7 +5779,11 @@ mod tests {
             sequence: seq,
             target: target(),
             stance: Stance::Deny,
-            reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] },
+            reason: Reason {
+                code: ReasonCode::Tracker,
+                note: None,
+                evidence: vec![],
+            },
             issued_at: 100,
             expires_at: None,
             supersedes: None,
@@ -3526,7 +5805,11 @@ mod tests {
             sequence: 1,
             target: target(),
             stance: Stance::Deny,
-            reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![Hash32([7; 32])] },
+            reason: Reason {
+                code: ReasonCode::Malware,
+                note: None,
+                evidence: vec![Hash32([7; 32])],
+            },
             issued_at: 100,
             expires_at: None,
             supersedes: None,
@@ -3543,8 +5826,35 @@ mod tests {
     fn followed_opinion_carries_trust_rule_when_present() {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: alice, allow_weight: 0.2, deny_weight: 0.8, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
-        let opinion = PolicyOpinion { author: alice, sequence: 1, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, supersedes: None, signature: SignatureBytes([1; 64]) };
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: alice,
+                allow_weight: 0.2,
+                deny_weight: 0.8,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        let opinion = PolicyOpinion {
+            author: alice,
+            sequence: 1,
+            target: target(),
+            stance: Stance::Deny,
+            reason: Reason {
+                code: ReasonCode::Malware,
+                note: None,
+                evidence: vec![],
+            },
+            issued_at: 100,
+            expires_at: None,
+            supersedes: None,
+            signature: SignatureBytes([1; 64]),
+        };
         store.ingest_opinion(&opinion).unwrap();
         let got = store.list_followed_opinions_for(&target()).unwrap();
         assert_eq!(got[0].1.as_ref().unwrap().deny_weight, 0.8);
@@ -3554,7 +5864,21 @@ mod tests {
     fn unfollowed_author_opinion_has_no_trust_rule() {
         let store = StateStore::open_in_memory().unwrap();
         let stranger = user(1, 99);
-        let opinion = PolicyOpinion { author: stranger, sequence: 1, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, supersedes: None, signature: SignatureBytes([1; 64]) };
+        let opinion = PolicyOpinion {
+            author: stranger,
+            sequence: 1,
+            target: target(),
+            stance: Stance::Deny,
+            reason: Reason {
+                code: ReasonCode::Malware,
+                note: None,
+                evidence: vec![],
+            },
+            issued_at: 100,
+            expires_at: None,
+            supersedes: None,
+            signature: SignatureBytes([1; 64]),
+        };
         store.ingest_opinion(&opinion).unwrap();
         let got = store.list_followed_opinions_for(&target()).unwrap();
         assert!(got[0].1.is_none());
@@ -3563,7 +5887,11 @@ mod tests {
     #[test]
     fn proto_port_target_persistence_is_rejected_not_silently_wrong() {
         let store = StateStore::open_in_memory().unwrap();
-        let target = TargetSelector::ProtoPort { inner: Box::new(TargetSelector::Domain("x".into())), proto: "tcp".into(), port: 443 };
+        let target = TargetSelector::ProtoPort {
+            inner: Box::new(TargetSelector::Domain("x".into())),
+            proto: "tcp".into(),
+            port: 443,
+        };
         let result = store.get_local_overrides_for(&target);
         assert!(result.is_err());
     }
@@ -3578,24 +5906,96 @@ mod tests {
     fn list_evaluatable_targets_discovers_a_target_from_each_source_table() {
         let store = StateStore::open_in_memory().unwrap();
         let me = user(1, 1);
-        store.set_self_identity(me, PublicKeyBytes([1; 32]), &[4; 32], None).unwrap();
+        store
+            .set_self_identity(me, PublicKeyBytes([1; 32]), &[4; 32], None)
+            .unwrap();
 
         let override_target = TargetSelector::Ip("203.0.113.1".into());
-        store.set_local_override(&LocalOverride { target: override_target.clone(), stance: Stance::Deny, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None }).unwrap();
+        store
+            .set_local_override(&LocalOverride {
+                target: override_target.clone(),
+                stance: Stance::Deny,
+                kind: OverrideKind::Normal,
+                note: None,
+                created_at: 1,
+                expires_at: None,
+            })
+            .unwrap();
 
         let own_opinion_target = TargetSelector::Domain("own.example".into());
-        store.append_own_opinion(&PolicyOpinion { author: me, sequence: 0, target: own_opinion_target.clone(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, supersedes: None, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .append_own_opinion(&PolicyOpinion {
+                author: me,
+                sequence: 0,
+                target: own_opinion_target.clone(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 100,
+                expires_at: None,
+                supersedes: None,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let ingested_target = TargetSelector::Cidr("198.51.100.0/24".into());
         let alice = user(1, 2);
-        store.ingest_opinion(&PolicyOpinion { author: alice, sequence: 1, target: ingested_target.clone(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, supersedes: None, signature: SignatureBytes([1; 64]) }).unwrap();
+        store
+            .ingest_opinion(&PolicyOpinion {
+                author: alice,
+                sequence: 1,
+                target: ingested_target.clone(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Malware,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 100,
+                expires_at: None,
+                supersedes: None,
+                signature: SignatureBytes([1; 64]),
+            })
+            .unwrap();
 
         let federation_target = TargetSelector::Domain("fed.example".into());
-        store.ingest_federation_statement(&FederationStatement { federation: fed(9), sequence: 1, target: federation_target.clone(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, supersedes: None, commitment: vec![1, 2, 3] }).unwrap();
+        store
+            .ingest_federation_statement(&FederationStatement {
+                federation: fed(9),
+                sequence: 1,
+                target: federation_target.clone(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Malware,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 100,
+                expires_at: None,
+                supersedes: None,
+                commitment: vec![1, 2, 3],
+            })
+            .unwrap();
 
         let list_target = TargetSelector::Domain("list-only.example".into());
         let bob = user(1, 3);
-        store.upsert_follow(&LocalTrustRule { user: bob, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: bob,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         store
             .ingest_shared_rule_list(&SharedRuleList {
                 author: bob,
@@ -3604,7 +6004,15 @@ mod tests {
                 description: "".into(),
                 categories: vec![],
                 visibility: Visibility::Public,
-                entries: vec![SharedRuleEntry { target: list_target.clone(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] } }],
+                entries: vec![SharedRuleEntry {
+                    target: list_target.clone(),
+                    stance: Stance::Deny,
+                    reason: Reason {
+                        code: ReasonCode::Tracker,
+                        note: None,
+                        evidence: vec![],
+                    },
+                }],
                 issued_at: 0,
                 expires_at: None,
                 supersedes: None,
@@ -3614,22 +6022,62 @@ mod tests {
 
         let mut got = store.list_evaluatable_targets().unwrap();
         got.sort();
-        let mut want = vec![override_target, own_opinion_target, ingested_target, federation_target, list_target];
+        let mut want = vec![
+            override_target,
+            own_opinion_target,
+            ingested_target,
+            federation_target,
+            list_target,
+        ];
         want.sort();
-        assert_eq!(got, want, "a target that only appears in a subscribed shared rule list must still be discovered");
+        assert_eq!(
+            got, want,
+            "a target that only appears in a subscribed shared rule list must still be discovered"
+        );
     }
 
     #[test]
     fn list_evaluatable_targets_collapses_the_same_target_across_tables() {
         let store = StateStore::open_in_memory().unwrap();
         let me = user(1, 1);
-        store.set_self_identity(me, PublicKeyBytes([1; 32]), &[4; 32], None).unwrap();
+        store
+            .set_self_identity(me, PublicKeyBytes([1; 32]), &[4; 32], None)
+            .unwrap();
         let shared = target();
-        store.set_local_override(&LocalOverride { target: shared.clone(), stance: Stance::Deny, kind: OverrideKind::Normal, note: None, created_at: 1, expires_at: None }).unwrap();
-        store.append_own_opinion(&PolicyOpinion { author: me, sequence: 0, target: shared.clone(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, supersedes: None, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .set_local_override(&LocalOverride {
+                target: shared.clone(),
+                stance: Stance::Deny,
+                kind: OverrideKind::Normal,
+                note: None,
+                created_at: 1,
+                expires_at: None,
+            })
+            .unwrap();
+        store
+            .append_own_opinion(&PolicyOpinion {
+                author: me,
+                sequence: 0,
+                target: shared.clone(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 100,
+                expires_at: None,
+                supersedes: None,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let got = store.list_evaluatable_targets().unwrap();
-        assert_eq!(got, vec![shared], "the same target signaled from two tables must appear once, not twice");
+        assert_eq!(
+            got,
+            vec![shared],
+            "the same target signaled from two tables must appear once, not twice"
+        );
     }
 
     #[test]
@@ -3637,11 +6085,21 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         assert_eq!(store.get_applied_ruleset().unwrap(), None);
 
-        let v1 = AppliedRulesetState { digest: "abc".into(), ruleset_text: "table inet social_firewall {}".into(), revision: 1, updated_at: 1000 };
+        let v1 = AppliedRulesetState {
+            digest: "abc".into(),
+            ruleset_text: "table inet social_firewall {}".into(),
+            revision: 1,
+            updated_at: 1000,
+        };
         store.save_applied_ruleset(&v1).unwrap();
         assert_eq!(store.get_applied_ruleset().unwrap(), Some(v1));
 
-        let v2 = AppliedRulesetState { digest: "def".into(), ruleset_text: "table inet social_firewall { ... }".into(), revision: 2, updated_at: 2000 };
+        let v2 = AppliedRulesetState {
+            digest: "def".into(),
+            ruleset_text: "table inet social_firewall { ... }".into(),
+            revision: 2,
+            updated_at: 2000,
+        };
         store.save_applied_ruleset(&v2).unwrap();
         assert_eq!(store.get_applied_ruleset().unwrap(), Some(v2));
     }
@@ -3649,10 +6107,16 @@ mod tests {
     #[test]
     fn apply_log_appends_without_overwriting() {
         let store = StateStore::open_in_memory().unwrap();
-        store.append_apply_log(1, "abc", 3, "deny x.example", "applied", 1000).unwrap();
-        store.append_apply_log(2, "def", 1, "deny y.example", "rolled_back", 2000).unwrap();
+        store
+            .append_apply_log(1, "abc", 3, "deny x.example", "applied", 1000)
+            .unwrap();
+        store
+            .append_apply_log(2, "def", 1, "deny y.example", "rolled_back", 2000)
+            .unwrap();
         let conn = &store.conn;
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM apply_log", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM apply_log", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 2);
     }
 
@@ -3669,7 +6133,10 @@ mod tests {
             messaging_pubkey: MessagingPublicKeyBytes([2; 32]),
             wg_pubkey: WgPublicKeyBytes([3; 32]),
             endpoint_hint: "203.0.113.9:51820".into(),
-            route_scope: vec![TargetSelector::Domain("example.com".into()), TargetSelector::DomainSuffix(".ads.example".into())],
+            route_scope: vec![
+                TargetSelector::Domain("example.com".into()),
+                TargetSelector::DomainSuffix(".ads.example".into()),
+            ],
             tags: vec!["streaming".into()],
             max_connections: Some(50),
             max_bandwidth_kbps: Some(10_000),
@@ -3691,12 +6158,28 @@ mod tests {
     fn ingest_tunnel_advertisement_round_trips_including_route_scope() {
         let store = StateStore::open_in_memory().unwrap();
         let provider = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: provider, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: provider,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
 
         let ad = advertisement(provider);
         store.ingest_tunnel_advertisement(&ad).unwrap();
 
-        let got = store.get_tunnel_advertisement(provider, 0).unwrap().unwrap();
+        let got = store
+            .get_tunnel_advertisement(provider, 0)
+            .unwrap()
+            .unwrap();
         assert_eq!(got.description, ad.description);
         assert_eq!(got.limitations, ad.limitations);
         assert_eq!(got.visibility, Visibility::Public);
@@ -3717,7 +6200,20 @@ mod tests {
     fn ingest_tunnel_advertisement_is_idempotent_on_the_same_sequence() {
         let store = StateStore::open_in_memory().unwrap();
         let provider = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: provider, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: provider,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         let ad = advertisement(provider);
         store.ingest_tunnel_advertisement(&ad).unwrap();
         store.ingest_tunnel_advertisement(&ad).unwrap();
@@ -3730,8 +6226,23 @@ mod tests {
         let alice = user(1, 1);
         let bob = user(1, 2);
         for u in [alice, bob] {
-            store.upsert_follow(&LocalTrustRule { user: u, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
-            store.ingest_tunnel_advertisement(&advertisement(u)).unwrap();
+            store
+                .upsert_follow(&LocalTrustRule {
+                    user: u,
+                    allow_weight: 1.0,
+                    deny_weight: 1.0,
+                    advisory_only: false,
+                    excluded: false,
+                    category_filter: None,
+                    display_name: None,
+                    iroh_node_id: None,
+                    expires_at: None,
+                    created_at: 0,
+                })
+                .unwrap();
+            store
+                .ingest_tunnel_advertisement(&advertisement(u))
+                .unwrap();
         }
         assert_eq!(store.list_tunnel_advertisements().unwrap().len(), 2);
     }
@@ -3750,14 +6261,30 @@ mod tests {
             supersedes: None,
             signature: SignatureBytes([0; 64]),
         };
-        assert!(matches!(store.ingest_tunnel_service_request(&req), Err(StoreError::NotFollowed(_))));
+        assert!(matches!(
+            store.ingest_tunnel_service_request(&req),
+            Err(StoreError::NotFollowed(_))
+        ));
     }
 
     #[test]
     fn ingest_tunnel_service_request_round_trips() {
         let store = StateStore::open_in_memory().unwrap();
         let requester = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: requester, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: requester,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         let req = TunnelServiceRequest {
             requester,
             sequence: 0,
@@ -3773,7 +6300,10 @@ mod tests {
         let got = store.list_tunnel_service_requests().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].description, "need an EU exit");
-        assert_eq!(got[0].desired_route_scope, vec![TargetSelector::Domain("example.com".into())]);
+        assert_eq!(
+            got[0].desired_route_scope,
+            vec![TargetSelector::Domain("example.com".into())]
+        );
     }
 
     #[test]
@@ -3782,7 +6312,10 @@ mod tests {
         let req = TunnelConnectionRequest {
             requester: user(2, 1),
             sequence: 0,
-            advertisement: StatementRef { author: user(1, 1), sequence: 0 },
+            advertisement: StatementRef {
+                author: user(1, 1),
+                sequence: 0,
+            },
             requester_wg_pubkey: WgPublicKeyBytes([4; 32]),
             requester_messaging_pubkey: MessagingPublicKeyBytes([5; 32]),
             requested_at: 200,
@@ -3793,15 +6326,26 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].requester, user(2, 1));
 
-        store.set_tunnel_connection_request_status(&user(2, 1), 0, "accepted").unwrap();
-        assert!(store.list_pending_tunnel_connection_requests().unwrap().is_empty());
+        store
+            .set_tunnel_connection_request_status(&user(2, 1), 0, "accepted")
+            .unwrap();
+        assert!(store
+            .list_pending_tunnel_connection_requests()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
-    fn has_tunnel_connection_request_for_is_true_only_after_storing_one_against_that_advertisement() {
+    fn has_tunnel_connection_request_for_is_true_only_after_storing_one_against_that_advertisement()
+    {
         let store = StateStore::open_in_memory().unwrap();
-        let ad_ref = StatementRef { author: user(1, 1), sequence: 0 };
-        assert!(!store.has_tunnel_connection_request_for(&user(2, 1), &ad_ref).unwrap());
+        let ad_ref = StatementRef {
+            author: user(1, 1),
+            sequence: 0,
+        };
+        assert!(!store
+            .has_tunnel_connection_request_for(&user(2, 1), &ad_ref)
+            .unwrap());
 
         store
             .store_tunnel_connection_request(&TunnelConnectionRequest {
@@ -3815,10 +6359,14 @@ mod tests {
             })
             .unwrap();
 
-        assert!(store.has_tunnel_connection_request_for(&user(2, 1), &ad_ref).unwrap());
+        assert!(store
+            .has_tunnel_connection_request_for(&user(2, 1), &ad_ref)
+            .unwrap());
         // A different requester having requested nothing against this ad
         // must not be conflated with `user(2, 1)`'s own request.
-        assert!(!store.has_tunnel_connection_request_for(&user(3, 1), &ad_ref).unwrap());
+        assert!(!store
+            .has_tunnel_connection_request_for(&user(3, 1), &ad_ref)
+            .unwrap());
     }
 
     #[test]
@@ -3831,14 +6379,20 @@ mod tests {
         let provider = user(1, 1);
         let accept = TunnelConnectionAccept {
             provider,
-            request_ref: StatementRef { author: requester, sequence: 0 },
+            request_ref: StatementRef {
+                author: requester,
+                sequence: 0,
+            },
             assigned_tunnel_ip: "10.99.0.4".into(),
             assigned_tunnel_ip6: Some("fd99::c8:4".into()),
             accepted_at: 300,
             signature: SignatureBytes([0; 64]),
         };
         store.store_tunnel_connection_accept(&accept).unwrap();
-        let got = store.get_tunnel_connection_accept_for(&requester, 0).unwrap().unwrap();
+        let got = store
+            .get_tunnel_connection_accept_for(&requester, 0)
+            .unwrap()
+            .unwrap();
         assert_eq!(got.assigned_tunnel_ip, "10.99.0.4");
         assert_eq!(got.assigned_tunnel_ip6.as_deref(), Some("fd99::c8:4"));
         // Full UserId equality, not just `.federation` — a real bug (this
@@ -3853,30 +6407,55 @@ mod tests {
     #[test]
     fn get_tunnel_connection_accept_for_is_none_when_absent() {
         let store = StateStore::open_in_memory().unwrap();
-        assert!(store.get_tunnel_connection_accept_for(&user(2, 1), 0).unwrap().is_none());
+        assert!(store
+            .get_tunnel_connection_accept_for(&user(2, 1), 0)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn tunnel_trust_rule_round_trips_and_upsert_replaces_in_place() {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
-        store.upsert_tunnel_trust_rule(&TunnelTrustRule {
-            user: alice, auto_accept_requests: true, auto_consume_advertisements: false,
-            auto_respond_to_service_requests: false, excluded: false, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0,
-        }).unwrap();
+        store
+            .upsert_tunnel_trust_rule(&TunnelTrustRule {
+                user: alice,
+                auto_accept_requests: true,
+                auto_consume_advertisements: false,
+                auto_respond_to_service_requests: false,
+                excluded: false,
+                tag_filter: None,
+                min_reciprocity_ratio: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         let got = store.get_tunnel_trust_rule(&alice).unwrap().unwrap();
         assert!(got.auto_accept_requests);
         assert!(!got.auto_consume_advertisements);
 
-        store.upsert_tunnel_trust_rule(&TunnelTrustRule {
-            user: alice, auto_accept_requests: false, auto_consume_advertisements: true,
-            auto_respond_to_service_requests: true, excluded: false, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0,
-        }).unwrap();
+        store
+            .upsert_tunnel_trust_rule(&TunnelTrustRule {
+                user: alice,
+                auto_accept_requests: false,
+                auto_consume_advertisements: true,
+                auto_respond_to_service_requests: true,
+                excluded: false,
+                tag_filter: None,
+                min_reciprocity_ratio: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         let got = store.get_tunnel_trust_rule(&alice).unwrap().unwrap();
         assert!(!got.auto_accept_requests);
         assert!(got.auto_consume_advertisements);
         assert!(got.auto_respond_to_service_requests);
-        assert_eq!(store.list_tunnel_trust_rules().unwrap().len(), 1, "upsert must replace in place, not add a second row");
+        assert_eq!(
+            store.list_tunnel_trust_rules().unwrap().len(),
+            1,
+            "upsert must replace in place, not add a second row"
+        );
     }
 
     #[test]
@@ -3896,17 +6475,34 @@ mod tests {
                 created_at: 0,
             })
             .unwrap();
-        assert_eq!(store.get_tunnel_trust_rule(&alice).unwrap().unwrap().tag_filter.as_deref(), Some("streaming"));
+        assert_eq!(
+            store
+                .get_tunnel_trust_rule(&alice)
+                .unwrap()
+                .unwrap()
+                .tag_filter
+                .as_deref(),
+            Some("streaming")
+        );
     }
 
     #[test]
     fn tunnel_trust_rule_excluded_is_a_distinct_flag() {
         let store = StateStore::open_in_memory().unwrap();
         let bob = user(1, 2);
-        store.upsert_tunnel_trust_rule(&TunnelTrustRule {
-            user: bob, auto_accept_requests: false, auto_consume_advertisements: false,
-            auto_respond_to_service_requests: false, excluded: true, tag_filter: None, min_reciprocity_ratio: None, expires_at: None, created_at: 0,
-        }).unwrap();
+        store
+            .upsert_tunnel_trust_rule(&TunnelTrustRule {
+                user: bob,
+                auto_accept_requests: false,
+                auto_consume_advertisements: false,
+                auto_respond_to_service_requests: false,
+                excluded: true,
+                tag_filter: None,
+                min_reciprocity_ratio: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         assert!(store.get_tunnel_trust_rule(&bob).unwrap().unwrap().excluded);
     }
 
@@ -3926,8 +6522,14 @@ mod tests {
     fn messaging_keypair_seed_round_trips_on_the_self_row() {
         let store = StateStore::open_in_memory().unwrap();
         assert_eq!(store.get_messaging_keypair_seed().unwrap(), None);
-        store.set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None).unwrap();
-        assert_eq!(store.get_messaging_keypair_seed().unwrap(), None, "no messaging seed set yet");
+        store
+            .set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None)
+            .unwrap();
+        assert_eq!(
+            store.get_messaging_keypair_seed().unwrap(),
+            None,
+            "no messaging seed set yet"
+        );
         store.set_messaging_keypair_seed(&[7; 32]).unwrap();
         assert_eq!(store.get_messaging_keypair_seed().unwrap(), Some([7; 32]));
     }
@@ -3935,13 +6537,18 @@ mod tests {
     #[test]
     fn set_messaging_keypair_seed_fails_loudly_with_no_self_identity_yet() {
         let store = StateStore::open_in_memory().unwrap();
-        assert!(matches!(store.set_messaging_keypair_seed(&[7; 32]), Err(StoreError::NoSelfIdentity)));
+        assert!(matches!(
+            store.set_messaging_keypair_seed(&[7; 32]),
+            Err(StoreError::NoSelfIdentity)
+        ));
     }
 
     #[test]
     fn wg_keypair_seed_round_trips_on_the_self_row() {
         let store = StateStore::open_in_memory().unwrap();
-        store.set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None).unwrap();
+        store
+            .set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None)
+            .unwrap();
         assert_eq!(store.get_wg_keypair_seed().unwrap(), None);
         store.set_wg_keypair_seed(&[8; 32]).unwrap();
         assert_eq!(store.get_wg_keypair_seed().unwrap(), Some([8; 32]));
@@ -3950,13 +6557,18 @@ mod tests {
     #[test]
     fn set_wg_keypair_seed_fails_loudly_with_no_self_identity_yet() {
         let store = StateStore::open_in_memory().unwrap();
-        assert!(matches!(store.set_wg_keypair_seed(&[8; 32]), Err(StoreError::NoSelfIdentity)));
+        assert!(matches!(
+            store.set_wg_keypair_seed(&[8; 32]),
+            Err(StoreError::NoSelfIdentity)
+        ));
     }
 
     #[test]
     fn iroh_keypair_seed_round_trips() {
         let store = StateStore::open_in_memory().unwrap();
-        store.set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None).unwrap();
+        store
+            .set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None)
+            .unwrap();
         assert_eq!(store.get_iroh_keypair_seed().unwrap(), None);
         store.set_iroh_keypair_seed(&[8; 32]).unwrap();
         assert_eq!(store.get_iroh_keypair_seed().unwrap(), Some([8; 32]));
@@ -3965,7 +6577,10 @@ mod tests {
     #[test]
     fn set_iroh_keypair_seed_fails_loudly_with_no_self_identity_yet() {
         let store = StateStore::open_in_memory().unwrap();
-        assert!(matches!(store.set_iroh_keypair_seed(&[8; 32]), Err(StoreError::NoSelfIdentity)));
+        assert!(matches!(
+            store.set_iroh_keypair_seed(&[8; 32]),
+            Err(StoreError::NoSelfIdentity)
+        ));
     }
 
     #[test]
@@ -3975,7 +6590,15 @@ mod tests {
         let mut rule = follow(alice, 1.0, 1.0);
         rule.iroh_node_id = Some("deadbeef".repeat(8));
         store.upsert_follow(&rule).unwrap();
-        assert_eq!(store.get_follow(&alice).unwrap().unwrap().iroh_node_id.as_deref(), Some(rule.iroh_node_id.unwrap().as_str()));
+        assert_eq!(
+            store
+                .get_follow(&alice)
+                .unwrap()
+                .unwrap()
+                .iroh_node_id
+                .as_deref(),
+            Some(rule.iroh_node_id.unwrap().as_str())
+        );
     }
 
     #[test]
@@ -3983,14 +6606,27 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         let node_id = "deadbeef".repeat(8);
-        assert_eq!(store.find_follow_by_iroh_node_id(&node_id).unwrap(), None, "nothing is known before any follow claims it");
+        assert_eq!(
+            store.find_follow_by_iroh_node_id(&node_id).unwrap(),
+            None,
+            "nothing is known before any follow claims it"
+        );
 
         let mut rule = follow(alice, 1.0, 1.0);
         rule.iroh_node_id = Some(node_id.clone());
         store.upsert_follow(&rule).unwrap();
 
-        assert_eq!(store.find_follow_by_iroh_node_id(&node_id).unwrap(), Some(alice));
-        assert_eq!(store.find_follow_by_iroh_node_id(&"beefdead".repeat(8)).unwrap(), None, "an unrelated node id must not resolve");
+        assert_eq!(
+            store.find_follow_by_iroh_node_id(&node_id).unwrap(),
+            Some(alice)
+        );
+        assert_eq!(
+            store
+                .find_follow_by_iroh_node_id(&"beefdead".repeat(8))
+                .unwrap(),
+            None,
+            "an unrelated node id must not resolve"
+        );
     }
 
     #[test]
@@ -4001,7 +6637,10 @@ mod tests {
         // but this pins that behavior rather than assuming it.
         store.upsert_follow(&follow(user(1, 1), 1.0, 1.0)).unwrap();
         assert_eq!(store.find_follow_by_iroh_node_id("").unwrap(), None);
-        assert_eq!(store.find_follow_by_iroh_node_id(&"aa".repeat(32)).unwrap(), None);
+        assert_eq!(
+            store.find_follow_by_iroh_node_id(&"aa".repeat(32)).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -4022,39 +6661,76 @@ mod tests {
             advertisement_sequence: Some(0),
         };
         store.upsert_provisioned_tunnel(&t).unwrap();
-        let got = store.get_provisioned_tunnel(&peer, TunnelDirection::Consuming).unwrap().unwrap();
+        let got = store
+            .get_provisioned_tunnel(&peer, TunnelDirection::Consuming)
+            .unwrap()
+            .unwrap();
         assert_eq!(got, t);
         assert_eq!(store.list_provisioned_tunnels().unwrap(), vec![t]);
 
         let targets = vec![TargetSelector::Domain("example.com".into())];
-        store.set_provisioned_tunnel_selected_targets(&peer, TunnelDirection::Consuming, &targets).unwrap();
-        assert_eq!(store.get_provisioned_tunnel_selected_targets(&peer, TunnelDirection::Consuming).unwrap(), targets);
+        store
+            .set_provisioned_tunnel_selected_targets(&peer, TunnelDirection::Consuming, &targets)
+            .unwrap();
+        assert_eq!(
+            store
+                .get_provisioned_tunnel_selected_targets(&peer, TunnelDirection::Consuming)
+                .unwrap(),
+            targets
+        );
 
-        store.remove_provisioned_tunnel(&peer, TunnelDirection::Consuming).unwrap();
-        assert!(store.get_provisioned_tunnel(&peer, TunnelDirection::Consuming).unwrap().is_none());
+        store
+            .remove_provisioned_tunnel(&peer, TunnelDirection::Consuming)
+            .unwrap();
+        assert!(store
+            .get_provisioned_tunnel(&peer, TunnelDirection::Consuming)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn record_transfer_sample_accumulates_deltas_across_samples() {
         let store = StateStore::open_in_memory().unwrap();
         let peer = user(1, 1);
-        store.record_transfer_sample(&peer, TunnelDirection::Providing, 1000, 500, 100).unwrap();
-        store.record_transfer_sample(&peer, TunnelDirection::Providing, 1500, 900, 200).unwrap();
+        store
+            .record_transfer_sample(&peer, TunnelDirection::Providing, 1000, 500, 100)
+            .unwrap();
+        store
+            .record_transfer_sample(&peer, TunnelDirection::Providing, 1500, 900, 200)
+            .unwrap();
         let balances = store.list_tunnel_balances().unwrap();
-        assert_eq!(balances, vec![TunnelBalance { peer, given_to: (1500 - 1000) + (900 - 500) + 1000 + 500, taken_from: 0 }]);
+        assert_eq!(
+            balances,
+            vec![TunnelBalance {
+                peer,
+                given_to: (1500 - 1000) + (900 - 500) + 1000 + 500,
+                taken_from: 0
+            }]
+        );
     }
 
     #[test]
     fn record_transfer_sample_treats_a_lower_raw_counter_as_a_fresh_delta_not_negative() {
         let store = StateStore::open_in_memory().unwrap();
         let peer = user(1, 1);
-        store.record_transfer_sample(&peer, TunnelDirection::Consuming, 5000, 2000, 100).unwrap();
+        store
+            .record_transfer_sample(&peer, TunnelDirection::Consuming, 5000, 2000, 100)
+            .unwrap();
         // Interface recreated (reboot) — wg's own raw counters reset to 0
         // then climb again; this must never be interpreted as negative
         // traffic, the whole new value is a fresh delta.
-        store.record_transfer_sample(&peer, TunnelDirection::Consuming, 300, 100, 200).unwrap();
+        store
+            .record_transfer_sample(&peer, TunnelDirection::Consuming, 300, 100, 200)
+            .unwrap();
         let balances = store.list_tunnel_balances().unwrap();
-        assert_eq!(balances, vec![TunnelBalance { peer, given_to: 0, taken_from: 5000 + 2000 + 300 + 100 }]);
+        assert_eq!(
+            balances,
+            vec![TunnelBalance {
+                peer,
+                given_to: 0,
+                taken_from: 5000 + 2000 + 300 + 100
+            }]
+        );
     }
 
     #[test]
@@ -4062,30 +6738,77 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let provider_peer = user(1, 1);
         let consumer_peer = user(1, 2);
-        store.record_transfer_sample(&provider_peer, TunnelDirection::Providing, 10_000, 20_000, 100).unwrap();
-        store.record_transfer_sample(&consumer_peer, TunnelDirection::Consuming, 3_000, 1_000, 100).unwrap();
+        store
+            .record_transfer_sample(
+                &provider_peer,
+                TunnelDirection::Providing,
+                10_000,
+                20_000,
+                100,
+            )
+            .unwrap();
+        store
+            .record_transfer_sample(
+                &consumer_peer,
+                TunnelDirection::Consuming,
+                3_000,
+                1_000,
+                100,
+            )
+            .unwrap();
         let mut balances = store.list_tunnel_balances().unwrap();
         balances.sort_by_key(|b| b.peer.local_id.0[0]);
-        assert_eq!(balances, vec![
-            TunnelBalance { peer: provider_peer, given_to: 30_000, taken_from: 0 },
-            TunnelBalance { peer: consumer_peer, given_to: 0, taken_from: 4_000 },
-        ]);
+        assert_eq!(
+            balances,
+            vec![
+                TunnelBalance {
+                    peer: provider_peer,
+                    given_to: 30_000,
+                    taken_from: 0
+                },
+                TunnelBalance {
+                    peer: consumer_peer,
+                    given_to: 0,
+                    taken_from: 4_000
+                },
+            ]
+        );
     }
 
     #[test]
     fn providing_and_consuming_directions_for_the_same_peer_are_independent_rows() {
         let store = StateStore::open_in_memory().unwrap();
         let peer = user(1, 1);
-        store.upsert_provisioned_tunnel(&ProvisionedTunnel {
-            peer, direction: TunnelDirection::Providing, peer_wg_pubkey: WgPublicKeyBytes([1; 32]),
-            interface_name: "sf_tun0".into(), fwmark: 0x1000, route_table: 200, tunnel_ip: "10.99.0.1".into(), tunnel_ip6: None,
-            status: "active".into(), created_at: 0, advertisement_sequence: None,
-        }).unwrap();
-        store.upsert_provisioned_tunnel(&ProvisionedTunnel {
-            peer, direction: TunnelDirection::Consuming, peer_wg_pubkey: WgPublicKeyBytes([2; 32]),
-            interface_name: "sf_tun0".into(), fwmark: 0x1001, route_table: 201, tunnel_ip: "10.99.0.2".into(), tunnel_ip6: Some("fd99::c9:2".into()),
-            status: "active".into(), created_at: 0, advertisement_sequence: Some(0),
-        }).unwrap();
+        store
+            .upsert_provisioned_tunnel(&ProvisionedTunnel {
+                peer,
+                direction: TunnelDirection::Providing,
+                peer_wg_pubkey: WgPublicKeyBytes([1; 32]),
+                interface_name: "sf_tun0".into(),
+                fwmark: 0x1000,
+                route_table: 200,
+                tunnel_ip: "10.99.0.1".into(),
+                tunnel_ip6: None,
+                status: "active".into(),
+                created_at: 0,
+                advertisement_sequence: None,
+            })
+            .unwrap();
+        store
+            .upsert_provisioned_tunnel(&ProvisionedTunnel {
+                peer,
+                direction: TunnelDirection::Consuming,
+                peer_wg_pubkey: WgPublicKeyBytes([2; 32]),
+                interface_name: "sf_tun0".into(),
+                fwmark: 0x1001,
+                route_table: 201,
+                tunnel_ip: "10.99.0.2".into(),
+                tunnel_ip6: Some("fd99::c9:2".into()),
+                status: "active".into(),
+                created_at: 0,
+                advertisement_sequence: Some(0),
+            })
+            .unwrap();
         assert_eq!(store.list_provisioned_tunnels().unwrap().len(), 2);
     }
 
@@ -4093,29 +6816,73 @@ mod tests {
     fn tunnel_sequence_counters_start_at_zero_and_increment_after_ingest() {
         let store = StateStore::open_in_memory().unwrap();
         let me = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: me, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: me,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
 
         assert_eq!(store.next_tunnel_advertisement_sequence(&me).unwrap(), 0);
-        store.ingest_tunnel_advertisement(&advertisement(me)).unwrap();
+        store
+            .ingest_tunnel_advertisement(&advertisement(me))
+            .unwrap();
         assert_eq!(store.next_tunnel_advertisement_sequence(&me).unwrap(), 1);
 
         assert_eq!(store.next_tunnel_service_request_sequence(&me).unwrap(), 0);
-        store.ingest_tunnel_service_request(&TunnelServiceRequest {
-            requester: me, sequence: 0, description: "x".into(), desired_route_scope: vec![],
-            visibility: Visibility::Public, issued_at: 0, expires_at: None, supersedes: None, signature: SignatureBytes([0; 64]),
-        }).unwrap();
+        store
+            .ingest_tunnel_service_request(&TunnelServiceRequest {
+                requester: me,
+                sequence: 0,
+                description: "x".into(),
+                desired_route_scope: vec![],
+                visibility: Visibility::Public,
+                issued_at: 0,
+                expires_at: None,
+                supersedes: None,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
         assert_eq!(store.next_tunnel_service_request_sequence(&me).unwrap(), 1);
 
-        assert_eq!(store.next_tunnel_connection_request_sequence(&me).unwrap(), 0);
-        store.store_tunnel_connection_request(&TunnelConnectionRequest {
-            requester: me, sequence: 0, advertisement: StatementRef { author: me, sequence: 0 },
-            requester_wg_pubkey: WgPublicKeyBytes([1; 32]), requester_messaging_pubkey: MessagingPublicKeyBytes([2; 32]),
-            requested_at: 0, signature: SignatureBytes([0; 64]),
-        }).unwrap();
-        assert_eq!(store.next_tunnel_connection_request_sequence(&me).unwrap(), 1);
+        assert_eq!(
+            store.next_tunnel_connection_request_sequence(&me).unwrap(),
+            0
+        );
+        store
+            .store_tunnel_connection_request(&TunnelConnectionRequest {
+                requester: me,
+                sequence: 0,
+                advertisement: StatementRef {
+                    author: me,
+                    sequence: 0,
+                },
+                requester_wg_pubkey: WgPublicKeyBytes([1; 32]),
+                requester_messaging_pubkey: MessagingPublicKeyBytes([2; 32]),
+                requested_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        assert_eq!(
+            store.next_tunnel_connection_request_sequence(&me).unwrap(),
+            1
+        );
     }
 
-    fn shared_list(author: UserId, sequence: u64, categories: Vec<&str>, entries: Vec<SharedRuleEntry>) -> SharedRuleList {
+    fn shared_list(
+        author: UserId,
+        sequence: u64,
+        categories: Vec<&str>,
+        entries: Vec<SharedRuleEntry>,
+    ) -> SharedRuleList {
         SharedRuleList {
             author,
             sequence,
@@ -4131,15 +6898,142 @@ mod tests {
         }
     }
 
+    fn shared_policy(author: UserId, sequence: u64) -> SharedPolicy {
+        let actions = vec![
+            PolicyAction::Block,
+            PolicyAction::Allow,
+            PolicyAction::Route {
+                profile: "vpn-eu".into(),
+            },
+            PolicyAction::DnsBlock,
+            PolicyAction::DnsRedirect {
+                address: "192.0.2.1".into(),
+            },
+            PolicyAction::DnsRecord {
+                record_type: "AAAA".into(),
+                value: "2001:db8::1".into(),
+                ttl_seconds: 300,
+            },
+        ];
+        SharedPolicy {
+            policy_id: Hash32([8; 32]),
+            author,
+            sequence,
+            name: "router policy".into(),
+            description: "test policy".into(),
+            categories: vec!["privacy".into(), "dns".into()],
+            visibility: Visibility::Restricted,
+            entries: actions
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, action)| PolicyEntry {
+                    entry_id: Hash32([ordinal as u8 + 20; 32]),
+                    target: TargetSelector::Domain(format!("{}.example", ordinal)),
+                    action,
+                    category: Some("test".into()),
+                    reason: Reason {
+                        code: ReasonCode::PersonalPreference,
+                        note: Some("stored reason".into()),
+                        evidence: vec![Hash32([42; 32])],
+                    },
+                    expires_at: Some(900 + ordinal as i64),
+                })
+                .collect(),
+            issued_at: 100,
+            expires_at: Some(1000),
+            supersedes: None,
+            signature: SignatureBytes([7; 64]),
+        }
+    }
+
+    #[test]
+    fn shared_policy_round_trips_metadata_entries_actions_and_expiry() {
+        let store = StateStore::open_in_memory().unwrap();
+        let author = user(4, 4);
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        let policy = shared_policy(author, 0);
+        store.ingest_shared_policy(&policy).unwrap();
+        assert_eq!(
+            store
+                .get_shared_policy(policy.policy_id, author, 0)
+                .unwrap(),
+            Some(policy.clone())
+        );
+        assert_eq!(store.list_shared_policies().unwrap(), vec![policy]);
+        assert_eq!(
+            store
+                .next_shared_policy_sequence(&author, &Hash32([8; 32]))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn shared_policy_ingest_is_idempotent_and_rejects_rollback() {
+        let store = StateStore::open_in_memory().unwrap();
+        let author = user(5, 5);
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        let policy = shared_policy(author, 2);
+        store.ingest_shared_policy(&policy).unwrap();
+        store.ingest_shared_policy(&policy).unwrap();
+        let mut rollback = shared_policy(author, 1);
+        rollback.signature = SignatureBytes([9; 64]);
+        assert!(matches!(
+            store.ingest_shared_policy(&rollback),
+            Err(StoreError::Encoding(_))
+        ));
+    }
+
     fn sample_entry() -> SharedRuleEntry {
-        SharedRuleEntry { target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: Some("phones home".into()), evidence: vec![] } }
+        SharedRuleEntry {
+            target: target(),
+            stance: Stance::Deny,
+            reason: Reason {
+                code: ReasonCode::Tracker,
+                note: Some("phones home".into()),
+                evidence: vec![],
+            },
+        }
     }
 
     #[test]
     fn ingest_shared_rule_list_rejects_a_non_followed_author() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        let err = store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![sample_entry()])).unwrap_err();
+        let err = store
+            .ingest_shared_rule_list(&shared_list(
+                author,
+                0,
+                vec!["privacy"],
+                vec![sample_entry()],
+            ))
+            .unwrap_err();
         assert!(matches!(err, StoreError::NotFollowed(_)));
     }
 
@@ -4147,7 +7041,20 @@ mod tests {
     fn shared_rule_list_round_trips_including_entries_and_categories() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
 
         let list = shared_list(author, 0, vec!["privacy", "ads"], vec![sample_entry()]);
         store.ingest_shared_rule_list(&list).unwrap();
@@ -4164,8 +7071,28 @@ mod tests {
     fn list_shared_rule_lists_returns_every_known_one() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
-        store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![sample_entry()])).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        store
+            .ingest_shared_rule_list(&shared_list(
+                author,
+                0,
+                vec!["privacy"],
+                vec![sample_entry()],
+            ))
+            .unwrap();
         assert_eq!(store.list_shared_rule_lists().unwrap().len(), 1);
     }
 
@@ -4173,8 +7100,28 @@ mod tests {
     fn list_entries_for_finds_entries_and_pairs_with_categories_and_trust() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 2.0, deny_weight: 3.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
-        store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy", "ads"], vec![sample_entry()])).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 2.0,
+                deny_weight: 3.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        store
+            .ingest_shared_rule_list(&shared_list(
+                author,
+                0,
+                vec!["privacy", "ads"],
+                vec![sample_entry()],
+            ))
+            .unwrap();
 
         let got = store.list_entries_for(&target(), 0).unwrap();
         assert_eq!(got.len(), 1);
@@ -4183,7 +7130,10 @@ mod tests {
         assert_eq!(*entry_author, author);
         let mut sorted_categories = categories.clone();
         sorted_categories.sort();
-        assert_eq!(sorted_categories, vec!["ads".to_string(), "privacy".to_string()]);
+        assert_eq!(
+            sorted_categories,
+            vec!["ads".to_string(), "privacy".to_string()]
+        );
         assert_eq!(trust.as_ref().unwrap().allow_weight, 2.0);
     }
 
@@ -4191,22 +7141,62 @@ mod tests {
     fn list_entries_for_is_empty_for_an_unrelated_target() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
-        store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![sample_entry()])).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        store
+            .ingest_shared_rule_list(&shared_list(
+                author,
+                0,
+                vec!["privacy"],
+                vec![sample_entry()],
+            ))
+            .unwrap();
 
-        assert!(store.list_entries_for(&TargetSelector::Domain("unrelated.example".into()), 0).unwrap().is_empty());
+        assert!(store
+            .list_entries_for(&TargetSelector::Domain("unrelated.example".into()), 0)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn list_entries_for_excludes_entries_from_an_expired_list() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
         let mut list = shared_list(author, 0, vec!["privacy"], vec![sample_entry()]);
         list.expires_at = Some(100);
         store.ingest_shared_rule_list(&list).unwrap();
 
-        assert_eq!(store.list_entries_for(&target(), 50).unwrap().len(), 1, "not yet expired");
+        assert_eq!(
+            store.list_entries_for(&target(), 50).unwrap().len(),
+            1,
+            "not yet expired"
+        );
         assert!(store.list_entries_for(&target(), 100).unwrap().is_empty(), "expiry is inclusive of the boundary, matching every other is_expired check in this crate");
         assert!(store.list_entries_for(&target(), 200).unwrap().is_empty());
     }
@@ -4215,32 +7205,113 @@ mod tests {
     fn ingesting_a_new_version_replaces_the_old_versions_entries_not_merges_with_them() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
 
-        let v1_entry = SharedRuleEntry { target: TargetSelector::Domain("v1-only.example".into()), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] } };
-        store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![v1_entry.clone()])).unwrap();
+        let v1_entry = SharedRuleEntry {
+            target: TargetSelector::Domain("v1-only.example".into()),
+            stance: Stance::Deny,
+            reason: Reason {
+                code: ReasonCode::Tracker,
+                note: None,
+                evidence: vec![],
+            },
+        };
+        store
+            .ingest_shared_rule_list(&shared_list(
+                author,
+                0,
+                vec!["privacy"],
+                vec![v1_entry.clone()],
+            ))
+            .unwrap();
 
-        let v2_entry = SharedRuleEntry { target: TargetSelector::Domain("v2-only.example".into()), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] } };
-        let mut v2 = shared_list(author, 1, vec!["privacy", "new-category"], vec![v2_entry.clone()]);
+        let v2_entry = SharedRuleEntry {
+            target: TargetSelector::Domain("v2-only.example".into()),
+            stance: Stance::Deny,
+            reason: Reason {
+                code: ReasonCode::Tracker,
+                note: None,
+                evidence: vec![],
+            },
+        };
+        let mut v2 = shared_list(
+            author,
+            1,
+            vec!["privacy", "new-category"],
+            vec![v2_entry.clone()],
+        );
         v2.supersedes = Some(0);
         store.ingest_shared_rule_list(&v2).unwrap();
 
         // v1's row (and its entries/categories, via ON DELETE CASCADE) must
         // be gone entirely — replaced, not kept alongside v2.
-        assert!(store.get_shared_rule_list(author, 0).unwrap().is_none(), "the superseded version must be physically removed");
-        assert!(store.list_entries_for(&TargetSelector::Domain("v1-only.example".into()), 0).unwrap().is_empty(), "v1's entry must no longer be found");
-        assert_eq!(store.list_entries_for(&TargetSelector::Domain("v2-only.example".into()), 0).unwrap().len(), 1, "v2's entry must be found");
-        assert_eq!(store.list_shared_rule_lists().unwrap().len(), 1, "only the current version should remain");
+        assert!(
+            store.get_shared_rule_list(author, 0).unwrap().is_none(),
+            "the superseded version must be physically removed"
+        );
+        assert!(
+            store
+                .list_entries_for(&TargetSelector::Domain("v1-only.example".into()), 0)
+                .unwrap()
+                .is_empty(),
+            "v1's entry must no longer be found"
+        );
+        assert_eq!(
+            store
+                .list_entries_for(&TargetSelector::Domain("v2-only.example".into()), 0)
+                .unwrap()
+                .len(),
+            1,
+            "v2's entry must be found"
+        );
+        assert_eq!(
+            store.list_shared_rule_lists().unwrap().len(),
+            1,
+            "only the current version should remain"
+        );
     }
 
     #[test]
     fn shared_rule_list_sequence_starts_at_zero_and_increments_after_ingest() {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
-        store.upsert_follow(&LocalTrustRule { user: author, allow_weight: 1.0, deny_weight: 1.0, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                user: author,
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                advisory_only: false,
+                excluded: false,
+                category_filter: None,
+                display_name: None,
+                iroh_node_id: None,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
 
         assert_eq!(store.next_shared_rule_list_sequence(&author).unwrap(), 0);
-        store.ingest_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![sample_entry()])).unwrap();
+        store
+            .ingest_shared_rule_list(&shared_list(
+                author,
+                0,
+                vec!["privacy"],
+                vec![sample_entry()],
+            ))
+            .unwrap();
         assert_eq!(store.next_shared_rule_list_sequence(&author).unwrap(), 1);
     }
 
@@ -4249,12 +7320,28 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let author = user(1, 1);
         // No `upsert_follow` — a person doesn't need to follow themselves.
-        store.store_own_shared_rule_list(&shared_list(author, 0, vec!["privacy"], vec![sample_entry()])).unwrap();
+        store
+            .store_own_shared_rule_list(&shared_list(
+                author,
+                0,
+                vec!["privacy"],
+                vec![sample_entry()],
+            ))
+            .unwrap();
         assert!(store.get_shared_rule_list(author, 0).unwrap().is_some());
     }
 
     fn user_contribution(u: UserId, stance: Stance, weight: f64) -> Contribution {
-        Contribution { source: StatementAuthor::User(u), stance, weight, reason: Reason { code: ReasonCode::Tracker, note: Some("phones home".into()), evidence: vec![] } }
+        Contribution {
+            source: StatementAuthor::User(u),
+            stance,
+            weight,
+            reason: Reason {
+                code: ReasonCode::Tracker,
+                note: Some("phones home".into()),
+                evidence: vec![],
+            },
+        }
     }
 
     #[test]
@@ -4263,7 +7350,9 @@ mod tests {
         let alice = user(1, 1);
         let contributing = vec![user_contribution(alice, Stance::Deny, 0.75)];
 
-        store.record_enforced_decision_contributors(&target(), &contributing).unwrap();
+        store
+            .record_enforced_decision_contributors(&target(), &contributing)
+            .unwrap();
 
         let got = store.enforced_decision_contributors_for(&target()).unwrap();
         assert_eq!(got.len(), 1);
@@ -4276,9 +7365,20 @@ mod tests {
     #[test]
     fn enforced_decision_contributors_supports_a_federation_source() {
         let store = StateStore::open_in_memory().unwrap();
-        let contributing = vec![Contribution { source: StatementAuthor::Federation(fed(9)), stance: Stance::Deny, weight: 1.0, reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] } }];
+        let contributing = vec![Contribution {
+            source: StatementAuthor::Federation(fed(9)),
+            stance: Stance::Deny,
+            weight: 1.0,
+            reason: Reason {
+                code: ReasonCode::Malware,
+                note: None,
+                evidence: vec![],
+            },
+        }];
 
-        store.record_enforced_decision_contributors(&target(), &contributing).unwrap();
+        store
+            .record_enforced_decision_contributors(&target(), &contributing)
+            .unwrap();
 
         let got = store.enforced_decision_contributors_for(&target()).unwrap();
         assert_eq!(got.len(), 1);
@@ -4288,12 +7388,23 @@ mod tests {
     #[test]
     fn clear_enforced_decision_contributors_removes_everything() {
         let store = StateStore::open_in_memory().unwrap();
-        store.record_enforced_decision_contributors(&target(), &[user_contribution(user(1, 1), Stance::Deny, 1.0)]).unwrap();
+        store
+            .record_enforced_decision_contributors(
+                &target(),
+                &[user_contribution(user(1, 1), Stance::Deny, 1.0)],
+            )
+            .unwrap();
 
         store.clear_enforced_decision_contributors().unwrap();
 
-        assert!(store.enforced_decision_contributors_for(&target()).unwrap().is_empty());
-        assert!(store.list_all_enforced_decision_contributors().unwrap().is_empty());
+        assert!(store
+            .enforced_decision_contributors_for(&target())
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_all_enforced_decision_contributors()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -4301,8 +7412,18 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         let other_target = TargetSelector::Ip("203.0.113.9".into());
-        store.record_enforced_decision_contributors(&target(), &[user_contribution(alice, Stance::Deny, 1.0)]).unwrap();
-        store.record_enforced_decision_contributors(&other_target, &[user_contribution(alice, Stance::Allow, 1.0)]).unwrap();
+        store
+            .record_enforced_decision_contributors(
+                &target(),
+                &[user_contribution(alice, Stance::Deny, 1.0)],
+            )
+            .unwrap();
+        store
+            .record_enforced_decision_contributors(
+                &other_target,
+                &[user_contribution(alice, Stance::Allow, 1.0)],
+            )
+            .unwrap();
 
         let got = store.list_all_enforced_decision_contributors().unwrap();
         assert_eq!(got.len(), 2);
@@ -4370,8 +7491,16 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         let member = user(1, 2);
-        store.ingest_group(&new_group(owner, vec![owner, member])).unwrap();
-        assert!(store.list_group_membership_events(group_id()).unwrap().is_empty(), "arriving to find people already in the channel is not a join, same as real IRC");
+        store
+            .ingest_group(&new_group(owner, vec![owner, member]))
+            .unwrap();
+        assert!(
+            store
+                .list_group_membership_events(group_id())
+                .unwrap()
+                .is_empty(),
+            "arriving to find people already in the channel is not a join, same as real IRC"
+        );
     }
 
     #[test]
@@ -4396,7 +7525,9 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         let member = user(1, 2);
-        store.ingest_group(&new_group(owner, vec![owner, member])).unwrap();
+        store
+            .ingest_group(&new_group(owner, vec![owner, member]))
+            .unwrap();
 
         let mut v2 = new_group(owner, vec![owner]);
         v2.sequence = 1;
@@ -4413,7 +7544,9 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         let member = user(1, 2);
-        store.ingest_group(&new_group(owner, vec![owner, member])).unwrap();
+        store
+            .ingest_group(&new_group(owner, vec![owner, member]))
+            .unwrap();
 
         // member moves from voting to non-voting — still a member throughout.
         let mut v2 = new_group(owner, vec![owner]);
@@ -4423,7 +7556,10 @@ mod tests {
         v2.issued_at = 500;
         store.ingest_group(&v2).unwrap();
 
-        assert!(store.list_group_membership_events(group_id()).unwrap().is_empty());
+        assert!(store
+            .list_group_membership_events(group_id())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -4443,7 +7579,14 @@ mod tests {
         assert_eq!(got.voting_members, vec![owner, newcomer]);
         // The superseded version must be physically gone (version-replace,
         // not accumulate — same pattern `shared_rule_lists` already uses).
-        let count: i64 = store.conn.query_row("SELECT COUNT(*) FROM groups WHERE group_id = ?1", params![group_id().0 .0.as_slice()], |r| r.get(0)).unwrap();
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM groups WHERE group_id = ?1",
+                params![group_id().0 .0.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -4501,8 +7644,15 @@ mod tests {
         v2.sequence = 1;
         v2.supersedes = Some(0);
         let result = store.ingest_group(&v2);
-        assert!(matches!(result, Err(StoreError::Unauthorized(_))), "an admin must never be able to change the owners list");
-        assert_eq!(store.get_group(group_id()).unwrap().unwrap().sequence, 0, "the rejected update must not have replaced the current version");
+        assert!(
+            matches!(result, Err(StoreError::Unauthorized(_))),
+            "an admin must never be able to change the owners list"
+        );
+        assert_eq!(
+            store.get_group(group_id()).unwrap().unwrap().sequence,
+            0,
+            "the rejected update must not have replaced the current version"
+        );
     }
 
     #[test]
@@ -4521,7 +7671,10 @@ mod tests {
         v2.sequence = 1;
         v2.supersedes = Some(0);
         store.ingest_group(&v2).unwrap();
-        assert_eq!(store.get_group(group_id()).unwrap().unwrap().voting_members, vec![owner, new_member]);
+        assert_eq!(
+            store.get_group(group_id()).unwrap().unwrap().voting_members,
+            vec![owner, new_member]
+        );
     }
 
     #[test]
@@ -4536,27 +7689,47 @@ mod tests {
         v2.sequence = 1;
         v2.supersedes = Some(0);
         store.ingest_group(&v2).unwrap();
-        assert_eq!(store.get_group(group_id()).unwrap().unwrap().owners, vec![owner, co_owner]);
+        assert_eq!(
+            store.get_group(group_id()).unwrap().unwrap().owners,
+            vec![owner, co_owner]
+        );
     }
 
     #[test]
     fn group_join_request_defaults_to_pending_and_can_be_approved() {
         let store = StateStore::open_in_memory().unwrap();
         let requester = user(2, 1);
-        store.store_group_join_request(&GroupJoinRequest { requester, group_id: group_id(), sequence: 0, answer: Some("let me in".into()), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester,
+                group_id: group_id(),
+                sequence: 0,
+                answer: Some("let me in".into()),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let pending = store.list_pending_group_join_requests(group_id()).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].requester, requester);
 
-        store.set_group_join_request_status(&requester, 0, "approved").unwrap();
-        assert!(store.list_pending_group_join_requests(group_id()).unwrap().is_empty());
+        store
+            .set_group_join_request_status(&requester, 0, "approved")
+            .unwrap();
+        assert!(store
+            .list_pending_group_join_requests(group_id())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn group_join_track_record_is_all_zero_with_no_requests() {
         let store = StateStore::open_in_memory().unwrap();
-        assert_eq!(store.group_join_track_record(group_id()).unwrap(), GroupJoinTrackRecord::default());
+        assert_eq!(
+            store.group_join_track_record(group_id()).unwrap(),
+            GroupJoinTrackRecord::default()
+        );
     }
 
     #[test]
@@ -4566,25 +7739,86 @@ mod tests {
         let b = user(2, 2);
         let c = user(2, 3);
         let d = user(2, 4);
-        store.store_group_join_request(&GroupJoinRequest { requester: a, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_group_join_request(&GroupJoinRequest { requester: b, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_group_join_request(&GroupJoinRequest { requester: c, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_group_join_request(&GroupJoinRequest { requester: d, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.set_group_join_request_status(&a, 0, "approved").unwrap();
-        store.set_group_join_request_status(&b, 0, "rejected").unwrap();
-        store.set_group_join_request_status(&c, 0, "rejected").unwrap();
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester: a,
+                group_id: group_id(),
+                sequence: 0,
+                answer: None,
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester: b,
+                group_id: group_id(),
+                sequence: 0,
+                answer: None,
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester: c,
+                group_id: group_id(),
+                sequence: 0,
+                answer: None,
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester: d,
+                group_id: group_id(),
+                sequence: 0,
+                answer: None,
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .set_group_join_request_status(&a, 0, "approved")
+            .unwrap();
+        store
+            .set_group_join_request_status(&b, 0, "rejected")
+            .unwrap();
+        store
+            .set_group_join_request_status(&c, 0, "rejected")
+            .unwrap();
         // d stays pending.
 
         let record = store.group_join_track_record(group_id()).unwrap();
-        assert_eq!(record, GroupJoinTrackRecord { approved: 1, rejected: 2, blocked: 0, pending: 1 });
+        assert_eq!(
+            record,
+            GroupJoinTrackRecord {
+                approved: 1,
+                rejected: 2,
+                blocked: 0,
+                pending: 1
+            }
+        );
     }
 
     #[test]
     fn group_join_track_record_counts_an_auto_blocked_request() {
         let store = StateStore::open_in_memory().unwrap();
         let blocked_user = user(2, 1);
-        store.block_group_user(group_id(), &blocked_user, &sample_block_reason(), 1000).unwrap();
-        store.store_group_join_request(&GroupJoinRequest { requester: blocked_user, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .block_group_user(group_id(), &blocked_user, &sample_block_reason(), 1000)
+            .unwrap();
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester: blocked_user,
+                group_id: group_id(),
+                sequence: 0,
+                answer: None,
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let record = store.group_join_track_record(group_id()).unwrap();
         assert_eq!(record.blocked, 1);
@@ -4600,7 +7834,10 @@ mod tests {
         store.ingest_group(&g).unwrap();
 
         let got = store.get_group(group_id()).unwrap().unwrap();
-        assert_eq!(got.join_prompt.as_deref(), Some("please share a contact email"));
+        assert_eq!(
+            got.join_prompt.as_deref(),
+            Some("please share a contact email")
+        );
     }
 
     #[test]
@@ -4608,43 +7845,108 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         store.ingest_group(&new_group(owner, vec![owner])).unwrap();
-        assert_eq!(store.get_group(group_id()).unwrap().unwrap().join_prompt, None);
+        assert_eq!(
+            store.get_group(group_id()).unwrap().unwrap().join_prompt,
+            None
+        );
     }
 
     fn sample_block_reason() -> Reason {
-        Reason { code: ReasonCode::AbuseReport, note: Some("spammed the party line".into()), evidence: vec![] }
+        Reason {
+            code: ReasonCode::AbuseReport,
+            note: Some("spammed the party line".into()),
+            evidence: vec![],
+        }
     }
 
     #[test]
     fn blocking_a_user_marks_their_pending_request_as_blocked() {
         let store = StateStore::open_in_memory().unwrap();
         let requester = user(2, 1);
-        store.store_group_join_request(&GroupJoinRequest { requester, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        assert_eq!(store.list_pending_group_join_requests(group_id()).unwrap().len(), 1);
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester,
+                group_id: group_id(),
+                sequence: 0,
+                answer: None,
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .list_pending_group_join_requests(group_id())
+                .unwrap()
+                .len(),
+            1
+        );
 
-        store.block_group_user(group_id(), &requester, &sample_block_reason(), 1000).unwrap();
-        assert!(store.list_pending_group_join_requests(group_id()).unwrap().is_empty(), "a blocked user's pending request must no longer show up as pending");
+        store
+            .block_group_user(group_id(), &requester, &sample_block_reason(), 1000)
+            .unwrap();
+        assert!(
+            store
+                .list_pending_group_join_requests(group_id())
+                .unwrap()
+                .is_empty(),
+            "a blocked user's pending request must no longer show up as pending"
+        );
     }
 
     #[test]
     fn a_blocked_users_future_join_request_is_auto_rejected_not_pending() {
         let store = StateStore::open_in_memory().unwrap();
         let requester = user(2, 1);
-        store.block_group_user(group_id(), &requester, &sample_block_reason(), 1000).unwrap();
+        store
+            .block_group_user(group_id(), &requester, &sample_block_reason(), 1000)
+            .unwrap();
 
-        store.store_group_join_request(&GroupJoinRequest { requester, group_id: group_id(), sequence: 0, answer: Some("please let me in".into()), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        assert!(store.list_pending_group_join_requests(group_id()).unwrap().is_empty(), "a blocked user's new request must never land as pending");
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester,
+                group_id: group_id(),
+                sequence: 0,
+                answer: Some("please let me in".into()),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        assert!(
+            store
+                .list_pending_group_join_requests(group_id())
+                .unwrap()
+                .is_empty(),
+            "a blocked user's new request must never land as pending"
+        );
     }
 
     #[test]
     fn unblocking_a_user_lets_future_requests_land_as_pending_again() {
         let store = StateStore::open_in_memory().unwrap();
         let requester = user(2, 1);
-        store.block_group_user(group_id(), &requester, &sample_block_reason(), 1000).unwrap();
+        store
+            .block_group_user(group_id(), &requester, &sample_block_reason(), 1000)
+            .unwrap();
         store.unblock_group_user(group_id(), &requester).unwrap();
 
-        store.store_group_join_request(&GroupJoinRequest { requester, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        assert_eq!(store.list_pending_group_join_requests(group_id()).unwrap().len(), 1, "an unblocked user's request must land as pending again");
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester,
+                group_id: group_id(),
+                sequence: 0,
+                answer: None,
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .list_pending_group_join_requests(group_id())
+                .unwrap()
+                .len(),
+            1,
+            "an unblocked user's request must land as pending again"
+        );
     }
 
     #[test]
@@ -4652,8 +7954,12 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let a = user(2, 1);
         let b = user(2, 2);
-        store.block_group_user(group_id(), &a, &sample_block_reason(), 1000).unwrap();
-        store.block_group_user(group_id(), &b, &sample_block_reason(), 1000).unwrap();
+        store
+            .block_group_user(group_id(), &a, &sample_block_reason(), 1000)
+            .unwrap();
+        store
+            .block_group_user(group_id(), &b, &sample_block_reason(), 1000)
+            .unwrap();
         assert_eq!(store.list_blocked_group_users(group_id()).unwrap().len(), 2);
 
         store.unblock_group_user(group_id(), &a).unwrap();
@@ -4669,12 +7975,39 @@ mod tests {
         let reporter = user(9, 9);
         let blocked = user(2, 1);
         store
-            .store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter, sequence: 0, blocked_user: blocked, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) })
+            .store_group_block_report(&GroupBlockReport {
+                group_id: group_id(),
+                reporter,
+                sequence: 0,
+                blocked_user: blocked,
+                reason: sample_block_reason(),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
             .unwrap();
 
-        assert!(!store.is_group_user_blocked(group_id(), &blocked).unwrap(), "ingesting someone else's report must never cause local enforcement");
-        store.store_group_join_request(&GroupJoinRequest { requester: blocked, group_id: group_id(), sequence: 0, answer: None, issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        assert_eq!(store.list_pending_group_join_requests(group_id()).unwrap().len(), 1, "a foreign report alone must not auto-reject a join request");
+        assert!(
+            !store.is_group_user_blocked(group_id(), &blocked).unwrap(),
+            "ingesting someone else's report must never cause local enforcement"
+        );
+        store
+            .store_group_join_request(&GroupJoinRequest {
+                requester: blocked,
+                group_id: group_id(),
+                sequence: 0,
+                answer: None,
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .list_pending_group_join_requests(group_id())
+                .unwrap()
+                .len(),
+            1,
+            "a foreign report alone must not auto-reject a join request"
+        );
     }
 
     #[test]
@@ -4683,20 +8016,66 @@ mod tests {
         let reporter_a = user(9, 1);
         let reporter_b = user(9, 2);
         let blocked = user(2, 1);
-        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter: reporter_a, sequence: 0, blocked_user: blocked, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter: reporter_b, sequence: 0, blocked_user: blocked, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_group_block_report(&GroupBlockReport {
+                group_id: group_id(),
+                reporter: reporter_a,
+                sequence: 0,
+                blocked_user: blocked,
+                reason: sample_block_reason(),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .store_group_block_report(&GroupBlockReport {
+                group_id: group_id(),
+                reporter: reporter_b,
+                sequence: 0,
+                blocked_user: blocked,
+                reason: sample_block_reason(),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
-        let reports = store.list_group_block_reports_for(group_id(), &blocked).unwrap();
-        assert_eq!(reports.len(), 2, "an owner reviewing this user must see reports from every independent reporter");
+        let reports = store
+            .list_group_block_reports_for(group_id(), &blocked)
+            .unwrap();
+        assert_eq!(
+            reports.len(),
+            2,
+            "an owner reviewing this user must see reports from every independent reporter"
+        );
     }
 
     #[test]
     fn next_group_block_report_sequence_increments_per_reporter() {
         let store = StateStore::open_in_memory().unwrap();
         let reporter = user(9, 1);
-        assert_eq!(store.next_group_block_report_sequence(group_id(), &reporter).unwrap(), 0);
-        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter, sequence: 0, blocked_user: user(2, 1), reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
-        assert_eq!(store.next_group_block_report_sequence(group_id(), &reporter).unwrap(), 1);
+        assert_eq!(
+            store
+                .next_group_block_report_sequence(group_id(), &reporter)
+                .unwrap(),
+            0
+        );
+        store
+            .store_group_block_report(&GroupBlockReport {
+                group_id: group_id(),
+                reporter,
+                sequence: 0,
+                blocked_user: user(2, 1),
+                reason: sample_block_reason(),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .next_group_block_report_sequence(group_id(), &reporter)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -4704,28 +8083,210 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         let bob = user(1, 2);
-        store.ingest_group(&new_group(owner, vec![owner, bob])).unwrap();
         store
-            .store_group_vote(&GroupVote { group_id: group_id(), voter: owner, sequence: 0, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] }, issued_at: 100, expires_at: None, signature: SignatureBytes([0; 64]) })
+            .ingest_group(&new_group(owner, vec![owner, bob]))
             .unwrap();
         store
-            .store_group_vote(&GroupVote { group_id: group_id(), voter: bob, sequence: 0, target: target(), stance: Stance::Allow, reason: Reason { code: ReasonCode::KnownGoodCdn, note: None, evidence: vec![] }, issued_at: 200, expires_at: None, signature: SignatureBytes([0; 64]) })
+            .store_group_vote(&GroupVote {
+                group_id: group_id(),
+                voter: owner,
+                sequence: 0,
+                target: target(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Malware,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 100,
+                expires_at: None,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .store_group_vote(&GroupVote {
+                group_id: group_id(),
+                voter: bob,
+                sequence: 0,
+                target: target(),
+                stance: Stance::Allow,
+                reason: Reason {
+                    code: ReasonCode::KnownGoodCdn,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 200,
+                expires_at: None,
+                signature: SignatureBytes([0; 64]),
+            })
             .unwrap();
         // owner re-casts — a real, distinct event, must not be collapsed.
         store
-            .store_group_vote(&GroupVote { group_id: group_id(), voter: owner, sequence: 1, target: target(), stance: Stance::Allow, reason: Reason { code: ReasonCode::PersonalPreference, note: None, evidence: vec![] }, issued_at: 300, expires_at: None, signature: SignatureBytes([0; 64]) })
+            .store_group_vote(&GroupVote {
+                group_id: group_id(),
+                voter: owner,
+                sequence: 1,
+                target: target(),
+                stance: Stance::Allow,
+                reason: Reason {
+                    code: ReasonCode::PersonalPreference,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 300,
+                expires_at: None,
+                signature: SignatureBytes([0; 64]),
+            })
             .unwrap();
 
         let votes = store.list_group_votes(group_id()).unwrap();
-        assert_eq!(votes.len(), 3, "a re-cast vote is a distinct event, not a dedup target");
-        assert_eq!(votes.iter().map(|v| v.issued_at).collect::<Vec<_>>(), vec![100, 200, 300], "must be chronological");
+        assert_eq!(
+            votes.len(),
+            3,
+            "a re-cast vote is a distinct event, not a dedup target"
+        );
+        assert_eq!(
+            votes.iter().map(|v| v.issued_at).collect::<Vec<_>>(),
+            vec![100, 200, 300],
+            "must be chronological"
+        );
         assert_eq!(votes[2].stance, Stance::Allow);
+    }
+
+    fn policy_vote(
+        policy_id: Hash32,
+        entry_id: Hash32,
+        policy_sequence: u64,
+        voter: UserId,
+        sequence: u64,
+        stance: Stance,
+        expires_at: Option<i64>,
+    ) -> PolicyVote {
+        PolicyVote {
+            policy_id,
+            entry_id,
+            policy_sequence,
+            group_id: group_id(),
+            voter,
+            sequence,
+            stance,
+            reason: Reason {
+                code: ReasonCode::Tracker,
+                note: None,
+                evidence: vec![],
+            },
+            issued_at: sequence as i64,
+            expires_at,
+            signature: SignatureBytes([0; 64]),
+        }
+    }
+
+    #[test]
+    fn policy_votes_round_trip_and_allocate_sequences_per_poll_and_voter() {
+        let store = StateStore::open_in_memory().unwrap();
+        let policy_id = Hash32([7; 32]);
+        let entry_id = Hash32([8; 32]);
+        let voter = user(1, 1);
+        assert_eq!(
+            store
+                .next_policy_vote_sequence(policy_id, entry_id, 0, group_id(), &voter)
+                .unwrap(),
+            0
+        );
+        let vote = policy_vote(policy_id, entry_id, 0, voter, 0, Stance::Deny, None);
+        store.store_policy_vote(&vote).unwrap();
+        store.store_policy_vote(&vote).unwrap();
+        assert_eq!(
+            store
+                .next_policy_vote_sequence(policy_id, entry_id, 0, group_id(), &voter)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_policy_votes(policy_id, entry_id, group_id())
+                .unwrap(),
+            vec![vote]
+        );
+    }
+
+    #[test]
+    fn policy_vote_aggregate_uses_current_members_and_latest_nonexpired_vote() {
+        let store = StateStore::open_in_memory().unwrap();
+        let owner = user(1, 1);
+        let bob = user(1, 2);
+        let removed = user(1, 3);
+        store
+            .ingest_group(&new_group(owner, vec![owner, bob]))
+            .unwrap();
+        let policy_id = Hash32([7; 32]);
+        let entry_id = Hash32([8; 32]);
+        store
+            .store_policy_vote(&policy_vote(
+                policy_id,
+                entry_id,
+                0,
+                owner,
+                0,
+                Stance::Allow,
+                Some(10),
+            ))
+            .unwrap();
+        store
+            .store_policy_vote(&policy_vote(
+                policy_id,
+                entry_id,
+                0,
+                owner,
+                1,
+                Stance::Deny,
+                None,
+            ))
+            .unwrap();
+        store
+            .store_policy_vote(&policy_vote(
+                policy_id,
+                entry_id,
+                0,
+                bob,
+                0,
+                Stance::Deny,
+                None,
+            ))
+            .unwrap();
+        store
+            .store_policy_vote(&policy_vote(
+                policy_id,
+                entry_id,
+                0,
+                removed,
+                0,
+                Stance::Deny,
+                None,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .policy_stance_for(policy_id, entry_id, 0, group_id(), 100)
+                .unwrap(),
+            Some((Stance::Deny, 0, 2))
+        );
+        let breakdown = store
+            .policy_vote_breakdown_for(policy_id, entry_id, 0, group_id(), 100)
+            .unwrap();
+        assert_eq!(breakdown.len(), 2);
+        assert!(breakdown
+            .iter()
+            .all(|(_, vote, counts)| vote.is_some() && *counts));
     }
 
     fn store_with_self(seed: u8) -> (StateStore, UserId) {
         let store = StateStore::open_in_memory().unwrap();
         let me = user(seed, seed);
-        store.set_self_identity(me, PublicKeyBytes([seed; 32]), &[seed; 32], None).unwrap();
+        store
+            .set_self_identity(me, PublicKeyBytes([seed; 32]), &[seed; 32], None)
+            .unwrap();
         (store, me)
     }
 
@@ -4749,7 +8310,10 @@ mod tests {
 
         let summary = store.network_health_summary(1000).unwrap();
         assert_eq!(summary.owned_groups_total, 2);
-        assert_eq!(summary.owned_groups_single_owner, 1, "only the sole-owner group should count as succession risk");
+        assert_eq!(
+            summary.owned_groups_single_owner, 1,
+            "only the sole-owner group should count as succession risk"
+        );
         assert_eq!(summary.attention_items(), 1);
     }
 
@@ -4759,12 +8323,50 @@ mod tests {
         store.ingest_group(&new_group(me, vec![me])).unwrap();
         // A superseded re-affirmation of the same vote — only the later,
         // still-valid one should count, not two separate votes.
-        store.store_group_vote(&GroupVote { group_id: group_id(), voter: me, sequence: 0, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] }, issued_at: 0, expires_at: Some(50), signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_group_vote(&GroupVote { group_id: group_id(), voter: me, sequence: 1, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] }, issued_at: 0, expires_at: Some(100), signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_group_vote(&GroupVote {
+                group_id: group_id(),
+                voter: me,
+                sequence: 0,
+                target: target(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 0,
+                expires_at: Some(50),
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .store_group_vote(&GroupVote {
+                group_id: group_id(),
+                voter: me,
+                sequence: 1,
+                target: target(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 0,
+                expires_at: Some(100),
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let summary = store.network_health_summary(75).unwrap();
-        assert_eq!(summary.own_votes_total, 1, "a superseded vote on the same target must not be double-counted");
-        assert_eq!(summary.own_votes_expired, 0, "the latest vote (expires at 100) has not expired yet at t=75");
+        assert_eq!(
+            summary.own_votes_total, 1,
+            "a superseded vote on the same target must not be double-counted"
+        );
+        assert_eq!(
+            summary.own_votes_expired, 0,
+            "the latest vote (expires at 100) has not expired yet at t=75"
+        );
 
         let summary_later = store.network_health_summary(150).unwrap();
         assert_eq!(summary_later.own_votes_expired, 1);
@@ -4782,14 +8384,44 @@ mod tests {
         let stranger = user(3, 3);
         store.upsert_follow(&follow(trusted, 1.0, 1.0)).unwrap();
         // A report against someone this router does NOT follow must not count.
-        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter: user(9, 1), sequence: 0, blocked_user: stranger, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_group_block_report(&GroupBlockReport {
+                group_id: group_id(),
+                reporter: user(9, 1),
+                sequence: 0,
+                blocked_user: stranger,
+                reason: sample_block_reason(),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
         let summary = store.network_health_summary(1000).unwrap();
         assert_eq!(summary.trusted_peers_with_block_reports, 0);
 
-        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter: user(9, 1), sequence: 1, blocked_user: trusted, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_group_block_report(&GroupBlockReport {
+                group_id: group_id(),
+                reporter: user(9, 1),
+                sequence: 1,
+                blocked_user: trusted,
+                reason: sample_block_reason(),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
         // A second, independent report against the same trusted peer must
         // not inflate the count — this counts *peers*, not *reports*.
-        store.store_group_block_report(&GroupBlockReport { group_id: group_id(), reporter: user(9, 2), sequence: 0, blocked_user: trusted, reason: sample_block_reason(), issued_at: 0, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_group_block_report(&GroupBlockReport {
+                group_id: group_id(),
+                reporter: user(9, 2),
+                sequence: 0,
+                blocked_user: trusted,
+                reason: sample_block_reason(),
+                issued_at: 0,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
         let summary = store.network_health_summary(1000).unwrap();
         assert_eq!(summary.trusted_peers_with_block_reports, 1);
         assert_eq!(summary.attention_items(), 1);
@@ -4800,11 +8432,19 @@ mod tests {
     fn network_health_summary_reports_follow_coverage() {
         let (store, _me) = store_with_self(1);
         store.upsert_follow(&follow(user(2, 2), 1.0, 1.0)).unwrap();
-        store.upsert_follow(&LocalTrustRule { display_name: Some("alice".into()), ..follow(user(3, 3), 1.0, 1.0) }).unwrap();
+        store
+            .upsert_follow(&LocalTrustRule {
+                display_name: Some("alice".into()),
+                ..follow(user(3, 3), 1.0, 1.0)
+            })
+            .unwrap();
 
         let summary = store.network_health_summary(1000).unwrap();
         assert_eq!(summary.follows_total, 2);
-        assert_eq!(summary.follows_with_display_name, 1, "coverage is informational only, never folded into attention_items");
+        assert_eq!(
+            summary.follows_with_display_name, 1,
+            "coverage is informational only, never folded into attention_items"
+        );
         assert_eq!(summary.attention_items(), 0);
     }
 
@@ -4816,7 +8456,11 @@ mod tests {
                 sequence,
                 target: target(),
                 stance,
-                reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] },
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
                 issued_at: 0,
                 expires_at: None,
                 signature: SignatureBytes([0; 64]),
@@ -4827,8 +8471,13 @@ mod tests {
     #[test]
     fn group_stance_for_is_none_with_no_votes() {
         let store = StateStore::open_in_memory().unwrap();
-        store.ingest_group(&new_group(user(1, 1), vec![user(1, 1)])).unwrap();
-        assert_eq!(store.group_stance_for(group_id(), &target(), 1000).unwrap(), None);
+        store
+            .ingest_group(&new_group(user(1, 1), vec![user(1, 1)]))
+            .unwrap();
+        assert_eq!(
+            store.group_stance_for(group_id(), &target(), 1000).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -4837,12 +8486,17 @@ mod tests {
         let owner = user(1, 1);
         let bob = user(1, 2);
         let carol = user(1, 3);
-        store.ingest_group(&new_group(owner, vec![owner, bob, carol])).unwrap();
+        store
+            .ingest_group(&new_group(owner, vec![owner, bob, carol]))
+            .unwrap();
         cast_vote(&store, owner, 0, Stance::Deny);
         cast_vote(&store, bob, 0, Stance::Deny);
         cast_vote(&store, carol, 0, Stance::Allow);
 
-        assert_eq!(store.group_stance_for(group_id(), &target(), 1000).unwrap(), Some((Stance::Deny, 1, 2)));
+        assert_eq!(
+            store.group_stance_for(group_id(), &target(), 1000).unwrap(),
+            Some((Stance::Deny, 1, 2))
+        );
     }
 
     #[test]
@@ -4850,11 +8504,17 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         let bob = user(1, 2);
-        store.ingest_group(&new_group(owner, vec![owner, bob])).unwrap();
+        store
+            .ingest_group(&new_group(owner, vec![owner, bob]))
+            .unwrap();
         cast_vote(&store, owner, 0, Stance::Deny);
         cast_vote(&store, bob, 0, Stance::Allow);
 
-        assert_eq!(store.group_stance_for(group_id(), &target(), 1000).unwrap(), None, "a genuine tie must not silently pick a winner");
+        assert_eq!(
+            store.group_stance_for(group_id(), &target(), 1000).unwrap(),
+            None,
+            "a genuine tie must not silently pick a winner"
+        );
     }
 
     #[test]
@@ -4863,10 +8523,16 @@ mod tests {
         let owner = user(1, 1);
         let removed = user(1, 2);
         // `removed` votes while still a voting member...
-        store.ingest_group(&new_group(owner, vec![owner, removed])).unwrap();
+        store
+            .ingest_group(&new_group(owner, vec![owner, removed]))
+            .unwrap();
         cast_vote(&store, removed, 0, Stance::Deny);
         cast_vote(&store, owner, 0, Stance::Allow);
-        assert_eq!(store.group_stance_for(group_id(), &target(), 1000).unwrap(), None, "tied 1-1 while still a member");
+        assert_eq!(
+            store.group_stance_for(group_id(), &target(), 1000).unwrap(),
+            None,
+            "tied 1-1 while still a member"
+        );
 
         // ...then gets removed from voting membership in a new version.
         let mut v2 = new_group(owner, vec![owner]);
@@ -4874,7 +8540,11 @@ mod tests {
         v2.supersedes = Some(0);
         store.ingest_group(&v2).unwrap();
 
-        assert_eq!(store.group_stance_for(group_id(), &target(), 1000).unwrap(), Some((Stance::Allow, 1, 0)), "a removed member's vote must no longer count");
+        assert_eq!(
+            store.group_stance_for(group_id(), &target(), 1000).unwrap(),
+            Some((Stance::Allow, 1, 0)),
+            "a removed member's vote must no longer count"
+        );
     }
 
     #[test]
@@ -4884,10 +8554,28 @@ mod tests {
         store.ingest_group(&new_group(owner, vec![owner])).unwrap();
         cast_vote(&store, owner, 0, Stance::Deny);
         store
-            .store_group_vote(&GroupVote { group_id: group_id(), voter: owner, sequence: 1, target: target(), stance: Stance::Allow, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] }, issued_at: 0, expires_at: Some(100), signature: SignatureBytes([0; 64]) })
+            .store_group_vote(&GroupVote {
+                group_id: group_id(),
+                voter: owner,
+                sequence: 1,
+                target: target(),
+                stance: Stance::Allow,
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 0,
+                expires_at: Some(100),
+                signature: SignatureBytes([0; 64]),
+            })
             .unwrap();
 
-        assert_eq!(store.group_stance_for(group_id(), &target(), 200).unwrap(), None, "the latest vote is expired — must not fall back to the older Deny vote");
+        assert_eq!(
+            store.group_stance_for(group_id(), &target(), 200).unwrap(),
+            None,
+            "the latest vote is expired — must not fall back to the older Deny vote"
+        );
     }
 
     #[test]
@@ -4896,15 +8584,29 @@ mod tests {
         let owner = user(1, 1);
         let bob = user(1, 2);
         let carol = user(1, 3);
-        store.ingest_group(&new_group(owner, vec![owner, bob, carol])).unwrap();
+        store
+            .ingest_group(&new_group(owner, vec![owner, bob, carol]))
+            .unwrap();
         cast_vote(&store, owner, 0, Stance::Deny);
         cast_vote(&store, bob, 0, Stance::Allow);
         // carol never votes at all.
 
-        let breakdown = store.group_vote_breakdown_for(group_id(), &target(), 1000).unwrap();
-        assert_eq!(breakdown.len(), 3, "every current voting member must appear, voted or not");
+        let breakdown = store
+            .group_vote_breakdown_for(group_id(), &target(), 1000)
+            .unwrap();
+        assert_eq!(
+            breakdown.len(),
+            3,
+            "every current voting member must appear, voted or not"
+        );
 
-        let entry = |voter: UserId| breakdown.iter().find(|(v, _, _)| *v == voter).unwrap().clone();
+        let entry = |voter: UserId| {
+            breakdown
+                .iter()
+                .find(|(v, _, _)| *v == voter)
+                .unwrap()
+                .clone()
+        };
         let (_, owner_vote, owner_counts) = entry(owner);
         assert_eq!(owner_vote.unwrap().stance, Stance::Deny);
         assert!(owner_counts);
@@ -4914,7 +8616,10 @@ mod tests {
         assert!(bob_counts);
 
         let (_, carol_vote, carol_counts) = entry(carol);
-        assert!(carol_vote.is_none(), "a member who never voted must show up with no vote, not be omitted");
+        assert!(
+            carol_vote.is_none(),
+            "a member who never voted must show up with no vote, not be omitted"
+        );
         assert!(!carol_counts);
     }
 
@@ -4924,14 +8629,37 @@ mod tests {
         let owner = user(1, 1);
         store.ingest_group(&new_group(owner, vec![owner])).unwrap();
         store
-            .store_group_vote(&GroupVote { group_id: group_id(), voter: owner, sequence: 0, target: target(), stance: Stance::Deny, reason: Reason { code: ReasonCode::Tracker, note: None, evidence: vec![] }, issued_at: 0, expires_at: Some(100), signature: SignatureBytes([0; 64]) })
+            .store_group_vote(&GroupVote {
+                group_id: group_id(),
+                voter: owner,
+                sequence: 0,
+                target: target(),
+                stance: Stance::Deny,
+                reason: Reason {
+                    code: ReasonCode::Tracker,
+                    note: None,
+                    evidence: vec![],
+                },
+                issued_at: 0,
+                expires_at: Some(100),
+                signature: SignatureBytes([0; 64]),
+            })
             .unwrap();
 
-        let breakdown = store.group_vote_breakdown_for(group_id(), &target(), 200).unwrap();
+        let breakdown = store
+            .group_vote_breakdown_for(group_id(), &target(), 200)
+            .unwrap();
         assert_eq!(breakdown.len(), 1);
         let (_, vote, counts) = &breakdown[0];
-        assert_eq!(vote.as_ref().unwrap().stance, Stance::Deny, "the expired vote must still be visible for review");
-        assert!(!counts, "an expired vote must be marked as not currently counting");
+        assert_eq!(
+            vote.as_ref().unwrap().stance,
+            Stance::Deny,
+            "the expired vote must still be visible for review"
+        );
+        assert!(
+            !counts,
+            "an expired vote must be marked as not currently counting"
+        );
     }
 
     #[test]
@@ -4939,7 +8667,9 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         let removed = user(1, 2);
-        store.ingest_group(&new_group(owner, vec![owner, removed])).unwrap();
+        store
+            .ingest_group(&new_group(owner, vec![owner, removed]))
+            .unwrap();
         cast_vote(&store, removed, 0, Stance::Deny);
 
         let mut v2 = new_group(owner, vec![owner]);
@@ -4947,8 +8677,14 @@ mod tests {
         v2.supersedes = Some(0);
         store.ingest_group(&v2).unwrap();
 
-        let breakdown = store.group_vote_breakdown_for(group_id(), &target(), 1000).unwrap();
-        assert_eq!(breakdown.len(), 1, "a member removed from voting rights must no longer appear in the breakdown");
+        let breakdown = store
+            .group_vote_breakdown_for(group_id(), &target(), 1000)
+            .unwrap();
+        assert_eq!(
+            breakdown.len(),
+            1,
+            "a member removed from voting rights must no longer appear in the breakdown"
+        );
         assert_eq!(breakdown[0].0, owner);
     }
 
@@ -4958,15 +8694,39 @@ mod tests {
         let owner = user(1, 1);
         store.ingest_group(&new_group(owner, vec![owner])).unwrap();
         cast_vote(&store, owner, 0, Stance::Deny);
-        store.upsert_group_trust_rule(&GroupTrustRule { group_id: group_id(), allow_weight: 1.0, deny_weight: 1.0, excluded: false, expires_at: None, created_at: 0 }).unwrap();
+        store
+            .upsert_group_trust_rule(&GroupTrustRule {
+                group_id: group_id(),
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                excluded: false,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
 
         let got = store.list_group_contributions_for(&target(), 1000).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, group_id());
         assert_eq!(got[0].1, Stance::Deny);
 
-        store.upsert_group_trust_rule(&GroupTrustRule { group_id: group_id(), allow_weight: 1.0, deny_weight: 1.0, excluded: true, expires_at: None, created_at: 0 }).unwrap();
-        assert!(store.list_group_contributions_for(&target(), 1000).unwrap().is_empty(), "an excluded group must not contribute");
+        store
+            .upsert_group_trust_rule(&GroupTrustRule {
+                group_id: group_id(),
+                allow_weight: 1.0,
+                deny_weight: 1.0,
+                excluded: true,
+                expires_at: None,
+                created_at: 0,
+            })
+            .unwrap();
+        assert!(
+            store
+                .list_group_contributions_for(&target(), 1000)
+                .unwrap()
+                .is_empty(),
+            "an excluded group must not contribute"
+        );
     }
 
     #[test]
@@ -4974,9 +8734,31 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         let bob = user(1, 2);
-        store.ingest_group(&new_group(alice, vec![alice, bob])).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: alice, sequence: 0, body: "hello".into(), in_reply_to: None, issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: bob, sequence: 0, body: "hi back".into(), in_reply_to: None, issued_at: 200, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .ingest_group(&new_group(alice, vec![alice, bob]))
+            .unwrap();
+        store
+            .store_party_line_message(&PartyLineMessage {
+                group_id: group_id(),
+                author: alice,
+                sequence: 0,
+                body: "hello".into(),
+                in_reply_to: None,
+                issued_at: 100,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .store_party_line_message(&PartyLineMessage {
+                group_id: group_id(),
+                author: bob,
+                sequence: 0,
+                body: "hi back".into(),
+                in_reply_to: None,
+                issued_at: 200,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let got = store.list_party_line_messages(group_id()).unwrap();
         assert_eq!(got.len(), 2);
@@ -5000,12 +8782,29 @@ mod tests {
                 signature: SignatureBytes([0; 64]),
             })
             .unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: owner, sequence: 1, body: "plain message".into(), in_reply_to: None, issued_at: 200, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_party_line_message(&PartyLineMessage {
+                group_id: group_id(),
+                author: owner,
+                sequence: 1,
+                body: "plain message".into(),
+                in_reply_to: None,
+                issued_at: 200,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let got = store.list_party_line_messages(group_id()).unwrap();
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].in_reply_to, Some(target()), "a reply target must round-trip exactly");
-        assert_eq!(got[1].in_reply_to, None, "a plain message must round-trip with no reply target");
+        assert_eq!(
+            got[0].in_reply_to,
+            Some(target()),
+            "a reply target must round-trip exactly"
+        );
+        assert_eq!(
+            got[1].in_reply_to, None,
+            "a plain message must round-trip with no reply target"
+        );
     }
 
     #[test]
@@ -5014,11 +8813,35 @@ mod tests {
         let owner = user(1, 1);
         let stranger = user(1, 9);
         store.ingest_group(&new_group(owner, vec![owner])).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: owner, sequence: 0, body: "welcome".into(), in_reply_to: None, issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: stranger, sequence: 0, body: "spam".into(), in_reply_to: None, issued_at: 200, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_party_line_message(&PartyLineMessage {
+                group_id: group_id(),
+                author: owner,
+                sequence: 0,
+                body: "welcome".into(),
+                in_reply_to: None,
+                issued_at: 100,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        store
+            .store_party_line_message(&PartyLineMessage {
+                group_id: group_id(),
+                author: stranger,
+                sequence: 0,
+                body: "spam".into(),
+                in_reply_to: None,
+                issued_at: 200,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
         let got = store.list_party_line_messages(group_id()).unwrap();
-        assert_eq!(got.len(), 1, "a non-member's message must never surface, even though storage itself is ungated");
+        assert_eq!(
+            got.len(),
+            1,
+            "a non-member's message must never surface, even though storage itself is ungated"
+        );
         assert_eq!(got[0].body, "welcome");
     }
 
@@ -5027,9 +8850,25 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let owner = user(1, 1);
         let member = user(1, 2);
-        store.ingest_group(&new_group(owner, vec![owner, member])).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: member, sequence: 0, body: "hi".into(), in_reply_to: None, issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
-        assert_eq!(store.list_party_line_messages(group_id()).unwrap().len(), 1, "unmoderated: any current member may post");
+        store
+            .ingest_group(&new_group(owner, vec![owner, member]))
+            .unwrap();
+        store
+            .store_party_line_message(&PartyLineMessage {
+                group_id: group_id(),
+                author: member,
+                sequence: 0,
+                body: "hi".into(),
+                in_reply_to: None,
+                issued_at: 100,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
+        assert_eq!(
+            store.list_party_line_messages(group_id()).unwrap().len(),
+            1,
+            "unmoderated: any current member may post"
+        );
 
         let mut moderated = new_group(owner, vec![owner, member]);
         moderated.sequence = 1;
@@ -5049,18 +8888,41 @@ mod tests {
         moderated.party_line_moderated = true;
         moderated.voiced_members = vec![member];
         store.ingest_group(&moderated).unwrap();
-        store.store_party_line_message(&PartyLineMessage { group_id: group_id(), author: member, sequence: 0, body: "hi".into(), in_reply_to: None, issued_at: 100, signature: SignatureBytes([0; 64]) }).unwrap();
+        store
+            .store_party_line_message(&PartyLineMessage {
+                group_id: group_id(),
+                author: member,
+                sequence: 0,
+                body: "hi".into(),
+                in_reply_to: None,
+                issued_at: 100,
+                signature: SignatureBytes([0; 64]),
+            })
+            .unwrap();
 
-        assert_eq!(store.list_party_line_messages(group_id()).unwrap().len(), 1, "an explicitly voiced member must be able to post while moderated");
+        assert_eq!(
+            store.list_party_line_messages(group_id()).unwrap().len(),
+            1,
+            "an explicitly voiced member must be able to post while moderated"
+        );
     }
 
-    fn device_opinion(author: UserId, sequence: u64, mac: &str, stance: Stance) -> DeviceApprovalOpinion {
+    fn device_opinion(
+        author: UserId,
+        sequence: u64,
+        mac: &str,
+        stance: Stance,
+    ) -> DeviceApprovalOpinion {
         DeviceApprovalOpinion {
             author,
             sequence,
             mac: mac.to_string(),
             stance,
-            reason: Reason { code: ReasonCode::Malware, note: None, evidence: vec![] },
+            reason: Reason {
+                code: ReasonCode::Malware,
+                note: None,
+                evidence: vec![],
+            },
             device_label: Some("some-iot-thing".into()),
             issued_at: 100,
             expires_at: None,
@@ -5069,14 +8931,30 @@ mod tests {
         }
     }
     fn follow(user: UserId, allow_weight: f64, deny_weight: f64) -> LocalTrustRule {
-        LocalTrustRule { user, allow_weight, deny_weight, advisory_only: false, excluded: false, category_filter: None, display_name: None, iroh_node_id: None, expires_at: None, created_at: 0 }
+        LocalTrustRule {
+            user,
+            allow_weight,
+            deny_weight,
+            advisory_only: false,
+            excluded: false,
+            category_filter: None,
+            display_name: None,
+            iroh_node_id: None,
+            expires_at: None,
+            created_at: 0,
+        }
     }
 
     #[test]
     fn ingest_device_approval_opinion_rejects_an_unfollowed_author() {
         let store = StateStore::open_in_memory().unwrap();
         let stranger = user(1, 1);
-        let result = store.ingest_device_approval_opinion(&device_opinion(stranger, 0, "aa:bb:cc:dd:ee:ff", Stance::Deny));
+        let result = store.ingest_device_approval_opinion(&device_opinion(
+            stranger,
+            0,
+            "aa:bb:cc:dd:ee:ff",
+            Stance::Deny,
+        ));
         assert!(matches!(result, Err(StoreError::NotFollowed(_))));
     }
 
@@ -5085,26 +8963,53 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         store.upsert_follow(&follow(alice, 1.0, 1.0)).unwrap();
-        store.ingest_device_approval_opinion(&device_opinion(alice, 0, "aa:bb:cc:dd:ee:ff", Stance::Deny)).unwrap();
+        store
+            .ingest_device_approval_opinion(&device_opinion(
+                alice,
+                0,
+                "aa:bb:cc:dd:ee:ff",
+                Stance::Deny,
+            ))
+            .unwrap();
 
-        let got = store.list_device_approval_opinions_for("aa:bb:cc:dd:ee:ff").unwrap();
+        let got = store
+            .list_device_approval_opinions_for("aa:bb:cc:dd:ee:ff")
+            .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0.stance, Stance::Deny);
-        assert!(got[0].1.is_some(), "a followed author's opinion must carry its trust rule");
+        assert!(
+            got[0].1.is_some(),
+            "a followed author's opinion must carry its trust rule"
+        );
     }
 
     #[test]
     fn store_own_device_approval_opinion_needs_no_follow() {
         let store = StateStore::open_in_memory().unwrap();
         let me = user(1, 1);
-        store.store_own_device_approval_opinion(&device_opinion(me, 0, "aa:bb:cc:dd:ee:ff", Stance::Allow)).unwrap();
-        assert_eq!(store.list_device_approval_opinions_for("aa:bb:cc:dd:ee:ff").unwrap().len(), 1);
+        store
+            .store_own_device_approval_opinion(&device_opinion(
+                me,
+                0,
+                "aa:bb:cc:dd:ee:ff",
+                Stance::Allow,
+            ))
+            .unwrap();
+        assert_eq!(
+            store
+                .list_device_approval_opinions_for("aa:bb:cc:dd:ee:ff")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn device_approval_stance_for_is_no_decision_with_no_opinions() {
         let store = StateStore::open_in_memory().unwrap();
-        let (decision, allow, deny) = store.device_approval_stance_for("aa:bb:cc:dd:ee:ff", 1000, 1.0).unwrap();
+        let (decision, allow, deny) = store
+            .device_approval_stance_for("aa:bb:cc:dd:ee:ff", 1000, 1.0)
+            .unwrap();
         assert_eq!(decision, domain_types::Decision::NoDecision);
         assert_eq!(allow, 0.0);
         assert_eq!(deny, 0.0);
@@ -5115,9 +9020,18 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         store.upsert_follow(&follow(alice, 1.0, 1.0)).unwrap();
-        store.ingest_device_approval_opinion(&device_opinion(alice, 0, "aa:bb:cc:dd:ee:ff", Stance::Deny)).unwrap();
+        store
+            .ingest_device_approval_opinion(&device_opinion(
+                alice,
+                0,
+                "aa:bb:cc:dd:ee:ff",
+                Stance::Deny,
+            ))
+            .unwrap();
 
-        let (decision, allow, deny) = store.device_approval_stance_for("aa:bb:cc:dd:ee:ff", 1000, 1.0).unwrap();
+        let (decision, allow, deny) = store
+            .device_approval_stance_for("aa:bb:cc:dd:ee:ff", 1000, 1.0)
+            .unwrap();
         assert_eq!(decision, domain_types::Decision::Deny);
         assert_eq!(allow, 0.0);
         assert_eq!(deny, 1.0);
@@ -5130,10 +9044,23 @@ mod tests {
         let mut rule = follow(alice, 1.0, 1.0);
         rule.excluded = true;
         store.upsert_follow(&rule).unwrap();
-        store.ingest_device_approval_opinion(&device_opinion(alice, 0, "aa:bb:cc:dd:ee:ff", Stance::Deny)).unwrap();
+        store
+            .ingest_device_approval_opinion(&device_opinion(
+                alice,
+                0,
+                "aa:bb:cc:dd:ee:ff",
+                Stance::Deny,
+            ))
+            .unwrap();
 
-        let (decision, _, _) = store.device_approval_stance_for("aa:bb:cc:dd:ee:ff", 1000, 1.0).unwrap();
-        assert_eq!(decision, domain_types::Decision::NoDecision, "an excluded author's opinion must not contribute");
+        let (decision, _, _) = store
+            .device_approval_stance_for("aa:bb:cc:dd:ee:ff", 1000, 1.0)
+            .unwrap();
+        assert_eq!(
+            decision,
+            domain_types::Decision::NoDecision,
+            "an excluded author's opinion must not contribute"
+        );
     }
 
     #[test]
@@ -5143,10 +9070,26 @@ mod tests {
         let bob = user(1, 2);
         store.upsert_follow(&follow(alice, 1.0, 1.0)).unwrap();
         store.upsert_follow(&follow(bob, 1.0, 1.0)).unwrap();
-        store.ingest_device_approval_opinion(&device_opinion(alice, 0, "aa:bb:cc:dd:ee:ff", Stance::Allow)).unwrap();
-        store.ingest_device_approval_opinion(&device_opinion(bob, 0, "aa:bb:cc:dd:ee:ff", Stance::Deny)).unwrap();
+        store
+            .ingest_device_approval_opinion(&device_opinion(
+                alice,
+                0,
+                "aa:bb:cc:dd:ee:ff",
+                Stance::Allow,
+            ))
+            .unwrap();
+        store
+            .ingest_device_approval_opinion(&device_opinion(
+                bob,
+                0,
+                "aa:bb:cc:dd:ee:ff",
+                Stance::Deny,
+            ))
+            .unwrap();
 
-        let (decision, allow, deny) = store.device_approval_stance_for("aa:bb:cc:dd:ee:ff", 1000, 1.0).unwrap();
+        let (decision, allow, deny) = store
+            .device_approval_stance_for("aa:bb:cc:dd:ee:ff", 1000, 1.0)
+            .unwrap();
         assert_eq!(decision, domain_types::Decision::Ask);
         assert_eq!(allow, 1.0);
         assert_eq!(deny, 1.0);
@@ -5157,9 +9100,19 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         store.upsert_follow(&follow(alice, 1.0, 1.0)).unwrap();
-        store.ingest_device_approval_opinion(&device_opinion(alice, 0, "aa:bb:cc:dd:ee:ff", Stance::Deny)).unwrap();
+        store
+            .ingest_device_approval_opinion(&device_opinion(
+                alice,
+                0,
+                "aa:bb:cc:dd:ee:ff",
+                Stance::Deny,
+            ))
+            .unwrap();
 
-        assert!(store.list_device_approval_opinions_for("11:22:33:44:55:66").unwrap().is_empty());
+        assert!(store
+            .list_device_approval_opinions_for("11:22:33:44:55:66")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -5167,12 +9120,43 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let alice = user(1, 1);
         store.upsert_follow(&follow(alice, 1.0, 1.0)).unwrap();
-        store.ingest_device_approval_opinion(&device_opinion(alice, 0, "aa:bb:cc:dd:ee:ff", Stance::Deny)).unwrap();
-        store.ingest_device_approval_opinion(&device_opinion(alice, 1, "11:22:33:44:55:66", Stance::Allow)).unwrap();
+        store
+            .ingest_device_approval_opinion(&device_opinion(
+                alice,
+                0,
+                "aa:bb:cc:dd:ee:ff",
+                Stance::Deny,
+            ))
+            .unwrap();
+        store
+            .ingest_device_approval_opinion(&device_opinion(
+                alice,
+                1,
+                "11:22:33:44:55:66",
+                Stance::Allow,
+            ))
+            .unwrap();
 
         let got = store.list_all_device_approval_opinions().unwrap();
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].mac, "11:22:33:44:55:66", "expected mac-ordered output");
+        assert_eq!(
+            got[0].mac, "11:22:33:44:55:66",
+            "expected mac-ordered output"
+        );
         assert_eq!(got[1].mac, "aa:bb:cc:dd:ee:ff");
+    }
+
+    #[test]
+    fn outbox_retries_with_deterministic_exponential_backoff() {
+        let store = StateStore::open_in_memory().unwrap();
+        let id = store.enqueue_outbox("node-b", 5, b"payload", 100).unwrap();
+        assert_eq!(store.list_due_outbox(99).unwrap().len(), 0);
+        assert_eq!(store.list_due_outbox(100).unwrap()[0].attempts, 0);
+        store.mark_outbox_failure(id, "offline", 100).unwrap();
+        let due = store.list_due_outbox(101).unwrap();
+        assert_eq!(due[0].attempts, 1);
+        assert_eq!(due[0].last_error.as_deref(), Some("offline"));
+        store.mark_outbox_success(id).unwrap();
+        assert!(store.list_due_outbox(10_000).unwrap().is_empty());
     }
 }

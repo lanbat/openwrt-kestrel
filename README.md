@@ -26,6 +26,7 @@ Two cooperating toolkits for OpenWrt routers, delivered as a single native packa
 **Decentralized firewall policy** ([`social-firewall`](social-firewall/), optional, fully independent of everything above)
 - Routers publish signed, reason-required opinions on domains/IPs and follow other routers with a trust weight; a cron-driven applier aggregates followed opinions into real nftables enforcement, in its own dedicated table
 - Entirely separate package (`sh install.sh social-firewall`) — neither depends on nor is required by `kestrel`
+- Fingerprint/key/UI integration details are documented in [`social-firewall/docs/fingerprints-and-ui.md`](social-firewall/docs/fingerprints-and-ui.md)
 
 ## Components
 

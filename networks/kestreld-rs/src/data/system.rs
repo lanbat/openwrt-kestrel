@@ -44,24 +44,30 @@ pub async fn fetch() -> SystemInfo {
                     avail = rest.split_whitespace().next()?.parse().ok()?;
                 }
             }
-            Some(format!("{} MB free / {} MB total", avail / 1024, total / 1024))
+            Some(format!(
+                "{} MB free / {} MB total",
+                avail / 1024,
+                total / 1024
+            ))
         })
         .unwrap_or_default();
 
     let load = tokio::fs::read_to_string("/proc/loadavg")
         .await
         .ok()
-        .map(|s| {
-            s.split_whitespace()
-                .take(3)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
+        .map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
         .unwrap_or_default();
 
     let (wan_ip, wan_ipv6) = fetch_wan_ips().await;
 
-    SystemInfo { hostname, uptime, memory, load, wan_ip, wan_ipv6 }
+    SystemInfo {
+        hostname,
+        uptime,
+        memory,
+        load,
+        wan_ip,
+        wan_ipv6,
+    }
 }
 
 async fn fetch_wan_ips() -> (Option<String>, Option<String>) {
@@ -77,7 +83,10 @@ async fn fetch_wan_ips() -> (Option<String>, Option<String>) {
         std::str::from_utf8(&o.stdout).ok().and_then(|s| {
             s.lines().next().and_then(|line| {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                parts.windows(2).find(|w| w[0] == "dev").map(|w| w[1].to_string())
+                parts
+                    .windows(2)
+                    .find(|w| w[0] == "dev")
+                    .map(|w| w[1].to_string())
             })
         })
     });

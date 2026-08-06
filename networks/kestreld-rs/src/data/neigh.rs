@@ -41,9 +41,7 @@ pub async fn fetch() -> NeighTable {
             }
         } else {
             // Still track reachability even without MAC (for IPv6)
-            table
-                .by_ip
-                .insert(ip.to_string(), (String::new(), state));
+            table.by_ip.insert(ip.to_string(), (String::new(), state));
         }
     }
 
@@ -67,9 +65,7 @@ impl NeighTable {
     pub fn is_reachable(&self, ip: &str) -> bool {
         self.by_ip
             .get(ip)
-            .map(|(_, state)| {
-                matches!(state.as_str(), "REACHABLE" | "DELAY" | "PROBE")
-            })
+            .map(|(_, state)| matches!(state.as_str(), "REACHABLE" | "DELAY" | "PROBE"))
             .unwrap_or(false)
     }
 
@@ -95,11 +91,26 @@ mod tests {
 
     fn make_table() -> NeighTable {
         let mut t = NeighTable::default();
-        t.by_ip.insert("192.168.1.1".to_string(), ("aa:bb:cc:dd:ee:ff".to_string(), "REACHABLE".to_string()));
-        t.by_ip.insert("192.168.1.2".to_string(), ("11:22:33:44:55:66".to_string(), "STALE".to_string()));
-        t.by_ip.insert("192.168.1.3".to_string(), ("77:88:99:aa:bb:cc".to_string(), "DELAY".to_string()));
-        t.by_ip.insert("192.168.1.4".to_string(), ("".to_string(), "REACHABLE".to_string()));
-        t.ip6_by_mac.insert("aa:bb:cc:dd:ee:ff".to_string(), vec!["2001:db8::1".to_string()]);
+        t.by_ip.insert(
+            "192.168.1.1".to_string(),
+            ("aa:bb:cc:dd:ee:ff".to_string(), "REACHABLE".to_string()),
+        );
+        t.by_ip.insert(
+            "192.168.1.2".to_string(),
+            ("11:22:33:44:55:66".to_string(), "STALE".to_string()),
+        );
+        t.by_ip.insert(
+            "192.168.1.3".to_string(),
+            ("77:88:99:aa:bb:cc".to_string(), "DELAY".to_string()),
+        );
+        t.by_ip.insert(
+            "192.168.1.4".to_string(),
+            ("".to_string(), "REACHABLE".to_string()),
+        );
+        t.ip6_by_mac.insert(
+            "aa:bb:cc:dd:ee:ff".to_string(),
+            vec!["2001:db8::1".to_string()],
+        );
         t
     }
 

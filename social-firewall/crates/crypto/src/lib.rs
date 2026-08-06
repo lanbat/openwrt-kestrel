@@ -11,7 +11,9 @@
 //! unambiguous, so a signature for one context can never be
 //! reinterpreted as valid for another.
 
-use crypto_box::{aead::rand_core::OsRng as BoxOsRng, PublicKey as BoxPublicKey, SecretKey as BoxSecretKey};
+use crypto_box::{
+    aead::rand_core::OsRng as BoxOsRng, PublicKey as BoxPublicKey, SecretKey as BoxSecretKey,
+};
 use domain_types::{Hash32, MessagingPublicKeyBytes, PublicKeyBytes, SignatureBytes};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
@@ -27,13 +29,19 @@ pub mod contexts {
     pub const TUNNEL_CONNECTION_REQUEST: &[u8] = b"social-firewall.tunnel-connection-request.v1";
     pub const TUNNEL_CONNECTION_ACCEPT: &[u8] = b"social-firewall.tunnel-connection-accept.v1";
     pub const SHARED_RULE_LIST: &[u8] = b"social-firewall.shared-rule-list.v1";
+    pub const SHARED_POLICY: &[u8] = b"social-firewall.shared-policy.v1";
     pub const GROUP: &[u8] = b"social-firewall.group.v1";
     pub const GROUP_JOIN_REQUEST: &[u8] = b"social-firewall.group-join-request.v1";
     pub const GROUP_VOTE: &[u8] = b"social-firewall.group-vote.v1";
+    pub const POLICY_VOTE: &[u8] = b"social-firewall.policy-vote.v1";
+    pub const FINGERPRINT_OBSERVATION: &[u8] = b"social-firewall.fingerprint-observation.v1";
+    pub const FINGERPRINT_COMMENT: &[u8] = b"social-firewall.fingerprint-comment.v1";
     pub const PARTY_LINE_MESSAGE: &[u8] = b"social-firewall.party-line-message.v1";
     pub const DEVICE_APPROVAL_OPINION: &[u8] = b"social-firewall.device-approval-opinion.v1";
     pub const GROUP_BLOCK_REPORT: &[u8] = b"social-firewall.group-block-report.v1";
 }
+
+pub mod shared_fingerprint;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptoError {
@@ -64,7 +72,9 @@ impl Keypair {
     /// hardware keystore to target uniformly across OpenWrt devices —
     /// documented as a known limitation, not solved here).
     pub fn from_seed(seed: &[u8; 32]) -> Self {
-        Self { signing_key: SigningKey::from_bytes(seed) }
+        Self {
+            signing_key: SigningKey::from_bytes(seed),
+        }
     }
 
     pub fn seed_bytes(&self) -> [u8; 32] {
@@ -94,13 +104,17 @@ pub struct MessagingKeypair {
 
 impl MessagingKeypair {
     pub fn generate() -> Self {
-        Self { secret_key: BoxSecretKey::generate(&mut BoxOsRng) }
+        Self {
+            secret_key: BoxSecretKey::generate(&mut BoxOsRng),
+        }
     }
 
     /// See `Keypair::from_seed`'s doc comment — the same at-rest-storage
     /// caveat applies here verbatim.
     pub fn from_seed(seed: &[u8; 32]) -> Self {
-        Self { secret_key: BoxSecretKey::from_bytes(*seed) }
+        Self {
+            secret_key: BoxSecretKey::from_bytes(*seed),
+        }
     }
 
     pub fn seed_bytes(&self) -> [u8; 32] {
@@ -117,7 +131,9 @@ impl MessagingKeypair {
     /// distinguish the two, and doesn't need to — either way the answer
     /// is "don't trust this blob").
     pub fn unseal(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        self.secret_key.unseal(ciphertext).map_err(|_| CryptoError::UnsealFailed)
+        self.secret_key
+            .unseal(ciphertext)
+            .map_err(|_| CryptoError::UnsealFailed)
     }
 }
 
@@ -131,7 +147,9 @@ impl MessagingKeypair {
 /// a statement, never *who's accountable* for it.
 pub fn seal(recipient: &MessagingPublicKeyBytes, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let public_key = BoxPublicKey::from_bytes(recipient.0);
-    public_key.seal(&mut BoxOsRng, plaintext).map_err(|_| CryptoError::SealFailed)
+    public_key
+        .seal(&mut BoxOsRng, plaintext)
+        .map_err(|_| CryptoError::SealFailed)
 }
 
 pub fn verify(
@@ -169,14 +187,25 @@ mod tests {
     fn sign_then_verify_round_trips() {
         let kp = Keypair::generate();
         let sig = kp.sign(contexts::POLICY_OPINION, b"deny ads.example");
-        assert!(verify(&kp.public_key(), contexts::POLICY_OPINION, b"deny ads.example", &sig).is_ok());
+        assert!(verify(
+            &kp.public_key(),
+            contexts::POLICY_OPINION,
+            b"deny ads.example",
+            &sig
+        )
+        .is_ok());
     }
 
     #[test]
     fn verification_fails_for_wrong_context() {
         let kp = Keypair::generate();
         let sig = kp.sign(contexts::POLICY_OPINION, b"deny ads.example");
-        let result = verify(&kp.public_key(), contexts::APPROVAL_RESPONSE, b"deny ads.example", &sig);
+        let result = verify(
+            &kp.public_key(),
+            contexts::APPROVAL_RESPONSE,
+            b"deny ads.example",
+            &sig,
+        );
         assert!(result.is_err());
     }
 
@@ -184,7 +213,12 @@ mod tests {
     fn verification_fails_for_tampered_message() {
         let kp = Keypair::generate();
         let sig = kp.sign(contexts::POLICY_OPINION, b"deny ads.example");
-        let result = verify(&kp.public_key(), contexts::POLICY_OPINION, b"allow ads.example", &sig);
+        let result = verify(
+            &kp.public_key(),
+            contexts::POLICY_OPINION,
+            b"allow ads.example",
+            &sig,
+        );
         assert!(result.is_err());
     }
 
@@ -193,7 +227,12 @@ mod tests {
         let kp_a = Keypair::generate();
         let kp_b = Keypair::generate();
         let sig = kp_a.sign(contexts::POLICY_OPINION, b"deny ads.example");
-        let result = verify(&kp_b.public_key(), contexts::POLICY_OPINION, b"deny ads.example", &sig);
+        let result = verify(
+            &kp_b.public_key(),
+            contexts::POLICY_OPINION,
+            b"deny ads.example",
+            &sig,
+        );
         assert!(result.is_err());
     }
 

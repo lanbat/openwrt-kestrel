@@ -64,21 +64,14 @@ state.
    missing. If you're tempted to mock one of these out, don't — the point
    is to exercise the real code path, not a stand-in for it.
 
-   **Run these inside the QEMU VM sandbox, not directly on your dev
-   machine.** Some of the paths these calls hit aren't uniquely OpenWrt
-   after all — `cmd::reload_dnsmasq()` calls `/etc/init.d/dnsmasq
-   reload`, and on a Debian dev machine with the `dnsmasq` package
-   installed, that path really exists and really forwards to `systemctl
-   reload dnsmasq.service`, which pops a real PolicyKit password prompt
-   in a GUI session (confirmed directly: it fails with "Access denied"
-   without one, so nothing actually gets reloaded, but the repeated
-   prompt is a real nuisance and a real privileged-action attempt against
-   the host, not a router). `uci`/`nft` genuinely don't exist on a
-   typical dev machine and fail silently as intended, but don't assume
-   every shelled-out command is equally inert locally just because it
-   targets an absolute path — check, the way this one wasn't checked
-   carefully enough the first time. Plain `cargo test --offline --lib`
-   (step 1) never spawns a subprocess and is always safe to run locally.
+    **Run these inside the QEMU VM sandbox, not directly on your dev
+    machine.** The system-changing path is OpenWrt-gated, so
+    `cmd::reload_dnsmasq()` and the social-firewall DNS materializer will not
+    invoke a host `/etc/init.d/dnsmasq`; `KESTRELD_ALLOW_SYSTEM_RELOAD=1` or
+    `SF_ALLOW_SYSTEM_RELOAD=1` is an explicit override for a controlled
+    environment. `uci`/`nft` still genuinely don't exist on a typical dev
+    machine and fail silently as intended. Plain `cargo test --offline --lib`
+    (step 1) never spawns a subprocess and is always safe to run locally.
 
    There's no single command for this yet — the recipe (verified
    working, all scenarios pass this way) applies to `join_approval` and

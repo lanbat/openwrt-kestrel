@@ -31,7 +31,9 @@ impl BanipFeeds {
             let set_body = braced_block(&rest[brace..]);
             rest = &rest[brace..];
 
-            let Some((feed, _family)) = name.split_once('.') else { continue };
+            let Some((feed, _family)) = name.split_once('.') else {
+                continue;
+            };
             if feed == "allowlist" || feed == "blocklist" {
                 continue;
             }
@@ -99,13 +101,27 @@ fn parse_element(token: &str) -> Option<(IpAddr, IpAddr)> {
         return match base.trim().parse::<IpAddr>().ok()? {
             IpAddr::V4(ip) => {
                 let bits = ip.to_bits();
-                let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
-                Some((IpAddr::V4((bits & mask).into()), IpAddr::V4((bits | !mask).into())))
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - prefix)
+                };
+                Some((
+                    IpAddr::V4((bits & mask).into()),
+                    IpAddr::V4((bits | !mask).into()),
+                ))
             }
             IpAddr::V6(ip) => {
                 let bits = ip.to_bits();
-                let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
-                Some((IpAddr::V6((bits & mask).into()), IpAddr::V6((bits | !mask).into())))
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - prefix)
+                };
+                Some((
+                    IpAddr::V6((bits & mask).into()),
+                    IpAddr::V6((bits | !mask).into()),
+                ))
             }
         };
     }

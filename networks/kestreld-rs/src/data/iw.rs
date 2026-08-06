@@ -107,12 +107,14 @@ fn parse(iw_raw: &str, uci_raw: &str) -> IwState {
     for phy_name in phy_names {
         let group = &phy_groups[phy_name];
         let vap_count = group.len();
-        let band = group.iter().find_map(|v| {
-            (!v.band.is_empty()).then(|| v.band.clone())
-        }).unwrap_or_default();
-        let channel = group.iter().find_map(|v| {
-            (!v.channel.is_empty()).then(|| v.channel.clone())
-        }).unwrap_or_default();
+        let band = group
+            .iter()
+            .find_map(|v| (!v.band.is_empty()).then(|| v.band.clone()))
+            .unwrap_or_default();
+        let channel = group
+            .iter()
+            .find_map(|v| (!v.channel.is_empty()).then(|| v.channel.clone()))
+            .unwrap_or_default();
 
         let radio_name = format!("radio{}", phy_name.trim_start_matches("phy"));
         let exp = expected.get(&radio_name).copied().unwrap_or(0);
@@ -263,7 +265,10 @@ wireless.@wifi-iface[2].device='radio1'
         let iw = "phy#0\n";
         let state = parse(iw, "");
         // phy0 has no VAPs — no Interface lines → not parsed at all
-        assert!(state.phys.is_empty(), "empty phy with no interfaces should produce no phys");
+        assert!(
+            state.phys.is_empty(),
+            "empty phy with no interfaces should produce no phys"
+        );
     }
 
     #[test]
