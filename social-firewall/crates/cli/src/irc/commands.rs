@@ -314,7 +314,7 @@ fn handle_join_one(
         );
         return;
     }
-    let canonical = super::channel_name(&group);
+    let canonical = super::channel_alias(&group);
     if state.lock().unwrap().channels.contains_key(&group.group_id) {
         return;
     }
@@ -659,7 +659,7 @@ fn handle_names(
         &format!(
             ":{} 353 {nick} = {} :{}",
             server.config.server_name,
-            super::channel_name(&group),
+            super::channel_alias(&group),
             super::member_nicks(store, &group).join(" ")
         ),
     );
@@ -668,7 +668,7 @@ fn handle_names(
         &format!(
             ":{} 366 {nick} {} :End of /NAMES list",
             server.config.server_name,
-            super::channel_name(&group)
+            super::channel_alias(&group)
         ),
     );
 }
@@ -684,7 +684,7 @@ fn handle_list(server: &Server, tx: &mpsc::Sender<String>, store: &StateStore) {
             &format!(
                 ":{} 322 * {} {} :{}",
                 server.config.server_name,
-                super::channel_name(&group),
+                super::channel_alias(&group),
                 super::group_members(&group).len(),
                 group.description
             ),
@@ -735,7 +735,7 @@ fn handle_who(
             &format!(
                 ":{} 352 {requester} {} local {} {} H :0 {}",
                 server.config.server_name,
-                super::channel_name(&group),
+                super::channel_alias(&group),
                 server.config.server_name,
                 member,
                 member
@@ -774,7 +774,7 @@ fn handle_whois(server: &Server, tx: &mpsc::Sender<String>, store: &StateStore, 
                 .iter()
                 .any(|value| value.eq_ignore_ascii_case(&nick))
         })
-        .map(|group| super::channel_name(&group))
+        .map(|group| super::channel_alias(&group))
         .collect::<Vec<_>>();
     super::send_line(
         tx,

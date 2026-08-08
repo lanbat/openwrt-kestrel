@@ -17,9 +17,15 @@ pub(crate) fn find_group(store: &StateStore, channel: &str) -> Option<Group> {
         return Some(group.clone());
     }
     if let Some(group) = groups.iter().find(|group| {
-        channel_alias(group)
+        channel_name(group)
             .trim_start_matches('#')
             .eq_ignore_ascii_case(value)
+            || channel_alias(group)
+                .trim_start_matches('#')
+                .eq_ignore_ascii_case(value)
+            || legacy_channel_alias(group)
+                .trim_start_matches('#')
+                .eq_ignore_ascii_case(value)
     }) {
         return Some(group.clone());
     }
@@ -39,6 +45,13 @@ pub(crate) fn channel_alias(group: &Group) -> String {
     channel_alias_for(&group.name, group.group_id)
 }
 
+fn legacy_channel_alias(group: &Group) -> String {
+    let alias = channel_alias_for(&group.name, group.group_id);
+    alias
+        .strip_prefix("#sf-")
+        .map_or(alias.clone(), |value| format!("#{value}"))
+}
+
 pub(crate) fn channel_alias_for(name: &str, group_id: GroupId) -> String {
     let slug = name
         .chars()
@@ -55,7 +68,7 @@ pub(crate) fn channel_alias_for(name: &str, group_id: GroupId) -> String {
         .collect::<Vec<_>>()
         .join("-");
     let slug = if slug.is_empty() { "group" } else { &slug };
-    format!("#{slug}-{}", &group::group_id_str(group_id)[..12])
+    format!("#sf-{slug}-{}", &group::group_id_str(group_id)[..12])
 }
 
 pub(crate) fn member_nicks(store: &StateStore, group: &Group) -> Vec<String> {

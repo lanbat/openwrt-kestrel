@@ -31,7 +31,7 @@ const BASE_CAPS: &[&str] = &["message-tags", "server-time"];
 
 pub use auth::OidcSettings;
 use auth::{decode_oauthbearer, OidcAuthenticator};
-use channels::{channel_name, find_group, group_members, member_nicks, valid_nick};
+use channels::{channel_alias, find_group, group_members, member_nicks, valid_nick};
 use delivery::{party_line_time_tags, send_message};
 use protocol::{parse_line, server_time, IrcLine, MAX_LINE_BYTES};
 use session::SessionState;
@@ -175,7 +175,7 @@ fn poll_messages(server: &Server, store: &StateStore) {
             {
                 continue;
             }
-            let channel = channel_name(&group);
+            let channel = channel_alias(&group);
             let clients = server.clients.lock().unwrap();
             for client in clients.iter() {
                 if client
@@ -810,11 +810,11 @@ mod tests {
         let group_id = GroupId(domain_types::Hash32([0xab; 32]));
         assert_eq!(
             channels::channel_alias_for("Neighborhood Watch!", group_id),
-            "#neighborhood-watch-abababababab"
+            "#sf-neighborhood-watch-abababababab"
         );
         assert_eq!(
             channels::channel_alias_for("!!!", group_id),
-            "#group-abababababab"
+            "#sf-group-abababababab"
         );
     }
 
