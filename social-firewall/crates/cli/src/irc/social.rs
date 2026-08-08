@@ -63,6 +63,59 @@ pub(crate) fn error(
     response(server, tx, state, &format!("error: {message}"));
 }
 
+pub(crate) fn handle_invite(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    params: &[String],
+) -> Result<()> {
+    if params.len() < 2 {
+        super::send_error(
+            tx,
+            &server.config.server_name,
+            state,
+            461,
+            "INVITE :Not enough parameters",
+        );
+        return Ok(());
+    }
+    require_write_access(server, tx, state)?;
+    let target = &params[0];
+    let channel = params[1].trim_start_matches(':');
+    let group = crate::group::resolve_group_id(store, channel)?;
+    crate::group::invite_group_member(
+        store,
+        &crate::group::group_id_str(group),
+        target,
+        false,
+        None,
+    )?;
+    let requester = state
+        .lock()
+        .unwrap()
+        .nick
+        .clone()
+        .unwrap_or_else(|| "*".into());
+    super::send_line(
+        tx,
+        &format!(
+            ":{} 341 {requester} {target} {channel}",
+            server.config.server_name
+        ),
+    );
+    response(
+        server,
+        tx,
+        state,
+        &format!(
+            "invitation for {target} queued to {}",
+            crate::group::group_id_str(group)
+        ),
+    );
+    Ok(())
+}
+
 fn parse_options(words: &[String]) -> Result<HashMap<String, String>> {
     let mut options = HashMap::new();
     let mut index = 0;

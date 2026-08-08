@@ -57,6 +57,12 @@ pub(crate) fn handle_line(
         "QUIT" => return Ok(true),
         "JOIN" => handle_join(server, tx, state, store, &line.params),
         "PART" => handle_part(server, tx, state, store, &line.params),
+        "INVITE" => {
+            if let Err(error) = super::social::handle_invite(server, tx, state, store, &line.params)
+            {
+                super::social::error(server, tx, state, &error.to_string());
+            }
+        }
         "PRIVMSG" | "NOTICE" => handle_message(
             server,
             client_id,
