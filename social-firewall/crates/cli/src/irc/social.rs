@@ -22,6 +22,16 @@ pub(crate) fn handle(
         "groups" | "list-groups" => list_groups(server, tx, state, store)?,
         "follows" | "list-follows" => list_follows(server, tx, state, store)?,
         "history" | "list-party-line" => history(server, tx, state, store, &options)?,
+        "create-group" => create_group(server, tx, state, store, &options)?,
+        "topic" => announce_topic(server, tx, state, store, &options)?,
+        "mode" => announce_mode(server, tx, state, store, &options)?,
+        "voice" => announce_voice(server, tx, state, store, &options)?,
+        "voting-right" => set_voting_right(server, tx, state, store, &options)?,
+        "block" => block_user(server, tx, state, store, &options)?,
+        "unblock" => unblock_user(server, tx, state, store, &options)?,
+        "approve" => approve_join(server, tx, state, store, &options)?,
+        "reject" => reject_join(server, tx, state, store, &options)?,
+        "blocked" => list_blocked(server, tx, state, store, &options)?,
         "opinion" | "publish-opinion" => publish_opinion(server, tx, state, store, &options)?,
         "evaluate" | "evaluate-target" => evaluate_target(server, tx, state, store, &options)?,
         "vote" | "cast-group-vote" => cast_group_vote(server, tx, state, store, &options)?,
@@ -68,6 +78,9 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf groups | follows | history [--group GROUP]",
         "/sf opinion --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf evaluate --target-kind KIND --target-value VALUE [--threshold NUMBER]",
+        "/sf create-group --name NAME --description TEXT [--join-prompt TEXT]",
+        "/sf topic|mode|voice|voting-right|block|unblock ...",
+        "/sf approve|reject|blocked ...",
         "/sf vote --group GROUP --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policy-vote --policy-id ID --entry-id ID --group GROUP --stance STANCE --reason-code CODE [--note TEXT]",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
@@ -149,6 +162,206 @@ fn history(
             &crate::group::group_id_str(group),
             message,
             store,
+        );
+    }
+    Ok(())
+}
+
+fn create_group(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::create_group(
+        store,
+        required(options, "name")?,
+        required(options, "description")?,
+        options.get("join-prompt").cloned(),
+        None,
+    )?;
+    response(server, tx, state, "signed group created");
+    Ok(())
+}
+
+fn announce_topic(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::announce_topic(
+        store,
+        required(options, "group")?,
+        required(options, "topic")?.to_string(),
+    )?;
+    response(server, tx, state, "signed group topic updated");
+    Ok(())
+}
+
+fn announce_mode(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::announce_mode(
+        store,
+        required(options, "group")?,
+        required(options, "moderated")?.parse()?,
+    )?;
+    response(server, tx, state, "signed group moderation state updated");
+    Ok(())
+}
+
+fn announce_voice(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::announce_voice(
+        store,
+        required(options, "group")?,
+        required(options, "user")?,
+        required(options, "voiced")?.parse()?,
+    )?;
+    response(server, tx, state, "signed group voice state updated");
+    Ok(())
+}
+
+fn set_voting_right(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::set_group_voting_right(
+        store,
+        required(options, "group")?,
+        required(options, "user")?,
+        required(options, "voting")?.parse()?,
+        None,
+    )?;
+    response(server, tx, state, "signed group voting rights updated");
+    Ok(())
+}
+
+fn block_user(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::block_group_user(
+        store,
+        required(options, "group")?,
+        required(options, "user")?,
+        required(options, "reason-code")?,
+        options.get("note").cloned(),
+        None,
+    )?;
+    response(server, tx, state, "signed group block report recorded");
+    Ok(())
+}
+
+fn unblock_user(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::unblock_group_user(
+        store,
+        required(options, "group")?,
+        required(options, "user")?,
+    )?;
+    response(server, tx, state, "group block removed locally");
+    Ok(())
+}
+
+fn approve_join(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::approve_group_join(
+        store,
+        required(options, "group")?,
+        required(options, "requester")?,
+        required(options, "sequence")?.parse()?,
+        options
+            .get("voting")
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or(false),
+        None,
+    )?;
+    response(server, tx, state, "signed group membership update recorded");
+    Ok(())
+}
+
+fn reject_join(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::reject_group_join(
+        store,
+        required(options, "requester")?,
+        required(options, "sequence")?.parse()?,
+    )?;
+    response(server, tx, state, "group join request rejected");
+    Ok(())
+}
+
+fn list_blocked(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    let group = crate::group::resolve_group_id(store, required(options, "group")?)?;
+    let blocked = store.list_blocked_group_users(group)?;
+    if blocked.is_empty() {
+        response(server, tx, state, "no blocked users");
+    }
+    for (user, reason) in blocked {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "blocked {}/{}: {:?}{}",
+                user.federation.0,
+                user.local_id,
+                reason.code,
+                reason
+                    .note
+                    .map(|note| format!(" — {note}"))
+                    .unwrap_or_default()
+            ),
         );
     }
     Ok(())
