@@ -234,9 +234,12 @@ sf derive-fingerprint-id \
   --material-file /tmp/fingerprint.material
 ```
 
-The current bridge exposes material generation as code, but does not yet
-automatically export material from a kestreld identity page or publish the
-resulting observation. That handoff is the next integration step.
+The IRC gateway now resolves the active session's local device material through
+kestreld's restricted fingerprint socket. An operator can inspect the match
+with `/sf fingerprint-session` and publish the selected group observation with
+`/sf fingerprint-observe`; publication queues the signed statement for current
+group members through the existing Iroh/Reticulum outbox path. Raw material,
+addresses, and MACs remain local.
 
 ## Observation Lifecycle
 
