@@ -6,8 +6,8 @@ Feature: Social-firewall party-line chat
   Scenario: The chat page renders a self group and message form
     Given a social-firewall chat database with a self group
     When I open the social-firewall chat
-    Then the chat title is "social-firewall chat"
-    And the chat contains "party-line chat"
+    Then the chat title is "partyline"
+    And the chat contains "partyline"
     And the chat contains "send"
     And the chat uses the bundled Fixedsys font
 

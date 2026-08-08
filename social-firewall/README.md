@@ -18,7 +18,121 @@ sh /root/openwrt-kestrel/social-firewall/install.sh
 
 This creates the SQLite store at
 `/etc/kestrel/social-firewall/social-firewall.sqlite`, installs the cron jobs,
-and exposes the party-line chat at `/cgi-bin/sf-chat`.
+and exposes the partyline at `/cgi-bin/sf-partyline` with `/cgi-bin/sf-chat`
+retained as a compatibility alias.
+
+It also publishes a static SPA shell at `/kestrel-ui/`. The shell is served
+directly by uhttpd and currently links to the existing CGI surfaces; see
+`docs/spa-migration.md` for the migration boundary.
+
+### Optional Iroh Listener
+
+The Iroh listener is installed as a disabled-by-default procd service. Enable
+it when this router should receive signed synchronization envelopes:
+
+```sh
+uci set social-firewall.main.enabled='1'
+uci commit social-firewall
+/etc/init.d/social-firewall enable
+/etc/init.d/social-firewall start
+```
+
+The listener accepts peer envelopes only; it does not expose the browser
+partyline or an IRC service. The partyline remains available through the local
+uhttpd CGI endpoints.
+
+### Optional LAN IRCv3 Gateway
+
+The IRC gateway is disabled by default and refuses wildcard listen addresses.
+Configure a specific trusted-LAN address, then enable it:
+
+```sh
+uci set sf-ircd.main.listen_addr='192.168.1.1:6697'
+uci set sf-ircd.main.tls_cert='/etc/uhttpd.crt'
+uci set sf-ircd.main.tls_key='/etc/uhttpd.key'
+uci set sf-ircd.main.enabled='1'
+uci commit sf-ircd
+/etc/init.d/sf-ircd enable
+/etc/init.d/sf-ircd start
+```
+
+It supports IRC registration, `CAP LS 302`, `message-tags`, `server-time`,
+`JOIN`, `PART`, `NAMES`, `LIST`, `WHO`, `WHOIS`, `PRIVMSG`, `NOTICE`,
+`TOPIC`, and moderated-channel `MODE`. Channels are existing social-firewall
+groups named `#sf-<group-id>`. IRC access is local-only; Iroh and Reticulum
+never expose this listener. Newly ingested remote party-line messages are
+also pushed to already-connected clients in the matching channel.
+
+The service creates one `fw4` accept rule for the configured `firewall_zone`
+(default `lan`) and removes it when stopped. Other OpenWrt zones are not
+permitted to reach the IRC port.
+
+TLS defaults to the local uhttpd certificate and key. Replace those paths with
+ACME-managed files when using a public DNS name; the certificate hostname must
+match the name used by IRC clients.
+
+To require Authentik OIDC authentication, configure its introspection endpoint
+and a confidential client secret file. This enables mandatory IRCv3 SASL
+`OAUTHBEARER` authentication:
+
+```sh
+uci set sf-ircd.main.oidc_introspection_url='https://auth.example.net/application/o/introspect/'
+uci set sf-ircd.main.oidc_client_id='client-id'
+uci set sf-ircd.main.oidc_client_secret_file='/etc/kestrel/authentik-irc-client-secret'
+uci set sf-ircd.main.oidc_ca_file='/etc/ssl/certs/authentik-ca.pem'
+uci set sf-ircd.main.oidc_issuer='https://auth.example.net'
+uci set sf-ircd.main.oidc_audience='client-id'
+uci set sf-ircd.main.oidc_required_group='router-users'
+uci set sf-ircd.main.oidc_write_entitlement='router:write'
+uci set sf-ircd.main.oidc_operator_entitlement='router:write'
+uci commit sf-ircd
+```
+
+The secret file must be readable only by root. Authentik token introspection is
+performed over HTTPS; inactive, issuer-mismatched, or audience-mismatched
+tokens are rejected before IRC registration completes.
+
+When OIDC is enabled, `oidc_write_entitlement` controls `PRIVMSG`/`NOTICE`,
+while `oidc_operator_entitlement` controls `TOPIC` and channel `MODE` changes.
+
+### Optional Reticulum Bridge
+
+Reticulum is an optional control-plane fallback when Iroh delivery fails or an
+Iroh address is not available. The package installs a native Rust bridge binary
+and creates a disabled-by-default `/etc/config/reticulum-bridge`. Configure at least one
+TCP or UDP interface, then enable and start the service:
+
+```sh
+uci set reticulum-bridge.main.enabled='1'
+uci commit reticulum-bridge
+/etc/init.d/reticulum-bridge enable
+/etc/init.d/reticulum-bridge start
+```
+
+The bridge uses only `/run/kestrel/reticulum.sock` for Kestrel control. Its
+Reticulum TCP/UDP interface is configured separately through UCI. Configure a
+peer's 16-byte Reticulum destination hash with:
+
+```sh
+sf set-follow-reticulum-address \
+  --federation FEDERATION_ID --user LOCAL_ID --address DESTINATION_HASH
+```
+
+Application envelopes remain signed and are still checked by the Rust process.
+Enabling the bridge also starts the Reticulum receive listener, which accepts
+only addresses configured for followed peers. See
+`docs/reticulum-bridge-protocol.md` for the socket contract.
+
+Building the workspace with the Reticulum bridge also requires a host
+`protoc` binary because the pinned Reticulum-rs dependency generates its
+protocol bindings during compilation. The released OpenWrt package contains
+the already-built bridge binary and does not need Python RNS.
+
+Run the local two-node Reticulum integration test explicitly:
+
+```sh
+PROTOC=/path/to/protoc cargo test -p reticulum-bridge --test two_node -- --ignored
+```
 
 ## First Run
 
@@ -110,14 +224,20 @@ sf list-groups
 sf set-group-topic --group "Neighborhood Watch" --topic "trusted routers and review notes"
 ```
 
-The browser chat is the easiest way to talk:
+The browser partyline is the easiest way to talk:
 
 ```text
-http://ROUTER_IP/cgi-bin/sf-chat
+http://ROUTER_IP/cgi-bin/sf-partyline
 ```
 
 Messages typed without a leading slash are published to the selected group.
 The selected group's topic is shown above the transcript.
+Party-line messages are signed and fanned out to current group members; Iroh
+delivery falls back to configured Reticulum addresses and is retried through
+the outbox, while `sync`/`sync-group` catch up peers
+that were offline. IRC-style `/me`, `/nick`, `/topic`, `/mode +m`, `/mode -m`,
+and `/mode +v USER` or `/mode -v USER` actions publish visible system events as well as updating
+the signed group state where applicable.
 Commands beginning with `/` are passed to the real `sf` CLI, so the browser
 does not implement a second command language:
 

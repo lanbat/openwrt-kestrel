@@ -69,7 +69,7 @@ impl ChatWorld {
                 };
                 let url = request.url().to_string();
                 let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-                if path != "/cgi-bin/sf-chat" && path != "/cgi-bin/sf-chat-font" {
+                if path != "/cgi-bin/sf-chat" && path != "/cgi-bin/sf-partyline" && path != "/cgi-bin/sf-chat-font" {
                     let _ = request.respond(Response::empty(404));
                     continue;
                 }
@@ -184,7 +184,7 @@ async fn chat_database(world: &mut ChatWorld) {
 
 #[when("I open the social-firewall chat")]
 async fn open_chat(world: &mut ChatWorld) {
-    let url = format!("{}/cgi-bin/sf-chat", world.base_url);
+    let url = format!("{}/cgi-bin/sf-partyline", world.base_url);
     world
         .browser()
         .goto(&url)
