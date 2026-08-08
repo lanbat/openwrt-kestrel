@@ -43,3 +43,66 @@ pub(crate) fn lookup(socket_path: &Path, source_ip: IpAddr) -> Result<Option<Dev
         last_seen: response.last_seen,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::lookup;
+    use std::io::{BufRead, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    #[test]
+    fn lookup_decodes_a_device_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("fingerprint.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(&mut stream)
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("192.0.2.10"));
+            stream
+                .write_all(
+                    br#"{"record_id":"device-1","network":"lan","material_hex":"0102","last_seen":42}
+"#,
+                )
+                .unwrap();
+        });
+
+        let result = lookup(&socket, "192.0.2.10".parse().unwrap())
+            .unwrap()
+            .unwrap();
+        thread.join().unwrap();
+        assert_eq!(result.record_id, "device-1");
+        assert_eq!(result.network, "lan");
+        assert_eq!(result.material, vec![1, 2]);
+        assert_eq!(result.last_seen, 42);
+    }
+
+    #[test]
+    fn lookup_treats_a_not_found_response_as_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("fingerprint.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(&mut stream)
+                .read_line(&mut request)
+                .unwrap();
+            stream
+                .write_all(
+                    br#"{"error":"device fingerprint not found"}
+"#,
+                )
+                .unwrap();
+        });
+
+        assert!(lookup(&socket, "192.0.2.11".parse().unwrap())
+            .unwrap()
+            .is_none());
+        thread.join().unwrap();
+    }
+}
