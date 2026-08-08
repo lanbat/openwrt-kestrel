@@ -46,6 +46,8 @@ pub(crate) fn handle(
         "enforced" | "list-enforced" => list_enforced(server, tx, state, store)?,
         "sync" => sync(server, tx, state, store, &options)?,
         "notify" => notify(server, tx, state, store)?,
+        "identity-name" => set_identity_name(server, tx, state, store, &options)?,
+        "federation-name" => set_federation_name(server, tx, state, store, &options)?,
         "request-tunnel" => request_tunnel(server, tx, state, store, &options)?,
         "accept-tunnel" => accept_tunnel(server, tx, state, store, &options)?,
         "offer-tunnel" => offer_tunnel(server, tx, state, store, &options)?,
@@ -214,6 +216,8 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf enforced",
         "/sf sync [--group GROUP]",
         "/sf notify (IRC operator only)",
+        "/sf identity-name [--name NAME] (IRC operator only; omit to clear)",
+        "/sf federation-name [--name NAME] (IRC operator only; omit to clear)",
         "/sf request-tunnel --advertisement ADVERTISEMENT",
         "/sf accept-tunnel --requester USER --sequence NUMBER",
         "/sf offer-tunnel --description TEXT --target KIND:VALUE[,KIND:VALUE]",
@@ -810,6 +814,34 @@ fn notify(
             report.notifications_posted
         ),
     );
+    Ok(())
+}
+
+fn set_identity_name(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    let name = options.get("name").map(String::as_str);
+    store.set_self_display_name(name)?;
+    response(server, tx, state, "router identity display name updated");
+    Ok(())
+}
+
+fn set_federation_name(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    let name = options.get("name").map(String::as_str);
+    store.set_home_federation_display_name(name)?;
+    response(server, tx, state, "home federation display name updated");
     Ok(())
 }
 
