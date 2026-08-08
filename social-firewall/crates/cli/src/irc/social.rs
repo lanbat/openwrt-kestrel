@@ -1216,8 +1216,20 @@ fn fingerprint_session(
     state: &Arc<Mutex<SessionState>>,
 ) -> Result<()> {
     require_operator_access(server, tx, state)?;
-    let state_guard = state.lock().unwrap();
-    let Some(fingerprint) = &state_guard.device_fingerprint else {
+    let details = state
+        .lock()
+        .unwrap()
+        .device_fingerprint
+        .as_ref()
+        .map(|fingerprint| {
+            (
+                fingerprint.record_id.clone(),
+                fingerprint.network.clone(),
+                fingerprint.last_seen,
+                fingerprint.material.len(),
+            )
+        });
+    let Some((record_id, network, last_seen, material_bytes)) = details else {
         response(
             server,
             tx,
@@ -1232,10 +1244,7 @@ fn fingerprint_session(
         state,
         &format!(
             "session device {} network={} last-seen={} material-bytes={}",
-            fingerprint.record_id,
-            fingerprint.network,
-            fingerprint.last_seen,
-            fingerprint.material.len()
+            record_id, network, last_seen, material_bytes
         ),
     );
     Ok(())
