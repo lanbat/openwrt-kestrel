@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 struct LookupResponse {
@@ -23,6 +24,8 @@ pub(crate) struct DeviceFingerprint {
 pub(crate) fn lookup(socket_path: &Path, source_ip: IpAddr) -> Result<Option<DeviceFingerprint>> {
     let mut stream = UnixStream::connect(socket_path)
         .with_context(|| format!("connecting to {}", socket_path.display()))?;
+    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(250)))?;
     stream.write_all(
         serde_json::json!({"source_ip": source_ip.to_string()})
             .to_string()
