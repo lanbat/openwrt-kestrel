@@ -543,7 +543,7 @@ async fn accept_connections(listener: UnixListener, state: Arc<Mutex<State>>) {
 async fn identity_at(path: &PathBuf) -> Result<PrivateIdentity, Box<dyn std::error::Error>> {
     if path.exists() {
         return PrivateIdentity::new_from_hex_string(tokio::fs::read_to_string(path).await?.trim())
-        .map_err(|error| format!("invalid Reticulum identity: {error:?}").into());
+            .map_err(|error| format!("invalid Reticulum identity: {error:?}").into());
     }
     let identity = PrivateIdentity::new_from_rand(OsRng);
     if let Some(parent) = path.parent() {
