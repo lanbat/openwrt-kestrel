@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -144,7 +144,7 @@ impl ChatWorld {
     }
 }
 
-fn seed_self_group(path: &PathBuf) {
+fn seed_self_group(path: &Path) {
     let store = StateStore::open(path).expect("open chat fixture database");
     let owner = UserId {
         federation: FederationId(Hash32([1; 32])),

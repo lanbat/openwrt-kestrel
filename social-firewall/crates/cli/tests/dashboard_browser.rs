@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cucumber::{given, then, when, World};
@@ -102,7 +102,7 @@ fn fixture_user() -> UserId {
     }
 }
 
-fn seed_group(path: &PathBuf, name: &str) {
+fn seed_group(path: &Path, name: &str) {
     let store = StateStore::open(path).expect("open dashboard fixture database");
     let owner = fixture_user();
     store

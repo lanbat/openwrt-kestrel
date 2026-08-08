@@ -387,11 +387,7 @@ async fn dispatch(
         1 => {}
         2 => {
             let response_kind = if status == STATUS_RESPONSE { 3 } else { 4 };
-            let response_payload = if status == STATUS_RESPONSE {
-                response
-            } else {
-                response
-            };
+            let response_payload = response;
             let _ =
                 State::send_fragments(&channel, response_kind, request_id, &response_payload).await;
         }
@@ -546,9 +542,7 @@ async fn accept_connections(listener: UnixListener, state: Arc<Mutex<State>>) {
 
 async fn identity_at(path: &PathBuf) -> Result<PrivateIdentity, Box<dyn std::error::Error>> {
     if path.exists() {
-        return PrivateIdentity::new_from_hex_string(
-            &tokio::fs::read_to_string(path).await?.trim(),
-        )
+        return PrivateIdentity::new_from_hex_string(tokio::fs::read_to_string(path).await?.trim())
         .map_err(|error| format!("invalid Reticulum identity: {error:?}").into());
     }
     let identity = PrivateIdentity::new_from_rand(OsRng);
