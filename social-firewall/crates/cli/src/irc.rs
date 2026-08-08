@@ -10,6 +10,7 @@ mod commands;
 mod delivery;
 mod protocol;
 mod session;
+mod social;
 
 use crate::group;
 use anyhow::{Context, Result};

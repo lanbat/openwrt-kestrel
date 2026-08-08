@@ -107,6 +107,12 @@ fn handle_message(
         return Ok(());
     }
     let body = &params[1];
+    if !notice && (body == "/sf" || body.starts_with("/sf ")) {
+        if let Err(error) = super::social::handle(server, tx, state, store, body) {
+            super::social::error(server, tx, state, &error.to_string());
+        }
+        return Ok(());
+    }
     if body.is_empty() {
         if !notice {
             super::send_error(
