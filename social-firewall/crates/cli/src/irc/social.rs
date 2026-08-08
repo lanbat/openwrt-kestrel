@@ -42,6 +42,8 @@ pub(crate) fn handle(
         "blocked" => list_blocked(server, tx, state, store, &options)?,
         "apply" => apply(server, tx, state, store, &options)?,
         "override" | "set-override" => set_override(server, tx, state, store, &options)?,
+        "explain-enforced" => explain_enforced(server, tx, state, store, &options)?,
+        "enforced" | "list-enforced" => list_enforced(server, tx, state, store)?,
         "sync" => sync(server, tx, state, store, &options)?,
         "request-tunnel" => request_tunnel(server, tx, state, store, &options)?,
         "accept-tunnel" => accept_tunnel(server, tx, state, store, &options)?,
@@ -207,6 +209,8 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf approve|reject|blocked ...",
         "/sf apply --dry-run true|false [--confirm true]",
         "/sf override --target-kind KIND --target-value VALUE --stance STANCE [--emergency true|false] [--note TEXT] [--ttl-seconds N]",
+        "/sf explain-enforced --target-kind KIND --target-value VALUE",
+        "/sf enforced",
         "/sf sync [--group GROUP]",
         "/sf request-tunnel --advertisement ADVERTISEMENT",
         "/sf accept-tunnel --requester USER --sequence NUMBER",
@@ -784,6 +788,64 @@ fn set_override(
     };
     store.set_local_override(&override_record)?;
     response(server, tx, state, "local policy override set");
+    Ok(())
+}
+
+fn explain_enforced(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    let target = crate::parse_target(
+        required(options, "target-kind")?,
+        required(options, "target-value")?,
+    )?;
+    let contributions = store.enforced_decision_contributors_for(&target)?;
+    if contributions.is_empty() {
+        response(server, tx, state, "target has no enforced contributors");
+        return Ok(());
+    }
+    for contribution in contributions {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "enforced source={:?} stance={:?} weight={} reason={:?}",
+                contribution.source,
+                contribution.stance,
+                contribution.weight,
+                contribution.reason.code
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn list_enforced(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    let contributions = store.list_all_enforced_decision_contributors()?;
+    if contributions.is_empty() {
+        response(server, tx, state, "no enforced decisions with contributors");
+        return Ok(());
+    }
+    for (target, contribution) in contributions {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "enforced target={:?} source={:?} stance={:?} weight={}",
+                target, contribution.source, contribution.stance, contribution.weight
+            ),
+        );
+    }
     Ok(())
 }
 
