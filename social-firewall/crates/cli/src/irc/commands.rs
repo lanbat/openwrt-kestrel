@@ -363,14 +363,16 @@ fn handle_local_message(
         .clone()
         .unwrap_or_else(|| "*".into());
     let now = crate::now_unix();
-    store.append_local_irc_message(
-        &nick,
-        body,
-        now,
-        super::LOCAL_HISTORY_MAX_AGE,
-        super::LOCAL_HISTORY_MAX_MESSAGES,
-        super::LOCAL_HISTORY_MAX_BYTES,
-    )?;
+    if !notice {
+        store.append_local_irc_message(
+            &nick,
+            body,
+            now,
+            super::LOCAL_HISTORY_MAX_AGE,
+            super::LOCAL_HISTORY_MAX_MESSAGES,
+            super::LOCAL_HISTORY_MAX_BYTES,
+        )?;
+    }
     let command = if notice { "NOTICE" } else { "PRIVMSG" };
     let timestamp = super::protocol::format_time(now);
     let line = format!(
