@@ -81,13 +81,13 @@ pub(crate) fn handle_invite(
         return Ok(());
     }
     require_write_access(server, tx, state)?;
-    let target = &params[0];
+    let target = crate::tunnel::user_id_str(&resolve_invite_target(store, &params[0])?);
     let channel = params[1].trim_start_matches(':');
     let group = crate::group::resolve_group_id(store, channel)?;
     crate::group::invite_group_member(
         store,
         &crate::group::group_id_str(group),
-        target,
+        &target,
         false,
         None,
     )?;
@@ -114,6 +114,30 @@ pub(crate) fn handle_invite(
         ),
     );
     Ok(())
+}
+
+fn resolve_invite_target(store: &StateStore, target: &str) -> Result<domain_types::UserId> {
+    if target.contains('/') {
+        return crate::tunnel::parse_user_ref(target);
+    }
+    let matches = store
+        .list_follows()?
+        .into_iter()
+        .filter(|follow| {
+            follow
+                .display_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(target))
+        })
+        .map(|follow| follow.user)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [user] => Ok(*user),
+        [] => anyhow::bail!(
+            "unknown IRC invite target `{target}`; use a follow label or FEDERATION_ID/LOCAL_ID"
+        ),
+        _ => anyhow::bail!("ambiguous IRC invite target `{target}`; use FEDERATION_ID/LOCAL_ID"),
+    }
 }
 
 fn parse_options(words: &[String]) -> Result<HashMap<String, String>> {
