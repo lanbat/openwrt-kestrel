@@ -44,6 +44,8 @@ pub(crate) fn handle(
         "policy-vote" | "vote-policy-entry" => {
             vote_policy_entry(server, tx, state, store, &options)?
         }
+        "policies" | "list-policies" => list_policies(server, tx, state, store)?,
+        "policy-explain" | "explain-policy" => explain_policy(server, tx, state, store, &options)?,
         _ => response(
             server,
             tx,
@@ -171,6 +173,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf accept-tunnel --requester USER --sequence NUMBER",
         "/sf vote --group GROUP --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policy-vote --policy-id ID --entry-id ID --group GROUP --stance STANCE --reason-code CODE [--note TEXT]",
+        "/sf policies | policy-explain --policy-id ID --entry-id ID --group GROUP",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
     ] {
         response(server, tx, state, line);
@@ -684,6 +687,69 @@ fn vote_policy_entry(
         None,
     )?;
     response(server, tx, state, "signed policy vote recorded");
+    Ok(())
+}
+
+fn list_policies(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    let policies = store.list_shared_policies()?;
+    if policies.is_empty() {
+        response(server, tx, state, "no shared policies");
+    }
+    for policy in policies {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "policy {} #{}: {} ({} entries)",
+                policy.policy_id,
+                policy.sequence,
+                policy.name,
+                policy.entries.len()
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn explain_policy(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    let policy_id = crate::parse_hash32(required(options, "policy-id")?)?;
+    let entry_id = crate::parse_hash32(required(options, "entry-id")?)?;
+    let group = crate::group::resolve_group_id(store, required(options, "group")?)?;
+    let policy = store
+        .list_shared_policies()?
+        .into_iter()
+        .find(|policy| policy.policy_id == policy_id && policy.entry(&entry_id).is_some())
+        .context("unknown policy or entry")?;
+    match store.policy_stance_for(
+        policy_id,
+        entry_id,
+        policy.sequence,
+        group,
+        crate::now_unix(),
+    )? {
+        Some((stance, allow, deny)) => response(
+            server,
+            tx,
+            state,
+            &format!(
+                "policy result: {} (allow votes: {allow}, deny votes: {deny})",
+                crate::stance_str(stance)
+            ),
+        ),
+        None => response(server, tx, state, "policy result: no decision"),
+    }
     Ok(())
 }
 
