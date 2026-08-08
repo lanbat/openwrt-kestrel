@@ -1372,6 +1372,7 @@ pub fn sync_outbox(store: &StateStore) -> Result<()> {
         let kind = match item.statement_kind {
             4 => p2p_transport::StatementKind::Group,
             5 => p2p_transport::StatementKind::PartyLineMessage,
+            15 => p2p_transport::StatementKind::DirectMessage,
             _ => continue,
         };
         match crate::tunnel::deliver_to_destination(

@@ -123,7 +123,9 @@ fn handle_message(
         return handle_local_message(server, client_id, tx, state, store, body, notice);
     }
     if !params[0].starts_with('#') {
-        return handle_direct_message(server, client_id, tx, state, &params[0], body, notice);
+        return handle_direct_message(
+            server, client_id, tx, state, store, &params[0], body, notice,
+        );
     }
     if body.is_empty() {
         if !notice {
@@ -256,11 +258,13 @@ fn handle_message(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_direct_message(
     server: &Server,
     client_id: u64,
     tx: &mpsc::Sender<String>,
     state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
     target: &str,
     body: &str,
     notice: bool,
@@ -275,6 +279,28 @@ fn handle_direct_message(
                 "* :Message length is invalid",
             );
         }
+        return Ok(());
+    }
+    if target.contains('/') {
+        if !super::has_write_access(server, state) {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                481,
+                "PRIVMSG :You do not have IRC write access",
+            );
+            return Ok(());
+        }
+        let recipient = crate::tunnel::parse_user_ref(target)?;
+        crate::direct_message::send(store, recipient, body, &server.config.out_dir)?;
+        super::send_line(
+            tx,
+            &format!(
+                ":{} NOTICE * :direct message queued for {}",
+                server.config.server_name, target
+            ),
+        );
         return Ok(());
     }
     let sender = state

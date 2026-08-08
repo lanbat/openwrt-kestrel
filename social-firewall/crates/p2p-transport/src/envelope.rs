@@ -19,6 +19,7 @@ pub enum StatementKind {
     PolicyVote,
     FingerprintObservation,
     FingerprintComment,
+    DirectMessage,
 }
 
 impl StatementKind {
@@ -38,6 +39,7 @@ impl StatementKind {
             StatementKind::PolicyVote => 12,
             StatementKind::FingerprintObservation => 13,
             StatementKind::FingerprintComment => 14,
+            StatementKind::DirectMessage => 15,
         }
     }
 
@@ -57,6 +59,7 @@ impl StatementKind {
             12 => Some(StatementKind::PolicyVote),
             13 => Some(StatementKind::FingerprintObservation),
             14 => Some(StatementKind::FingerprintComment),
+            15 => Some(StatementKind::DirectMessage),
             _ => None,
         }
     }

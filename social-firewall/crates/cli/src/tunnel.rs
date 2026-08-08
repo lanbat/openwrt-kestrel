@@ -1319,6 +1319,9 @@ pub fn dispatch_envelope(
         p2p_transport::StatementKind::FingerprintComment => {
             crate::fingerprint::ingest_comment_bytes(store, payload)
         }
+        p2p_transport::StatementKind::DirectMessage => {
+            crate::direct_message::ingest_bytes(store, payload)
+        }
     }
 }
 

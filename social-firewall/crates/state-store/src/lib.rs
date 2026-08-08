@@ -18,15 +18,15 @@
 //! documented next step, not yet implemented here.
 
 use domain_types::{
-    Contribution, DeviceApprovalOpinion, DeviceId, DevicePresenceObservation, FederationId,
-    FederationStatement, FederationTrustRule, FingerprintComment, FingerprintObservation, Group,
-    GroupBlockReport, GroupId, GroupJoinRequest, GroupTrustRule, GroupVote, Hash32, LocalOverride,
-    LocalProfile, LocalRouteProfile, LocalTrustRule, MessagingPublicKeyBytes, NodeId, OpinionRef,
-    OverrideKind, PartyLineMessage, PolicyAction, PolicyEntry, PolicyOpinion, PolicyVote,
-    PublicKeyBytes, Reason, ReasonCode, SharedPolicy, SharedRuleEntry, SharedRuleList,
-    SignatureBytes, Stance, StatementAuthor, StatementRef, TargetSelector, TunnelAdvertisement,
-    TunnelConnectionAccept, TunnelConnectionRequest, TunnelServiceRequest, TunnelTrustRule, UserId,
-    Visibility, WgPublicKeyBytes,
+    Contribution, DeviceApprovalOpinion, DeviceId, DevicePresenceObservation, DirectMessage,
+    FederationId, FederationStatement, FederationTrustRule, FingerprintComment,
+    FingerprintObservation, Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupTrustRule,
+    GroupVote, Hash32, LocalOverride, LocalProfile, LocalRouteProfile, LocalTrustRule,
+    MessagingPublicKeyBytes, NodeId, OpinionRef, OverrideKind, PartyLineMessage, PolicyAction,
+    PolicyEntry, PolicyOpinion, PolicyVote, PublicKeyBytes, Reason, ReasonCode, SharedPolicy,
+    SharedRuleEntry, SharedRuleList, SignatureBytes, Stance, StatementAuthor, StatementRef,
+    TargetSelector, TunnelAdvertisement, TunnelConnectionAccept, TunnelConnectionRequest,
+    TunnelServiceRequest, TunnelTrustRule, UserId, Visibility, WgPublicKeyBytes,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -112,6 +112,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0033_party_line_received_at.sql"),
     ),
     (34, include_str!("../migrations/0034_local_irc_history.sql")),
+    (35, include_str!("../migrations/0035_direct_messages.sql")),
 ];
 
 #[derive(thiserror::Error, Debug)]
@@ -423,6 +424,87 @@ impl StateStore {
         })?;
         let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
         messages.reverse();
+        Ok(messages)
+    }
+
+    pub fn next_direct_message_sequence(&self, sender: &UserId) -> Result<u64, StoreError> {
+        let sequence: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(sequence) FROM direct_messages WHERE sender_federation_id = ?1 AND sender_local_id = ?2",
+                params![sender.federation.0 .0.as_slice(), sender.local_id.0.as_slice()],
+                |row| row.get(0),
+            )?;
+        Ok(sequence.unwrap_or(-1).saturating_add(1) as u64)
+    }
+
+    pub fn store_direct_message(&self, message: &DirectMessage) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO direct_messages (sender_federation_id, sender_local_id, recipient_federation_id, recipient_local_id, sequence, body, issued_at, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(sender_federation_id, sender_local_id, sequence) DO NOTHING",
+            params![
+                message.sender.federation.0 .0.as_slice(),
+                message.sender.local_id.0.as_slice(),
+                message.recipient.federation.0 .0.as_slice(),
+                message.recipient.local_id.0.as_slice(),
+                message.sequence as i64,
+                message.body,
+                message.issued_at,
+                message.signature.0.as_slice(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_direct_messages_for(
+        &self,
+        recipient: &UserId,
+    ) -> Result<Vec<DirectMessage>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sender_federation_id, sender_local_id, sequence, body, issued_at, signature FROM direct_messages WHERE recipient_federation_id = ?1 AND recipient_local_id = ?2 ORDER BY issued_at, sequence",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                recipient.federation.0 .0.as_slice(),
+                recipient.local_id.0.as_slice()
+            ],
+            |row| {
+                let sender_federation: Vec<u8> = row.get(0)?;
+                let sender_local: Vec<u8> = row.get(1)?;
+                let signature: Vec<u8> = row.get(5)?;
+                Ok((
+                    sender_federation,
+                    sender_local,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    signature,
+                ))
+            },
+        )?;
+        let mut messages = Vec::new();
+        for row in rows {
+            let (federation, local, sequence, body, issued_at, signature) = row?;
+            let federation: [u8; 32] = federation.try_into().map_err(|_| {
+                StoreError::Encoding("invalid direct-message sender federation".into())
+            })?;
+            let local: [u8; 32] = local.try_into().map_err(|_| {
+                StoreError::Encoding("invalid direct-message sender local ID".into())
+            })?;
+            let signature: [u8; 64] = signature
+                .try_into()
+                .map_err(|_| StoreError::Encoding("invalid direct-message signature".into()))?;
+            messages.push(DirectMessage {
+                sender: UserId {
+                    federation: FederationId(Hash32(federation)),
+                    local_id: Hash32(local),
+                },
+                recipient: *recipient,
+                sequence,
+                body,
+                issued_at,
+                signature: SignatureBytes(signature),
+            });
+        }
         Ok(messages)
     }
 

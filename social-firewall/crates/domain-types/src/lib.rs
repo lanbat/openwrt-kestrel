@@ -1,5 +1,6 @@
 pub mod canonical;
 pub mod device;
+pub mod direct_message;
 pub mod fingerprint;
 pub mod group;
 pub mod ids;
@@ -16,6 +17,7 @@ pub mod tunnel;
 
 pub use canonical::CanonicalEncode;
 pub use device::{DeviceApprovalOpinion, MAX_DEVICE_LABEL_LEN};
+pub use direct_message::{DirectMessage, MAX_DIRECT_MESSAGE_LEN};
 pub use fingerprint::{FingerprintComment, FingerprintObservation};
 pub use group::{
     Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupVote, PartyLineMessage,

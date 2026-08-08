@@ -18,6 +18,7 @@ mod cgi;
 mod command_args;
 mod device;
 mod device_fingerprint;
+mod direct_message;
 mod fingerprint;
 mod group;
 mod irc;

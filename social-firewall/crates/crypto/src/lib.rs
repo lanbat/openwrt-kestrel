@@ -40,6 +40,7 @@ pub mod contexts {
     pub const FINGERPRINT_OBSERVATION: &[u8] = b"social-firewall.fingerprint-observation.v1";
     pub const FINGERPRINT_COMMENT: &[u8] = b"social-firewall.fingerprint-comment.v1";
     pub const PARTY_LINE_MESSAGE: &[u8] = b"social-firewall.party-line-message.v1";
+    pub const DIRECT_MESSAGE: &[u8] = b"social-firewall.direct-message.v1";
     pub const DEVICE_APPROVAL_OPINION: &[u8] = b"social-firewall.device-approval-opinion.v1";
     pub const GROUP_BLOCK_REPORT: &[u8] = b"social-firewall.group-block-report.v1";
 }
