@@ -42,6 +42,7 @@ fn observation_json(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn publish_observation(
     store: &StateStore,
     group: &str,
