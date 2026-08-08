@@ -55,13 +55,15 @@ pub(crate) fn handle(
         "lists" | "list-lists" => list_shared_lists(server, tx, state, store)?,
         "profiles" => list_profiles(server, tx, state, store)?,
         "routes" => list_routes(server, tx, state, store)?,
+        "create-profile" => create_profile(server, tx, state, store, &options)?,
+        "select-profile" => select_profile(server, tx, state, store, &options)?,
+        "add-profile-policy" => add_profile_policy(server, tx, state, store, &options)?,
+        "add-route-profile" => add_route_profile(server, tx, state, store, &options)?,
         "fingerprint" => list_fingerprint(server, tx, state, store, &options)?,
         "fingerprint-observe" => {
             publish_fingerprint_observation(server, tx, state, store, &options)?
         }
-        "fingerprint-comment" => {
-            publish_fingerprint_comment(server, tx, state, store, &options)?
-        }
+        "fingerprint-comment" => publish_fingerprint_comment(server, tx, state, store, &options)?,
         _ => response(
             server,
             tx,
@@ -195,6 +197,10 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf policies | policy-explain --policy-id ID --entry-id ID --group GROUP",
         "/sf tunnels | pending-tunnels | tunnel-balance",
         "/sf lists | profiles | routes",
+        "/sf create-profile --name NAME --description TEXT",
+        "/sf select-profile --profile-id ID",
+        "/sf add-profile-policy --profile-id ID --policy-id ID",
+        "/sf add-route-profile --name NAME --table NUMBER --interface IFACE",
         "/sf fingerprint --group GROUP --fingerprint-id ID --revision NUMBER",
         "/sf fingerprint-observe --group GROUP --fingerprint-id ID --revision NUMBER --signal-family NAME --evidence-digest HASH --confidence 0-100",
         "/sf fingerprint-comment --group GROUP --fingerprint-id ID --revision NUMBER --body TEXT",
@@ -1048,6 +1054,76 @@ fn list_routes(
     Ok(())
 }
 
+fn create_profile(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    crate::profile::create(
+        store,
+        required(options, "name")?,
+        options
+            .get("description")
+            .map(String::as_str)
+            .unwrap_or_default(),
+    )?;
+    response(server, tx, state, "local profile created");
+    Ok(())
+}
+
+fn select_profile(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    crate::profile::select(store, required(options, "profile-id")?)?;
+    response(server, tx, state, "active local profile changed");
+    Ok(())
+}
+
+fn add_profile_policy(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    crate::profile::add_policy(
+        store,
+        required(options, "profile-id")?,
+        required(options, "policy-id")?,
+    )?;
+    response(server, tx, state, "policy added to local profile");
+    Ok(())
+}
+
+fn add_route_profile(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    crate::profile::add_route_profile(
+        store,
+        required(options, "name")?,
+        required(options, "table")?.parse()?,
+        required(options, "interface")?,
+        parse_bool_or(options, "enabled", false)?,
+        parse_bool_or(options, "vpn", false)?,
+    )?;
+    response(server, tx, state, "local route profile saved");
+    Ok(())
+}
+
 fn list_fingerprint(
     server: &Server,
     tx: &mpsc::Sender<String>,
@@ -1175,6 +1251,19 @@ fn require_write_access(
     } else {
         response(server, tx, state, "IRC write access is required");
         anyhow::bail!("IRC write access denied")
+    }
+}
+
+fn require_operator_access(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+) -> Result<()> {
+    if super::has_operator_access(server, state) {
+        Ok(())
+    } else {
+        response(server, tx, state, "IRC operator access is required");
+        anyhow::bail!("IRC operator access denied")
     }
 }
 
