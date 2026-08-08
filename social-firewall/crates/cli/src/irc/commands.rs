@@ -114,7 +114,7 @@ fn handle_message(
     }
     let body = &params[1];
     if !notice && (body == "/sf" || body.starts_with("/sf ")) {
-        if let Err(error) = super::social::handle(server, tx, state, store, body) {
+        if let Err(error) = super::social::handle(server, client_id, tx, state, store, body) {
             super::social::error(server, tx, state, &error.to_string());
         }
         return Ok(());
@@ -321,6 +321,18 @@ fn handle_direct_message(
         super::send_line(tx, &line);
     }
     Ok(())
+}
+
+pub(crate) fn handle_message_alias(
+    server: &Server,
+    client_id: u64,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    target: String,
+    body: String,
+) -> Result<()> {
+    handle_message(server, client_id, tx, state, store, &[target, body], false)
 }
 
 fn handle_local_message(

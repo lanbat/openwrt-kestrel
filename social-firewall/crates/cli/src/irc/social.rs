@@ -7,6 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 
 pub(crate) fn handle(
     server: &Server,
+    client_id: u64,
     tx: &mpsc::Sender<String>,
     state: &Arc<Mutex<SessionState>>,
     store: &StateStore,
@@ -17,6 +18,16 @@ pub(crate) fn handle(
         help(server, tx, state);
         return Ok(());
     };
+    if command.eq_ignore_ascii_case("msg") {
+        if words.len() < 3 {
+            anyhow::bail!("usage: /sf msg TARGET MESSAGE");
+        }
+        let target = words[1].clone();
+        let message = words[2..].join(" ").trim_start_matches(':').to_string();
+        return super::commands::handle_message_alias(
+            server, client_id, tx, state, store, target, message,
+        );
+    }
     let options = parse_options(&words[1..])?;
     match command {
         "help" => help(server, tx, state),
@@ -198,6 +209,7 @@ fn parse_options(words: &[String]) -> Result<HashMap<String, String>> {
 fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionState>>) {
     for line in [
         "/sf groups | follows | history [--group GROUP]",
+        "/sf msg TARGET MESSAGE (same routing as PRIVMSG)",
         "/sf voters --group GROUP",
         "/sf follow --user FEDERATION/LOCAL --allow-weight N --deny-weight N [--advisory true|false] [--excluded true|false] [--name NAME] [--iroh-node-id ID]",
         "/sf follow-category --user FEDERATION/LOCAL [--category NAME]",
