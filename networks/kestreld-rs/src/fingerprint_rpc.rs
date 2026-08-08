@@ -37,6 +37,11 @@ pub async fn run(base_dir: PathBuf, store: Arc<Store>, socket_path: PathBuf) -> 
         tokio::fs::remove_file(&socket_path).await?;
     }
     let listener = UnixListener::bind(&socket_path)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &socket_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o660),
+    )?;
     loop {
         let (stream, _) = listener.accept().await?;
         let base_dir = base_dir.clone();
