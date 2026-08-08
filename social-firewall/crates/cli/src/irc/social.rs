@@ -103,7 +103,7 @@ pub(crate) fn handle_invite(
     require_write_access(server, tx, state)?;
     let target = crate::tunnel::user_id_str(&resolve_invite_target(store, &params[0])?);
     let channel = params[1].trim_start_matches(':');
-    let group = crate::group::resolve_group_id(store, channel)?;
+    let group = resolve_group_value(store, channel)?;
     crate::group::invite_group_member(
         store,
         &crate::group::group_id_str(group),
@@ -499,7 +499,7 @@ fn list_blocked(
     store: &StateStore,
     options: &HashMap<String, String>,
 ) -> Result<()> {
-    let group = crate::group::resolve_group_id(store, required(options, "group")?)?;
+    let group = resolve_group_value(store, required(options, "group")?)?;
     let blocked = store.list_blocked_group_users(group)?;
     if blocked.is_empty() {
         response(server, tx, state, "no blocked users");
@@ -878,7 +878,7 @@ fn explain_policy(
 ) -> Result<()> {
     let policy_id = crate::parse_hash32(required(options, "policy-id")?)?;
     let entry_id = crate::parse_hash32(required(options, "entry-id")?)?;
-    let group = crate::group::resolve_group_id(store, required(options, "group")?)?;
+    let group = resolve_group_value(store, required(options, "group")?)?;
     let policy = store
         .list_shared_policies()?
         .into_iter()
@@ -1131,7 +1131,7 @@ fn list_fingerprint(
     store: &StateStore,
     options: &HashMap<String, String>,
 ) -> Result<()> {
-    let group = crate::group::resolve_group_id(store, required(options, "group")?)?;
+    let group = resolve_group_value(store, required(options, "group")?)?;
     let fingerprint_id = domain_types::Hash32(crate::tunnel::bytes32(required(
         options,
         "fingerprint-id",
@@ -1222,7 +1222,7 @@ fn group_option(
     options: &HashMap<String, String>,
 ) -> Result<domain_types::GroupId> {
     if let Some(group) = options.get("group") {
-        return crate::group::resolve_group_id(store, group);
+        return resolve_group_value(store, group);
     }
     state
         .lock()
@@ -1232,6 +1232,16 @@ fn group_option(
         .next()
         .copied()
         .context("join a group or provide --group")
+}
+
+fn resolve_group_value(store: &StateStore, value: &str) -> Result<domain_types::GroupId> {
+    let value = value.trim_start_matches(':');
+    if value.starts_with('#') {
+        return super::find_group(store, value)
+            .map(|group| group.group_id)
+            .with_context(|| format!("unknown group `{value}`"));
+    }
+    crate::group::resolve_group_id(store, value)
 }
 
 fn required<'a>(options: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
