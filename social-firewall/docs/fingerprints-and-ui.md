@@ -150,7 +150,13 @@ by the observing router and contains only:
 - Shared fingerprint ID and revision.
 - Signal family.
 - Evidence digest.
-- Confidence, timestamps, expiry, and signature.
+- Observer confidence from `0` to `100`, timestamps, expiry, and signature.
+
+Confidence is an observer-reported quality score, not a calibrated probability
+that the fingerprint belongs to a particular identity. `0` means the observer
+does not consider the observation useful; `100` is the observer's strongest
+confidence. Ingest rejects values outside this range, and the score is covered
+by the observation signature.
 
 It does not contain raw evidence or the group fingerprint key. Comments and
 future votes refer to `(group_id, fingerprint_id, fingerprint_revision)` so
@@ -289,7 +295,7 @@ Use stable same-origin paths:
 /cgi-bin/sf-fingerprint
 /cgi-bin/sf-profiles
 /cgi-bin/sf-routes
-/cgi-bin/sf-chat
+/cgi-bin/sf-partyline
 ```
 
 The compelling flow is: kestreld notices an unfamiliar device, social-firewall

@@ -56,6 +56,12 @@ pub(crate) fn handle(
         "profiles" => list_profiles(server, tx, state, store)?,
         "routes" => list_routes(server, tx, state, store)?,
         "fingerprint" => list_fingerprint(server, tx, state, store, &options)?,
+        "fingerprint-observe" => {
+            publish_fingerprint_observation(server, tx, state, store, &options)?
+        }
+        "fingerprint-comment" => {
+            publish_fingerprint_comment(server, tx, state, store, &options)?
+        }
         _ => response(
             server,
             tx,
@@ -190,6 +196,8 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf tunnels | pending-tunnels | tunnel-balance",
         "/sf lists | profiles | routes",
         "/sf fingerprint --group GROUP --fingerprint-id ID --revision NUMBER",
+        "/sf fingerprint-observe --group GROUP --fingerprint-id ID --revision NUMBER --signal-family NAME --evidence-digest HASH --confidence 0-100",
+        "/sf fingerprint-comment --group GROUP --fingerprint-id ID --revision NUMBER --body TEXT",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
     ] {
         response(server, tx, state, line);
@@ -1087,6 +1095,48 @@ fn list_fingerprint(
             ),
         );
     }
+    Ok(())
+}
+
+fn publish_fingerprint_observation(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::fingerprint::publish_observation(
+        store,
+        required(options, "group")?,
+        required(options, "fingerprint-id")?,
+        required(options, "revision")?.parse()?,
+        required(options, "signal-family")?,
+        required(options, "evidence-digest")?,
+        required(options, "confidence")?.parse()?,
+        None,
+    )?;
+    response(server, tx, state, "signed fingerprint observation recorded");
+    Ok(())
+}
+
+fn publish_fingerprint_comment(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::fingerprint::publish_comment(
+        store,
+        required(options, "group")?,
+        required(options, "fingerprint-id")?,
+        required(options, "revision")?.parse()?,
+        required(options, "body")?,
+        None,
+    )?;
+    response(server, tx, state, "signed fingerprint comment recorded");
     Ok(())
 }
 

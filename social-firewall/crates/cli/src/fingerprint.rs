@@ -23,9 +23,8 @@ pub fn derive_shared_id(store: &StateStore, group: &str, material_file: &Path) -
         .group_fingerprint_key(group_id)?
         .ok_or_else(|| anyhow::anyhow!("no fingerprint key configured for group {group}"))?;
     let material = std::fs::read(material_file)?;
-    let fingerprint_id = crypto::shared_fingerprint::derive_shared_fingerprint_from_material(
-        &key, &material,
-    );
+    let fingerprint_id =
+        crypto::shared_fingerprint::derive_shared_fingerprint_from_material(&key, &material);
     println!("{fingerprint_id}");
     Ok(())
 }
@@ -53,9 +52,7 @@ pub fn publish_observation(
     confidence: u8,
     out: Option<PathBuf>,
 ) -> Result<()> {
-    if confidence > 100 {
-        bail!("confidence must be between 0 and 100");
-    }
+    validate_confidence(u64::from(confidence))?;
     let group_id = crate::group::resolve_group_id(store, group)?;
     let (observer, seed) = self_identity(store)?;
     let keypair = crypto::Keypair::from_seed(&seed);
@@ -168,6 +165,12 @@ pub fn ingest_observation_bytes(store: &StateStore, payload: &[u8]) -> Result<()
             .and_then(|v| v.as_str())
             .with_context(|| format!("missing {key}"))
     };
+    let confidence = validate_confidence(
+        value
+            .get("confidence")
+            .and_then(|v| v.as_u64())
+            .context("missing confidence")?,
+    )?;
     let observation = FingerprintObservation {
         group_id: crate::group::parse_group_id(get("group_id")?)?,
         fingerprint_id: parse_hash32(get("fingerprint_id")?)?,
@@ -178,11 +181,7 @@ pub fn ingest_observation_bytes(store: &StateStore, payload: &[u8]) -> Result<()
         observer: crate::tunnel::parse_user_ref(get("observer")?)?,
         signal_family: get("signal_family")?.into(),
         evidence_digest: parse_hash32(get("evidence_digest")?)?,
-        confidence: value
-            .get("confidence")
-            .and_then(|v| v.as_u64())
-            .context("missing confidence")?
-            .try_into()?,
+        confidence,
         issued_at: value
             .get("issued_at")
             .and_then(|v| v.as_i64())
@@ -199,6 +198,13 @@ pub fn ingest_observation_bytes(store: &StateStore, payload: &[u8]) -> Result<()
     )
     .map_err(|_| anyhow::anyhow!("fingerprint observation signature verification failed"))?;
     Ok(store.store_fingerprint_observation(&observation)?)
+}
+
+fn validate_confidence(value: u64) -> Result<u8> {
+    u8::try_from(value)
+        .ok()
+        .filter(|confidence| *confidence <= 100)
+        .ok_or_else(|| anyhow::anyhow!("confidence must be between 0 and 100"))
 }
 
 pub fn ingest_comment_bytes(store: &StateStore, payload: &[u8]) -> Result<()> {
@@ -237,4 +243,21 @@ pub fn ingest_comment_bytes(store: &StateStore, payload: &[u8]) -> Result<()> {
     )
     .map_err(|_| anyhow::anyhow!("fingerprint comment signature verification failed"))?;
     Ok(store.store_fingerprint_comment(&comment)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_confidence;
+
+    #[test]
+    fn confidence_accepts_inclusive_zero_to_hundred_range() {
+        assert_eq!(validate_confidence(0).unwrap(), 0);
+        assert_eq!(validate_confidence(100).unwrap(), 100);
+    }
+
+    #[test]
+    fn confidence_rejects_values_above_hundred() {
+        assert!(validate_confidence(101).is_err());
+        assert!(validate_confidence(u64::from(u8::MAX) + 1).is_err());
+    }
 }
