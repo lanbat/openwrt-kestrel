@@ -198,6 +198,7 @@ fn policy_from_json(value: &serde_json::Value) -> Result<(SharedPolicy, [u8; 32]
     Ok((policy, bytes32(get("identity_pubkey")?)?))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn publish_policy(
     store: &StateStore,
     policy_id: &str,
@@ -284,6 +285,7 @@ pub fn list_policies(store: &StateStore) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn vote_policy_entry(
     store: &StateStore,
     policy_id: &str,

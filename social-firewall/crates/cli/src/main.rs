@@ -1933,8 +1933,8 @@ fn list_follows(store: &StateStore) -> Result<()> {
         };
         println!(
             "{label} ({}@{}) allow={} deny={}{}",
-            follow.user.local_id.to_string()[..8].to_string(),
-            follow.user.federation.0.to_string()[..8].to_string(),
+            &follow.user.local_id.to_string()[..8],
+            &follow.user.federation.0.to_string()[..8],
             follow.allow_weight,
             follow.deny_weight,
             suffix
