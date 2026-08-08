@@ -45,6 +45,7 @@ pub(crate) fn handle(
         "explain-enforced" => explain_enforced(server, tx, state, store, &options)?,
         "enforced" | "list-enforced" => list_enforced(server, tx, state, store)?,
         "sync" => sync(server, tx, state, store, &options)?,
+        "notify" => notify(server, tx, state, store)?,
         "request-tunnel" => request_tunnel(server, tx, state, store, &options)?,
         "accept-tunnel" => accept_tunnel(server, tx, state, store, &options)?,
         "offer-tunnel" => offer_tunnel(server, tx, state, store, &options)?,
@@ -212,6 +213,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf explain-enforced --target-kind KIND --target-value VALUE",
         "/sf enforced",
         "/sf sync [--group GROUP]",
+        "/sf notify (IRC operator only)",
         "/sf request-tunnel --advertisement ADVERTISEMENT",
         "/sf accept-tunnel --requester USER --sequence NUMBER",
         "/sf offer-tunnel --description TEXT --target KIND:VALUE[,KIND:VALUE]",
@@ -788,6 +790,26 @@ fn set_override(
     };
     store.set_local_override(&override_record)?;
     response(server, tx, state, "local policy override set");
+    Ok(())
+}
+
+fn notify(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    let report = crate::notify::notify_pending_items(store)?;
+    response(
+        server,
+        tx,
+        state,
+        &format!(
+            "pending-item notification scan posted {} notification(s)",
+            report.notifications_posted
+        ),
+    );
     Ok(())
 }
 
