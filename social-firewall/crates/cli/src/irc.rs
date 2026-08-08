@@ -28,6 +28,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 const BASE_CAPS: &[&str] = &["message-tags", "server-time"];
+pub(crate) const LOCAL_CHANNEL: &str = "#sf-local";
+pub(crate) const LOCAL_HISTORY_MAX_AGE: i64 = 7 * 24 * 60 * 60;
+pub(crate) const LOCAL_HISTORY_MAX_MESSAGES: i64 = 500;
+pub(crate) const LOCAL_HISTORY_MAX_BYTES: i64 = 1024 * 1024;
 
 pub use auth::OidcSettings;
 use auth::{decode_oauthbearer, OidcAuthenticator};
@@ -441,6 +445,7 @@ fn handle_authenticate(
     server: &Server,
     tx: &mpsc::Sender<String>,
     state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
     params: &[String],
 ) {
     let Some(authenticator) = &server.config.oidc else {
@@ -501,7 +506,7 @@ fn handle_authenticate(
                         server.config.server_name
                     ),
                 );
-                maybe_register(server, tx, state);
+                maybe_register(server, tx, state, store);
             }
             Err(error) => {
                 eprintln!("IRC OIDC authentication failed: {error:#}");
@@ -526,7 +531,7 @@ fn handle_authenticate(
             state.lock().unwrap().sasl_pending = true;
             send_line(tx, "+");
             if let Some(initial) = params.get(1) {
-                handle_authenticate(server, tx, state, std::slice::from_ref(initial));
+                handle_authenticate(server, tx, state, store, std::slice::from_ref(initial));
             }
         }
         _ => send_error(
@@ -544,6 +549,7 @@ fn handle_nick(
     client_id: u64,
     tx: &mpsc::Sender<String>,
     state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
     params: &[String],
 ) {
     let Some(nick) = params.first().filter(|nick| valid_nick(nick)) else {
@@ -577,15 +583,19 @@ fn handle_nick(
         );
         return;
     }
-    let (old, registered, channels) = {
+    let (old, registered, mut channels, local_channel) = {
         let mut session = state.lock().unwrap();
         let old = session.nick.replace(nick.clone());
         (
             old,
             session.registered,
             session.channels.values().cloned().collect::<Vec<_>>(),
+            session.local_channel,
         )
     };
+    if local_channel {
+        channels.push(LOCAL_CHANNEL.into());
+    }
     drop(clients);
     if let Some(old) = old {
         let line = format!(":{old}!local@{} NICK :{nick}", server.config.server_name);
@@ -596,13 +606,14 @@ fn handle_nick(
         }
         send_line(tx, &line);
     }
-    maybe_register(server, tx, state);
+    maybe_register(server, tx, state, store);
 }
 
 fn handle_user(
     server: &Server,
     tx: &mpsc::Sender<String>,
     state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
     params: &[String],
 ) {
     if params.len() < 4 {
@@ -616,10 +627,15 @@ fn handle_user(
         return;
     }
     state.lock().unwrap().username = Some(params[0].clone());
-    maybe_register(server, tx, state);
+    maybe_register(server, tx, state, store);
 }
 
-fn maybe_register(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionState>>) {
+fn maybe_register(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) {
     let mut session = state.lock().unwrap();
     if session.registered
         || session.nick.is_none()
@@ -647,6 +663,54 @@ fn maybe_register(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<
     );
     send_line(tx, &format!(":{name} 005 {nick} CHANTYPES=# CASEMAPPING=ascii NETWORK=Kestrel SAFELIST :are supported by this server"));
     send_motd(server, tx, state);
+    join_local_channel(server, tx, state, store);
+}
+
+fn join_local_channel(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) {
+    let nick = state
+        .lock()
+        .unwrap()
+        .nick
+        .clone()
+        .unwrap_or_else(|| "*".into());
+    {
+        let mut session = state.lock().unwrap();
+        if session.local_channel {
+            return;
+        }
+        session.local_channel = true;
+    }
+    broadcast_local_channel(
+        server,
+        &format!(
+            ":{nick}!local@{} JOIN {LOCAL_CHANNEL}",
+            server.config.server_name
+        ),
+    );
+    let _ = store.prune_local_irc_history(
+        crate::now_unix(),
+        LOCAL_HISTORY_MAX_AGE,
+        LOCAL_HISTORY_MAX_MESSAGES,
+        LOCAL_HISTORY_MAX_BYTES,
+    );
+    for (history_nick, body, issued_at) in store
+        .list_local_irc_messages(LOCAL_HISTORY_MAX_MESSAGES as usize)
+        .unwrap_or_default()
+    {
+        let timestamp = protocol::format_time(issued_at);
+        send_line(
+            tx,
+            &format!(
+                "@time={timestamp};sf-local=1 :{history_nick}!local@{} PRIVMSG {LOCAL_CHANNEL} :{body}",
+                server.config.server_name
+            ),
+        );
+    }
 }
 
 fn send_motd(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionState>>) {
@@ -724,6 +788,36 @@ fn broadcast_channel_except(server: &Server, channel: &str, except: u64, line: &
             send_line(&client.tx, line);
         }
     }
+}
+
+fn broadcast_local_channel(server: &Server, line: &str) {
+    for client in server.clients.lock().unwrap().iter() {
+        if client.state.lock().unwrap().local_channel {
+            send_line(&client.tx, line);
+        }
+    }
+}
+
+fn broadcast_local_channel_except(server: &Server, except: u64, line: &str) {
+    for client in server.clients.lock().unwrap().iter() {
+        if client.id != except && client.state.lock().unwrap().local_channel {
+            send_line(&client.tx, line);
+        }
+    }
+}
+
+fn local_member_nicks(server: &Server) -> Vec<String> {
+    server
+        .clients
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|client| {
+            let session = client.state.lock().unwrap();
+            session.local_channel.then(|| session.nick.clone())
+        })
+        .flatten()
+        .collect()
 }
 
 fn broadcast_all(server: &Server, except: Option<u64>, line: &str) {

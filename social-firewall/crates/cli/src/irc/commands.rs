@@ -51,9 +51,9 @@ pub(crate) fn handle_line(
         }
         "PONG" => {}
         "PASS" => {}
-        "AUTHENTICATE" => super::handle_authenticate(server, tx, state, &line.params),
-        "NICK" => super::handle_nick(server, client_id, tx, state, &line.params),
-        "USER" => super::handle_user(server, tx, state, &line.params),
+        "AUTHENTICATE" => super::handle_authenticate(server, tx, state, store, &line.params),
+        "NICK" => super::handle_nick(server, client_id, tx, state, store, &line.params),
+        "USER" => super::handle_user(server, tx, state, store, &line.params),
         "QUIT" => return Ok(true),
         "JOIN" => handle_join(server, tx, state, store, &line.params),
         "PART" => handle_part(server, tx, state, store, &line.params),
@@ -118,6 +118,9 @@ fn handle_message(
             super::social::error(server, tx, state, &error.to_string());
         }
         return Ok(());
+    }
+    if params[0].eq_ignore_ascii_case(super::LOCAL_CHANNEL) {
+        return handle_local_message(server, client_id, tx, state, store, body, notice);
     }
     if body.is_empty() {
         if !notice {
@@ -250,6 +253,66 @@ fn handle_message(
     Ok(())
 }
 
+fn handle_local_message(
+    server: &Server,
+    client_id: u64,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    body: &str,
+    notice: bool,
+) -> Result<()> {
+    if body.is_empty() || body.len() > 4096 {
+        if !notice {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                417,
+                "#sf-local :Message length is invalid",
+            );
+        }
+        return Ok(());
+    }
+    if !state.lock().unwrap().local_channel {
+        if !notice {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                404,
+                "#sf-local :Cannot send to channel",
+            );
+        }
+        return Ok(());
+    }
+    let nick = state
+        .lock()
+        .unwrap()
+        .nick
+        .clone()
+        .unwrap_or_else(|| "*".into());
+    let now = crate::now_unix();
+    store.append_local_irc_message(
+        &nick,
+        body,
+        now,
+        super::LOCAL_HISTORY_MAX_AGE,
+        super::LOCAL_HISTORY_MAX_MESSAGES,
+        super::LOCAL_HISTORY_MAX_BYTES,
+    )?;
+    let command = if notice { "NOTICE" } else { "PRIVMSG" };
+    let timestamp = super::protocol::format_time(now);
+    let line = format!(
+        "@time={timestamp};sf-local=1 :{nick}!local@{} {command} {} :{body}",
+        server.config.server_name,
+        super::LOCAL_CHANNEL
+    );
+    super::broadcast_local_channel_except(server, client_id, &line);
+    super::send_line(tx, &line);
+    Ok(())
+}
+
 fn handle_join(
     server: &Server,
     tx: &mpsc::Sender<String>,
@@ -284,6 +347,10 @@ fn handle_join_one(
         );
         return;
     };
+    if channel.eq_ignore_ascii_case(super::LOCAL_CHANNEL) {
+        super::join_local_channel(server, tx, state, store);
+        return;
+    }
     let Some(group) = super::find_group(store, channel) else {
         super::send_error(
             tx,
@@ -407,6 +474,24 @@ fn handle_part_one(
         );
         return;
     };
+    if requested.eq_ignore_ascii_case(super::LOCAL_CHANNEL) {
+        if state.lock().unwrap().local_channel {
+            let nick = state
+                .lock()
+                .unwrap()
+                .nick
+                .clone()
+                .unwrap_or_else(|| "*".into());
+            let line = format!(
+                ":{nick}!local@{} PART {}",
+                server.config.server_name,
+                super::LOCAL_CHANNEL
+            );
+            super::broadcast_local_channel(server, &line);
+            state.lock().unwrap().local_channel = false;
+        }
+        return;
+    }
     let Some(group) = super::find_group(store, requested) else {
         super::send_error(
             tx,
@@ -448,6 +533,46 @@ fn handle_topic(
     store: &StateStore,
     params: &[String],
 ) {
+    if params
+        .first()
+        .map(|value| value.eq_ignore_ascii_case(super::LOCAL_CHANNEL))
+        .unwrap_or(false)
+    {
+        let joined = state.lock().unwrap().local_channel;
+        if !joined {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                442,
+                "TOPIC :You're not in a channel",
+            );
+        } else if params.get(1).is_some() {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                482,
+                "#sf-local :Local channel topic is fixed",
+            );
+        } else {
+            let nick = state
+                .lock()
+                .unwrap()
+                .nick
+                .clone()
+                .unwrap_or_else(|| "*".into());
+            super::send_line(
+                tx,
+                &format!(
+                    ":{} 332 {nick} {} :Local IRC users only",
+                    server.config.server_name,
+                    super::LOCAL_CHANNEL
+                ),
+            );
+        }
+        return;
+    }
     let Some((group_id, channel)) = super::session_channel(state, store, params.first()) else {
         super::send_error(
             tx,
@@ -532,6 +657,45 @@ fn handle_mode(
     store: &StateStore,
     params: &[String],
 ) {
+    if params
+        .first()
+        .map(|value| value.eq_ignore_ascii_case(super::LOCAL_CHANNEL))
+        .unwrap_or(false)
+    {
+        if !state.lock().unwrap().local_channel {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                442,
+                "MODE :You're not in a channel",
+            );
+        } else if params.get(1).is_some() {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                482,
+                "#sf-local :Local channel modes are fixed",
+            );
+        } else {
+            let nick = state
+                .lock()
+                .unwrap()
+                .nick
+                .clone()
+                .unwrap_or_else(|| "*".into());
+            super::send_line(
+                tx,
+                &format!(
+                    ":{} 324 {nick} {} +nt",
+                    server.config.server_name,
+                    super::LOCAL_CHANNEL
+                ),
+            );
+        }
+        return;
+    }
     let Some((group_id, channel)) = super::session_channel(state, store, params.first()) else {
         super::send_error(
             tx,
@@ -638,6 +802,32 @@ fn handle_names(
         );
         return;
     };
+    if channel.eq_ignore_ascii_case(super::LOCAL_CHANNEL) {
+        let nick = state
+            .lock()
+            .unwrap()
+            .nick
+            .clone()
+            .unwrap_or_else(|| "*".into());
+        let members = super::local_member_nicks(server).join(" ");
+        super::send_line(
+            tx,
+            &format!(
+                ":{} 353 {nick} = {} :{members}",
+                server.config.server_name,
+                super::LOCAL_CHANNEL
+            ),
+        );
+        super::send_line(
+            tx,
+            &format!(
+                ":{} 366 {nick} {} :End of /NAMES list",
+                server.config.server_name,
+                super::LOCAL_CHANNEL
+            ),
+        );
+        return;
+    }
     let Some(group) = super::find_group(store, &channel) else {
         super::send_error(
             tx,
@@ -678,6 +868,15 @@ fn handle_list(server: &Server, tx: &mpsc::Sender<String>, store: &StateStore) {
         tx,
         &format!(":{} 321 * Channel :Users Name", server.config.server_name),
     );
+    super::send_line(
+        tx,
+        &format!(
+            ":{} 322 * {} {} :Local IRC users only",
+            server.config.server_name,
+            super::LOCAL_CHANNEL,
+            super::local_member_nicks(server).len()
+        ),
+    );
     for group in store.list_groups().unwrap_or_default() {
         super::send_line(
             tx,
@@ -713,6 +912,36 @@ fn handle_who(
         );
         return;
     };
+    if channel.eq_ignore_ascii_case(super::LOCAL_CHANNEL) {
+        let requester = state
+            .lock()
+            .unwrap()
+            .nick
+            .clone()
+            .unwrap_or_else(|| "*".into());
+        for member in super::local_member_nicks(server) {
+            super::send_line(
+                tx,
+                &format!(
+                    ":{} 352 {requester} {} local {} {} H :0 {}",
+                    server.config.server_name,
+                    super::LOCAL_CHANNEL,
+                    server.config.server_name,
+                    member,
+                    member
+                ),
+            );
+        }
+        super::send_line(
+            tx,
+            &format!(
+                ":{} 315 {requester} {} :End of /WHO list",
+                server.config.server_name,
+                super::LOCAL_CHANNEL
+            ),
+        );
+        return;
+    }
     let Some(group) = super::find_group(store, channel) else {
         super::send_error(
             tx,
@@ -765,7 +994,7 @@ fn handle_whois(server: &Server, tx: &mpsc::Sender<String>, store: &StateStore, 
             server.config.server_name, nick
         ),
     );
-    let groups = store
+    let mut groups = store
         .list_groups()
         .unwrap_or_default()
         .into_iter()
@@ -776,6 +1005,17 @@ fn handle_whois(server: &Server, tx: &mpsc::Sender<String>, store: &StateStore, 
         })
         .map(|group| super::channel_alias(&group))
         .collect::<Vec<_>>();
+    if server.clients.lock().unwrap().iter().any(|client| {
+        let session = client.state.lock().unwrap();
+        session.local_channel
+            && session
+                .nick
+                .as_deref()
+                .map(|value| value.eq_ignore_ascii_case(&nick))
+                .unwrap_or(false)
+    }) {
+        groups.push(super::LOCAL_CHANNEL.into());
+    }
     super::send_line(
         tx,
         &format!(

@@ -111,6 +111,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         33,
         include_str!("../migrations/0033_party_line_received_at.sql"),
     ),
+    (34, include_str!("../migrations/0034_local_irc_history.sql")),
 ];
 
 #[derive(thiserror::Error, Debug)]
@@ -363,6 +364,66 @@ impl StateStore {
             )
             .optional()?
             .is_some())
+    }
+
+    pub fn append_local_irc_message(
+        &self,
+        nickname: &str,
+        body: &str,
+        issued_at: i64,
+        max_age_seconds: i64,
+        max_messages: i64,
+        max_bytes: i64,
+    ) -> Result<(), StoreError> {
+        self.prune_local_irc_history(issued_at, max_age_seconds, max_messages, max_bytes)?;
+        self.conn.execute(
+            "INSERT INTO local_irc_history (nickname, body, issued_at, byte_len) VALUES (?1, ?2, ?3, ?4)",
+            params![nickname, body, issued_at, body.len() as i64],
+        )?;
+        self.prune_local_irc_history(issued_at, max_age_seconds, max_messages, max_bytes)
+    }
+
+    pub fn prune_local_irc_history(
+        &self,
+        now: i64,
+        max_age_seconds: i64,
+        max_messages: i64,
+        max_bytes: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM local_irc_history WHERE issued_at < ?1",
+            params![now.saturating_sub(max_age_seconds)],
+        )?;
+        loop {
+            let (count, bytes): (i64, i64) = self.conn.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(byte_len), 0) FROM local_irc_history",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if count <= max_messages && bytes <= max_bytes {
+                break;
+            }
+            self.conn.execute(
+                "DELETE FROM local_irc_history WHERE message_id = (SELECT message_id FROM local_irc_history ORDER BY issued_at, message_id LIMIT 1)",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_local_irc_messages(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String, i64)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT nickname, body, issued_at FROM local_irc_history ORDER BY issued_at DESC, message_id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
+        messages.reverse();
+        Ok(messages)
     }
 
     pub fn mark_notified(
@@ -9495,5 +9556,31 @@ mod tests {
             .delete_device_presence(observation.observation_id)
             .unwrap();
         assert!(store.list_device_presence().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_irc_history_is_bounded_by_age_count_and_bytes() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .append_local_irc_message("alice", "old", 1, 10, 500, 1024)
+            .unwrap();
+        store
+            .append_local_irc_message("bob", "new", 20, 10, 500, 1024)
+            .unwrap();
+        assert_eq!(
+            store.list_local_irc_messages(500).unwrap(),
+            vec![("bob".into(), "new".into(), 20)]
+        );
+
+        store
+            .append_local_irc_message("carol", "12345", 30, 100, 2, 5)
+            .unwrap();
+        store
+            .append_local_irc_message("dave", "67890", 31, 100, 2, 5)
+            .unwrap();
+        assert_eq!(
+            store.list_local_irc_messages(500).unwrap(),
+            vec![("dave".into(), "67890".into(), 31)]
+        );
     }
 }

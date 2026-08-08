@@ -13,6 +13,7 @@ pub(crate) struct SessionState {
     pub(crate) nick: Option<String>,
     pub(crate) username: Option<String>,
     pub(crate) registered: bool,
+    pub(crate) local_channel: bool,
     pub(crate) channels: HashMap<GroupId, String>,
     pub(crate) capabilities: HashSet<String>,
     pub(crate) sasl_pending: bool,
