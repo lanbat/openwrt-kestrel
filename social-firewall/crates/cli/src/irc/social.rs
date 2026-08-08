@@ -54,6 +54,8 @@ pub(crate) fn handle(
         "pending-tunnels" => list_pending_tunnels(server, tx, state, store)?,
         "tunnel-balance" => list_tunnel_balances(server, tx, state, store)?,
         "lists" | "list-lists" => list_shared_lists(server, tx, state, store)?,
+        "publish-list" => publish_list(server, tx, state, store, &options)?,
+        "ingest-list" => ingest_list(server, tx, state, store, &options)?,
         "profiles" => list_profiles(server, tx, state, store)?,
         "routes" => list_routes(server, tx, state, store)?,
         "create-profile" => create_profile(server, tx, state, store, &options)?,
@@ -204,6 +206,8 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf policies | policy-explain --policy-id ID --entry-id ID --group GROUP",
         "/sf tunnels | pending-tunnels | tunnel-balance",
         "/sf lists | profiles | routes",
+        "/sf publish-list --name NAME --description TEXT --entries-file PATH --visibility public|restricted [--categories A,B] [--recipients USER,USER] [--out PATH] [--out-dir PATH]",
+        "/sf ingest-list --file PATH",
         "/sf create-profile --name NAME --description TEXT",
         "/sf select-profile --profile-id ID",
         "/sf add-profile-policy --profile-id ID --policy-id ID",
@@ -1379,6 +1383,50 @@ fn evaluate_device(
         state,
         "device-approval aggregate evaluated in the router log",
     );
+    Ok(())
+}
+
+fn publish_list(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    let categories: Vec<String> = options
+        .get("categories")
+        .map(|value| value.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
+    let recipients: Vec<String> = options
+        .get("recipients")
+        .map(|value| value.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
+    crate::list::publish_list(
+        store,
+        required(options, "name")?,
+        required(options, "description")?,
+        &categories,
+        PathBuf::from(required(options, "entries-file")?).as_path(),
+        required(options, "visibility")?,
+        &recipients,
+        options.get("out").map(PathBuf::from),
+        options.get("out-dir").map(PathBuf::from),
+    )?;
+    response(server, tx, state, "signed shared rule list published");
+    Ok(())
+}
+
+fn ingest_list(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::list::ingest_list(store, PathBuf::from(required(options, "file")?).as_path())?;
+    response(server, tx, state, "shared rule list ingested");
     Ok(())
 }
 
