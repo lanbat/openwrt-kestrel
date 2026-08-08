@@ -17,6 +17,7 @@ mod cgi;
 mod device;
 mod fingerprint;
 mod group;
+mod irc;
 mod list;
 mod notify;
 mod ntfy;
@@ -1172,6 +1173,56 @@ fn main() -> Result<()> {
             );
         }
         Command::Listen => tunnel::listen(&store)?,
+        Command::ReticulumListen => tunnel::reticulum_listen(&store)?,
+        Command::Ircd {
+            listen,
+            server_name,
+            out_dir,
+            tls_cert,
+            tls_key,
+            oidc_introspection_url,
+            oidc_client_id,
+            oidc_client_secret_file,
+            oidc_ca_file,
+            oidc_issuer,
+            oidc_audience,
+            oidc_required_group,
+            oidc_write_entitlement,
+            oidc_operator_entitlement,
+        } => {
+            let listen = listen
+                .parse()
+                .with_context(|| format!("invalid IRC listen address `{listen}`"))?;
+            irc::listen(
+                &cli.db,
+                listen,
+                &server_name,
+                &out_dir,
+                tls_cert.as_deref(),
+                tls_key.as_deref(),
+                match (oidc_introspection_url, oidc_client_id, oidc_client_secret_file) {
+                    (None, None, None) => None,
+                    (Some(introspection_url), Some(client_id), Some(secret_file)) => {
+                        let client_secret = std::fs::read_to_string(&secret_file)
+                            .with_context(|| format!("reading OIDC client secret {}", secret_file.display()))?
+                            .trim()
+                            .to_string();
+                        Some(irc::OidcSettings {
+                            introspection_url,
+                            client_id,
+                            client_secret,
+                            ca_file: oidc_ca_file,
+                            issuer: oidc_issuer,
+                            audience: oidc_audience,
+                            required_group: oidc_required_group,
+                            write_entitlement: oidc_write_entitlement,
+                            operator_entitlement: oidc_operator_entitlement,
+                        })
+                    }
+                    _ => anyhow::bail!("OIDC authentication requires introspection URL, client ID, and client-secret file"),
+                },
+            )?;
+        }
         Command::Sync => group::sync_outbox(&store)?,
         Command::SyncGroup { group } => group::sync_group(&store, &group)?,
         Command::PublishList {

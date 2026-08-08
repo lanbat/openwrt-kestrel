@@ -24,6 +24,10 @@ anyhow = "1"
 rand = "0.8"
 serde_urlencoded = "0.7"
 shell-words = "1"
+base64 = "0.22"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "form", "json", "rustls"] }
+rustls = "0.23.43"
+rustls-pemfile = "2"
 
 [dev-dependencies]
 tempfile = "3"
@@ -41,4 +45,9 @@ harness = false
 [[test]]
 name = "chat_browser"
 path = "tests/chat_browser.rs"
+harness = false
+
+[[test]]
+name = "two_node_federation"
+path = "tests/two_node_federation.rs"
 harness = false
