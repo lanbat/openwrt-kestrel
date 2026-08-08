@@ -57,7 +57,7 @@ use crate::data::{dhcp, dns_answers, files, logs};
 use crate::db::Store;
 use crate::packet_observer;
 use crate::plugins::{DeviceApprovedNotifier, Event, PluginManager, RustPlugin};
-use crate::{bandwidth_check, check_access_log, check_vpn, check_wan, observation};
+use crate::{bandwidth_check, check_access_log, check_vpn, check_wan, mqtt, observation};
 
 const WAN_VPN_INTERVAL: Duration = Duration::from_secs(20);
 const BANDWIDTH_INTERVAL: Duration = Duration::from_secs(3600);
@@ -104,6 +104,16 @@ pub async fn run(base_dir: PathBuf, split_routing_dir: PathBuf) -> i32 {
         )
         .await,
     );
+    let fingerprint_socket = std::env::var_os("KESTRELD_FINGERPRINT_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(crate::fingerprint_rpc::DEFAULT_SOCKET));
+    let fingerprint_task = {
+        let base_dir = base_dir.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            crate::fingerprint_rpc::run(base_dir, store, fingerprint_socket).await
+        })
+    };
 
     let log_task = {
         let base_dir = base_dir.clone();
@@ -195,18 +205,42 @@ pub async fn run(base_dir: PathBuf, split_routing_dir: PathBuf) -> i32 {
         let store = store.clone();
         tokio::spawn(async move { packet_observer::run_if_enabled(&base_dir, store).await })
     };
+    let mqtt_task = match mqtt::from_environment(&base_dir) {
+        Ok(Some(publisher)) => {
+            let mqtt_base_dir = base_dir.clone();
+            let mqtt_split_routing_dir = split_routing_dir.clone();
+            let mqtt_store = store.clone();
+            Some(tokio::spawn(async move {
+                publisher
+                    .run(&mqtt_base_dir, &mqtt_split_routing_dir, mqtt_store)
+                    .await
+            }))
+        }
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("MQTT disabled: {error}");
+            None
+        }
+    };
 
     // All six loop forever by construction and should never resolve;
     // whichever one does first (only possible via a panic) ends the
     // process so procd restarts the whole daemon.
     tokio::select! {
         result = log_task => eprintln!("log-follow task ended unexpectedly: {result:?}"),
+        result = fingerprint_task => eprintln!("fingerprint lookup task ended unexpectedly: {result:?}"),
         result = wan_task => eprintln!("WAN-check task ended unexpectedly: {result:?}"),
         result = vpn_task => eprintln!("VPN-check task ended unexpectedly: {result:?}"),
         result = bw_task  => eprintln!("bandwidth-check task ended unexpectedly: {result:?}"),
         result = observe_task => eprintln!("observation-materialize task ended unexpectedly: {result:?}"),
         result = plugin_rescan_task => eprintln!("plugin-rescan task ended unexpectedly: {result:?}"),
         result = packet_task => eprintln!("packet observer ended unexpectedly: {result:?}"),
+        result = async {
+            match mqtt_task {
+                Some(task) => task.await.map(|_| ()),
+                None => std::future::pending().await,
+            }
+        } => eprintln!("MQTT publisher task ended unexpectedly: {result:?}"),
     }
     1
 }

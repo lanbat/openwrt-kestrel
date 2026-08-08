@@ -29,7 +29,7 @@ harness = false
 
 [dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "fs", "net"] }
 askama = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_urlencoded = "0.7"
@@ -38,6 +38,9 @@ anyhow = "1"
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
 socket2 = "0.6.5"
 rusqlite = { version = "0.31", features = ["bundled"] }
+blake3 = "1"
+hex = "0.4"
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
 
 [dev-dependencies]
 tempfile = "3"

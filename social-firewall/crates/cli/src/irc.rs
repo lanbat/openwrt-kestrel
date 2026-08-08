@@ -40,6 +40,7 @@ use session::SessionState;
 struct Config {
     db: PathBuf,
     out_dir: PathBuf,
+    fingerprint_socket: PathBuf,
     server_name: String,
     tls: Option<Arc<ServerConfig>>,
     oidc: Option<Arc<OidcAuthenticator>>,
@@ -85,6 +86,9 @@ pub fn listen(
         config: Config {
             db: db.to_path_buf(),
             out_dir: out_dir.to_path_buf(),
+            fingerprint_socket: std::env::var_os("KESTRELD_FINGERPRINT_SOCKET")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/var/run/kestreld/fingerprint.sock")),
             server_name: server_name.to_string(),
             tls,
             oidc: oidc.map(OidcAuthenticator::new).transpose()?.map(Arc::new),
@@ -248,6 +252,13 @@ fn handle_client(server: Arc<Server>, io: SharedIo, remote_addr: Option<SocketAd
         state: Arc::clone(&state),
     });
     let store = StateStore::open(&server.config.db).context("opening IRC state store")?;
+    if let Some(remote_addr) = remote_addr {
+        if let Ok(Some(fingerprint)) =
+            crate::device_fingerprint::lookup(&server.config.fingerprint_socket, remote_addr.ip())
+        {
+            state.lock().unwrap().device_fingerprint = Some(fingerprint);
+        }
+    }
 
     while let Some(line) = read_line(&io)? {
         if line.is_empty() {

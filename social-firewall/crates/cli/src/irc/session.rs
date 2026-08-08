@@ -1,4 +1,5 @@
 use super::auth::AuthenticatedIdentity;
+use crate::device_fingerprint::DeviceFingerprint;
 use domain_types::GroupId;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -8,6 +9,7 @@ pub(crate) struct SessionState {
     // Retained for the local kestreld device-fingerprint lookup.
     #[allow(dead_code)]
     pub(crate) remote_addr: Option<SocketAddr>,
+    pub(crate) device_fingerprint: Option<DeviceFingerprint>,
     pub(crate) nick: Option<String>,
     pub(crate) username: Option<String>,
     pub(crate) registered: bool,

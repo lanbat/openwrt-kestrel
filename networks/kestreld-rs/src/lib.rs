@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod bandwidth_check;
 pub mod cgi;
 pub mod check_access_log;
@@ -8,7 +9,9 @@ pub mod daemon;
 pub mod data;
 pub mod db;
 pub mod digest;
+pub mod fingerprint_rpc;
 pub mod migrate;
+pub mod mqtt;
 pub mod observation;
 pub mod oui_update;
 pub mod packet_observer;

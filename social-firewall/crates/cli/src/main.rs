@@ -17,6 +17,7 @@ mod auth;
 mod cgi;
 mod command_args;
 mod device;
+mod device_fingerprint;
 mod fingerprint;
 mod group;
 mod irc;

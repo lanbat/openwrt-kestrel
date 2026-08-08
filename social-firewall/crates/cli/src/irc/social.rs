@@ -61,6 +61,7 @@ pub(crate) fn handle(
         "add-profile-policy" => add_profile_policy(server, tx, state, store, &options)?,
         "add-route-profile" => add_route_profile(server, tx, state, store, &options)?,
         "fingerprint" => list_fingerprint(server, tx, state, store, &options)?,
+        "fingerprint-session" => fingerprint_session(server, tx, state)?,
         "fingerprint-observe" => {
             publish_fingerprint_observation(server, tx, state, store, &options)?
         }
@@ -204,6 +205,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf add-profile-policy --profile-id ID --policy-id ID",
         "/sf add-route-profile --name NAME --table NUMBER --interface IFACE",
         "/sf fingerprint --group GROUP --fingerprint-id ID --revision NUMBER",
+        "/sf fingerprint-session (IRC operator only)",
         "/sf fingerprint-observe --group GROUP --fingerprint-id ID --revision NUMBER --signal-family NAME --evidence-digest HASH --confidence 0-100",
         "/sf fingerprint-comment --group GROUP --fingerprint-id ID --revision NUMBER --body TEXT",
         "Signed voting requires IRC authentication and currently signs as the local router identity.",
@@ -1206,6 +1208,37 @@ fn list_fingerprint(
     Ok(())
 }
 
+fn fingerprint_session(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    let state_guard = state.lock().unwrap();
+    let Some(fingerprint) = &state_guard.device_fingerprint else {
+        response(
+            server,
+            tx,
+            state,
+            "no local device fingerprint matched this IRC session",
+        );
+        return Ok(());
+    };
+    response(
+        server,
+        tx,
+        state,
+        &format!(
+            "session device {} network={} last-seen={} material-bytes={}",
+            fingerprint.record_id,
+            fingerprint.network,
+            fingerprint.last_seen,
+            fingerprint.material.len()
+        ),
+    );
+    Ok(())
+}
+
 fn publish_fingerprint_observation(
     server: &Server,
     tx: &mpsc::Sender<String>,
@@ -1388,6 +1421,7 @@ mod tests {
             config: Config {
                 db: PathBuf::from("/tmp/sf-irc-test.db"),
                 out_dir: PathBuf::from("/tmp"),
+                fingerprint_socket: PathBuf::from("/tmp/kestreld-fingerprint.sock"),
                 server_name: "test".into(),
                 tls: None,
                 oidc: None,
