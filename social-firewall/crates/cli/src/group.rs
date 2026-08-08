@@ -279,6 +279,16 @@ pub fn create_group(
     join_prompt: Option<String>,
     out: Option<PathBuf>,
 ) -> Result<()> {
+    create_group_with_id(store, name, description, join_prompt, out).map(|_| ())
+}
+
+pub fn create_group_with_id(
+    store: &StateStore,
+    name: &str,
+    description: &str,
+    join_prompt: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<GroupId> {
     let (author, _) = self_identity(store)?;
     // A fresh, unpredictable id — never reused, never derived from any
     // single owner's identity so ownership can change hands later
@@ -315,7 +325,8 @@ pub fn create_group(
         group_id_str(group.group_id)
     );
     println!("note: you are the sole owner — if you lose your identity, this group can never be updated again. consider adding a co-owner once you have someone you trust.");
-    export_group(store, &group, &identity_pubkey, out)
+    export_group(store, &group, &identity_pubkey, out)?;
+    Ok(group.group_id)
 }
 
 pub fn ingest_group(store: &StateStore, file: &Path) -> Result<()> {

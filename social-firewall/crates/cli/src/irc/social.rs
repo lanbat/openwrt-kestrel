@@ -184,14 +184,22 @@ fn create_group(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
-    crate::group::create_group(
+    let group_id = crate::group::create_group_with_id(
         store,
         required(options, "name")?,
         required(options, "description")?,
         options.get("join-prompt").cloned(),
         None,
     )?;
-    response(server, tx, state, "signed group created");
+    response(
+        server,
+        tx,
+        state,
+        &format!(
+            "signed group created: {}",
+            crate::group::group_id_str(group_id)
+        ),
+    );
     Ok(())
 }
 
