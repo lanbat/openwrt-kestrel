@@ -1327,7 +1327,12 @@ fn response(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_options;
+    use super::{parse_options, require_authenticated_identity};
+    use crate::irc::auth::AuthenticatedIdentity;
+    use crate::irc::{Config, Server, SessionState};
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{mpsc, Arc, Mutex};
 
     #[test]
     fn parses_quoted_social_command_options() {
@@ -1344,5 +1349,49 @@ mod tests {
     fn rejects_positional_social_command_arguments() {
         let words = vec!["group".into()];
         assert!(parse_options(&words).is_err());
+    }
+
+    fn test_server() -> Server {
+        Server {
+            config: Config {
+                db: PathBuf::from("/tmp/sf-irc-test.db"),
+                out_dir: PathBuf::from("/tmp"),
+                server_name: "test".into(),
+                tls: None,
+                oidc: None,
+            },
+            clients: Arc::new(Mutex::new(Vec::new())),
+            seen_messages: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            next_client_id: AtomicU64::new(1),
+        }
+    }
+
+    #[test]
+    fn nickname_only_sessions_cannot_vote() {
+        let server = test_server();
+        let state = Arc::new(Mutex::new(SessionState {
+            nick: Some("guest".into()),
+            ..SessionState::default()
+        }));
+        let (tx, _rx) = mpsc::channel();
+
+        assert!(require_authenticated_identity(&server, &tx, &state).is_err());
+    }
+
+    #[test]
+    fn authenticated_session_passes_identity_gate() {
+        let server = test_server();
+        let state = Arc::new(Mutex::new(SessionState {
+            authenticated: Some(AuthenticatedIdentity {
+                subject: "subject".into(),
+                username: "user".into(),
+                groups: vec![],
+                entitlements: vec![],
+            }),
+            ..SessionState::default()
+        }));
+        let (tx, _rx) = mpsc::channel();
+
+        assert!(require_authenticated_identity(&server, &tx, &state).is_ok());
     }
 }
