@@ -22,6 +22,8 @@ pub(crate) fn handle(
         "groups" | "list-groups" => list_groups(server, tx, state, store)?,
         "follows" | "list-follows" => list_follows(server, tx, state, store)?,
         "history" | "list-party-line" => history(server, tx, state, store, &options)?,
+        "opinion" | "publish-opinion" => publish_opinion(server, tx, state, store, &options)?,
+        "evaluate" | "evaluate-target" => evaluate_target(server, tx, state, store, &options)?,
         "vote" | "cast-group-vote" => cast_group_vote(server, tx, state, store, &options)?,
         "policy-vote" | "vote-policy-entry" => {
             vote_policy_entry(server, tx, state, store, &options)?
@@ -64,6 +66,8 @@ fn parse_options(words: &[String]) -> Result<HashMap<String, String>> {
 fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionState>>) {
     for line in [
         "/sf groups | follows | history [--group GROUP]",
+        "/sf opinion --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
+        "/sf evaluate --target-kind KIND --target-value VALUE [--threshold NUMBER]",
         "/sf vote --group GROUP --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policy-vote --policy-id ID --entry-id ID --group GROUP --stance STANCE --reason-code CODE [--note TEXT]",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
@@ -179,6 +183,57 @@ fn cast_group_vote(
         None,
     )?;
     response(server, tx, state, "signed group vote recorded");
+    Ok(())
+}
+
+fn publish_opinion(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::publish_opinion(
+        store,
+        required(options, "target-kind")?,
+        required(options, "target-value")?,
+        required(options, "stance")?,
+        required(options, "reason-code")?,
+        options.get("note").cloned(),
+        options
+            .get("ttl-seconds")
+            .map(|value| value.parse())
+            .transpose()?,
+        None,
+    )?;
+    response(server, tx, state, "signed opinion recorded");
+    Ok(())
+}
+
+fn evaluate_target(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    crate::evaluate_target(
+        store,
+        required(options, "target-kind")?,
+        required(options, "target-value")?,
+        options
+            .get("threshold")
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or(1.0),
+    )?;
+    response(
+        server,
+        tx,
+        state,
+        "evaluation completed; inspect the router policy result",
+    );
     Ok(())
 }
 

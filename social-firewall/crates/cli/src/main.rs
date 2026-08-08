@@ -2115,7 +2115,7 @@ fn set_override(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn publish_opinion(
+pub(crate) fn publish_opinion(
     store: &StateStore,
     target_kind: &str,
     target_value: &str,
@@ -2190,7 +2190,7 @@ fn ingest_opinion(store: &StateStore, file: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn evaluate_target(
+pub(crate) fn evaluate_target(
     store: &StateStore,
     target_kind: &str,
     target_value: &str,
