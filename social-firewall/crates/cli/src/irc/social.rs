@@ -55,6 +55,7 @@ pub(crate) fn handle(
         "lists" | "list-lists" => list_shared_lists(server, tx, state, store)?,
         "profiles" => list_profiles(server, tx, state, store)?,
         "routes" => list_routes(server, tx, state, store)?,
+        "fingerprint" => list_fingerprint(server, tx, state, store, &options)?,
         _ => response(
             server,
             tx,
@@ -188,6 +189,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf policies | policy-explain --policy-id ID --entry-id ID --group GROUP",
         "/sf tunnels | pending-tunnels | tunnel-balance",
         "/sf lists | profiles | routes",
+        "/sf fingerprint --group GROUP --fingerprint-id ID --revision NUMBER",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
     ] {
         response(server, tx, state, line);
@@ -1032,6 +1034,56 @@ fn list_routes(
                 route.table,
                 route.interface,
                 if route.enabled { "enabled" } else { "disabled" }
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn list_fingerprint(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    let group = crate::group::resolve_group_id(store, required(options, "group")?)?;
+    let fingerprint_id = domain_types::Hash32(crate::tunnel::bytes32(required(
+        options,
+        "fingerprint-id",
+    )?)?);
+    let revision: u64 = required(options, "revision")?.parse()?;
+    let observations = store.list_fingerprint_observations(group, fingerprint_id, revision)?;
+    let comments = store.list_fingerprint_comments(group, fingerprint_id, revision)?;
+    if observations.is_empty() && comments.is_empty() {
+        response(server, tx, state, "no fingerprint observations or comments");
+    }
+    for observation in observations {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "fingerprint observation {}/{}: {} confidence={} digest={}",
+                observation.observer.federation.0,
+                observation.observer.local_id,
+                observation.signal_family,
+                observation.confidence,
+                observation.evidence_digest
+            ),
+        );
+    }
+    for comment in comments {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "fingerprint comment {}/{} #{}: {}",
+                comment.author.federation.0,
+                comment.author.local_id,
+                comment.sequence,
+                comment.body
             ),
         );
     }
