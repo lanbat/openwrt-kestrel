@@ -204,6 +204,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf fingerprint --group GROUP --fingerprint-id ID --revision NUMBER",
         "/sf fingerprint-observe --group GROUP --fingerprint-id ID --revision NUMBER --signal-family NAME --evidence-digest HASH --confidence 0-100",
         "/sf fingerprint-comment --group GROUP --fingerprint-id ID --revision NUMBER --body TEXT",
+        "Signed voting requires IRC authentication and currently signs as the local router identity.",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
     ] {
         response(server, tx, state, line);
@@ -740,6 +741,7 @@ fn cast_group_vote(
     store: &StateStore,
     options: &HashMap<String, String>,
 ) -> Result<()> {
+    require_authenticated_identity(server, tx, state)?;
     require_write_access(server, tx, state)?;
     let group = group_option(state, store, options)?;
     let self_user = store.get_self_identity()?.context("no router identity")?.0;
@@ -823,6 +825,7 @@ fn vote_policy_entry(
     store: &StateStore,
     options: &HashMap<String, String>,
 ) -> Result<()> {
+    require_authenticated_identity(server, tx, state)?;
     require_write_access(server, tx, state)?;
     let group = required_group(store, options)?;
     crate::shared_policy::vote_policy_entry(
@@ -1267,6 +1270,24 @@ fn require_write_access(
     } else {
         response(server, tx, state, "IRC write access is required");
         anyhow::bail!("IRC write access denied")
+    }
+}
+
+fn require_authenticated_identity(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+) -> Result<()> {
+    if state.lock().unwrap().authenticated.is_some() {
+        Ok(())
+    } else {
+        response(
+            server,
+            tx,
+            state,
+            "an authenticated IRC identity is required for signed voting",
+        );
+        anyhow::bail!("authenticated IRC identity required for signed voting")
     }
 }
 
