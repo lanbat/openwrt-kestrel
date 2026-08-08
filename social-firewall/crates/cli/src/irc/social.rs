@@ -38,6 +38,9 @@ pub(crate) fn handle(
         "sync" => sync(server, tx, state, store, &options)?,
         "request-tunnel" => request_tunnel(server, tx, state, store, &options)?,
         "accept-tunnel" => accept_tunnel(server, tx, state, store, &options)?,
+        "offer-tunnel" => offer_tunnel(server, tx, state, store, &options)?,
+        "select-tunnel" => select_tunnel(server, tx, state, store, &options)?,
+        "tunnel-trust" => tunnel_trust(server, tx, state, store, &options)?,
         "opinion" | "publish-opinion" => publish_opinion(server, tx, state, store, &options)?,
         "evaluate" | "evaluate-target" => evaluate_target(server, tx, state, store, &options)?,
         "vote" | "cast-group-vote" => cast_group_vote(server, tx, state, store, &options)?,
@@ -174,6 +177,9 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf sync [--group GROUP]",
         "/sf request-tunnel --advertisement ADVERTISEMENT",
         "/sf accept-tunnel --requester USER --sequence NUMBER",
+        "/sf offer-tunnel --description TEXT --target KIND:VALUE[,KIND:VALUE]",
+        "/sf select-tunnel --advertisement REF --target KIND:VALUE[,KIND:VALUE]",
+        "/sf tunnel-trust --user USER --auto-accept true|false",
         "/sf vote --group GROUP --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policy-vote --policy-id ID --entry-id ID --group GROUP --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policies | policy-explain --policy-id ID --entry-id ID --group GROUP",
@@ -587,6 +593,128 @@ fn accept_tunnel(
     )?;
     response(server, tx, state, "signed tunnel acceptance recorded");
     Ok(())
+}
+
+fn offer_tunnel(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    let targets = parse_targets(required(options, "target")?)?;
+    let recipients = comma_values(options.get("recipient"));
+    let tags = comma_values(options.get("tags"));
+    crate::tunnel::offer_tunnel(
+        store,
+        required(options, "description")?,
+        options.get("limitation").cloned(),
+        &targets,
+        tags,
+        options
+            .get("max-connections")
+            .map(|value| value.parse())
+            .transpose()?,
+        options
+            .get("max-bandwidth-kbps")
+            .map(|value| value.parse())
+            .transpose()?,
+        options
+            .get("visibility")
+            .map(String::as_str)
+            .unwrap_or("public"),
+        &recipients,
+        options.get("in-response-to").cloned(),
+        None,
+        None,
+    )?;
+    response(server, tx, state, "signed tunnel offer recorded");
+    Ok(())
+}
+
+fn select_tunnel(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::tunnel::select_tunnel(
+        store,
+        required(options, "advertisement")?,
+        &parse_targets(required(options, "target")?)?,
+    )?;
+    response(server, tx, state, "tunnel route targets selected");
+    Ok(())
+}
+
+fn tunnel_trust(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    let user = crate::tunnel::parse_user_ref(required(options, "user")?)?;
+    crate::tunnel::set_tunnel_trust(
+        store,
+        user,
+        parse_bool(options, "auto-accept")?,
+        parse_bool_or(options, "auto-consume", false)?,
+        parse_bool_or(options, "auto-respond", false)?,
+        parse_bool_or(options, "exclude", false)?,
+        options.get("tag-filter").cloned(),
+        options
+            .get("min-reciprocity")
+            .map(|value| value.parse())
+            .transpose()?,
+    )?;
+    response(server, tx, state, "tunnel trust rule updated");
+    Ok(())
+}
+
+fn parse_targets(value: &str) -> Result<Vec<(String, String)>> {
+    value
+        .split(',')
+        .map(|target| {
+            let (kind, value) = target
+                .split_once(':')
+                .with_context(|| format!("target `{target}` must use KIND:VALUE"))?;
+            Ok((kind.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn comma_values(value: Option<&String>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_bool(options: &HashMap<String, String>, key: &str) -> Result<bool> {
+    options
+        .get(key)
+        .with_context(|| format!("missing --{key}"))?
+        .parse()
+        .with_context(|| format!("--{key} must be true or false"))
+}
+
+fn parse_bool_or(options: &HashMap<String, String>, key: &str, default: bool) -> Result<bool> {
+    options
+        .get(key)
+        .map(|value| {
+            value
+                .parse()
+                .with_context(|| format!("--{key} must be true or false"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
 }
 
 fn cast_group_vote(
