@@ -21,6 +21,7 @@ pub(crate) fn handle(
     match command {
         "help" => help(server, tx, state),
         "groups" | "list-groups" => list_groups(server, tx, state, store)?,
+        "voters" | "voting-members" => list_voters(server, tx, state, store, &options)?,
         "follows" | "list-follows" => list_follows(server, tx, state, store)?,
         "history" | "list-party-line" => history(server, tx, state, store, &options)?,
         "create-group" => create_group(server, tx, state, store, &options)?,
@@ -179,6 +180,7 @@ fn parse_options(words: &[String]) -> Result<HashMap<String, String>> {
 fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionState>>) {
     for line in [
         "/sf groups | follows | history [--group GROUP]",
+        "/sf voters --group GROUP",
         "/sf opinion --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf evaluate --target-kind KIND --target-value VALUE [--threshold NUMBER]",
         "/sf create-group --name NAME --description TEXT [--join-prompt TEXT]",
@@ -260,6 +262,34 @@ fn list_follows(
                 follow.deny_weight,
                 if follow.excluded { " excluded" } else { "" }
             ),
+        );
+    }
+    Ok(())
+}
+
+fn list_voters(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    let group_id = resolve_group_value(store, required(options, "group")?)?;
+    let group = store.get_group(group_id)?.context("unknown group")?;
+    let self_user = store.get_self_identity()?.map(|(user, _)| user);
+    if group.voting_members.is_empty() {
+        response(server, tx, state, "group has no voting members");
+        return Ok(());
+    }
+    for voter in &group.voting_members {
+        let marker = (self_user.as_ref() == Some(voter))
+            .then_some(" (this router)")
+            .unwrap_or("");
+        response(
+            server,
+            tx,
+            state,
+            &format!("voter {}/{}{}", voter.federation.0, voter.local_id, marker),
         );
     }
     Ok(())
