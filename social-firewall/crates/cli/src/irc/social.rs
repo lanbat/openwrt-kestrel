@@ -62,6 +62,7 @@ pub(crate) fn handle(
         "add-route-profile" => add_route_profile(server, tx, state, store, &options)?,
         "fingerprint" => list_fingerprint(server, tx, state, store, &options)?,
         "fingerprint-session" => fingerprint_session(server, tx, state)?,
+        "fingerprint-users" => fingerprint_users(server, tx, state, store, &options)?,
         "fingerprint-observe" => {
             publish_fingerprint_observation(server, tx, state, store, &options)?
         }
@@ -206,6 +207,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf add-route-profile --name NAME --table NUMBER --interface IFACE",
         "/sf fingerprint --group GROUP --fingerprint-id ID --revision NUMBER",
         "/sf fingerprint-session (IRC operator only)",
+        "/sf fingerprint-users --group GROUP --fingerprint-id ID (IRC operator only)",
         "/sf fingerprint-observe --group GROUP --fingerprint-id ID --revision NUMBER --signal-family NAME --evidence-digest HASH --confidence 0-100",
         "/sf fingerprint-comment --group GROUP --fingerprint-id ID --revision NUMBER --body TEXT",
         "Signed voting requires IRC authentication and currently signs as the local router identity.",
@@ -1236,6 +1238,65 @@ fn fingerprint_session(
             fingerprint.material.len()
         ),
     );
+    Ok(())
+}
+
+fn fingerprint_users(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    let group = resolve_group_value(store, required(options, "group")?)?;
+    let fingerprint_id = domain_types::Hash32(crate::tunnel::bytes32(required(
+        options,
+        "fingerprint-id",
+    )?)?);
+    let key = store
+        .group_fingerprint_key(group)?
+        .context("no fingerprint key configured for this group")?;
+    let matches = server
+        .clients
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|client| {
+            let session = client.state.lock().unwrap();
+            let device = session.device_fingerprint.as_ref()?;
+            let derived = crypto::shared_fingerprint::derive_shared_fingerprint_from_material(
+                &key,
+                &device.material,
+            );
+            (derived == fingerprint_id).then(|| {
+                (
+                    session.nick.clone().unwrap_or_else(|| "*".into()),
+                    session.authenticated.is_some(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        response(
+            server,
+            tx,
+            state,
+            "no active IRC sessions match this fingerprint",
+        );
+        return Ok(());
+    }
+    for (nick, authenticated) in matches {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "fingerprint match nick={nick} auth={}",
+                if authenticated { "yes" } else { "no" }
+            ),
+        );
+    }
     Ok(())
 }
 
