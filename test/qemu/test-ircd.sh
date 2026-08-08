@@ -56,11 +56,13 @@ openssl s_client -brief -verify_return_error -CAfile "$CERT_PEM" \
     | grep -F "Protocol version: TLSv1.3"
 
 echo "==> Checking IRCv3 CAP and PING exchange..."
-printf 'CAP LS 302\nPING :smoke\nQUIT\n' \
+printf 'CAP LS 302\nNICK smoke\nUSER smoke 0 * :Smoke Test\nPRIVMSG #sf-smoke :/sf groups\nPING :smoke\nQUIT\n' \
     | timeout 5 openssl s_client -quiet -verify_return_error -CAfile "$CERT_PEM" \
         -connect "127.0.0.1:${LOCAL_PORT}" -servername OpenWrt \
         >"$PROTOCOL_OUTPUT" 2>&1 || true
 grep -F " CAP * LS :message-tags server-time" "$PROTOCOL_OUTPUT"
 grep -F " PONG :smoke" "$PROTOCOL_OUTPUT"
+grep -F " 001 smoke " "$PROTOCOL_OUTPUT"
+grep -F " NOTICE smoke :[sf] " "$PROTOCOL_OUTPUT"
 
 echo "sf-ircd QEMU smoke test passed."
