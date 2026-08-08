@@ -46,6 +46,9 @@ pub(crate) fn handle(
         }
         "policies" | "list-policies" => list_policies(server, tx, state, store)?,
         "policy-explain" | "explain-policy" => explain_policy(server, tx, state, store, &options)?,
+        "tunnels" | "list-tunnels" => list_tunnels(server, tx, state, store)?,
+        "pending-tunnels" => list_pending_tunnels(server, tx, state, store)?,
+        "tunnel-balance" => list_tunnel_balances(server, tx, state, store)?,
         _ => response(
             server,
             tx,
@@ -174,6 +177,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf vote --group GROUP --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policy-vote --policy-id ID --entry-id ID --group GROUP --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policies | policy-explain --policy-id ID --entry-id ID --group GROUP",
+        "/sf tunnels | pending-tunnels | tunnel-balance",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
     ] {
         response(server, tx, state, line);
@@ -749,6 +753,74 @@ fn explain_policy(
             ),
         ),
         None => response(server, tx, state, "policy result: no decision"),
+    }
+    Ok(())
+}
+
+fn list_tunnels(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    let advertisements = store.list_tunnel_advertisements()?;
+    if advertisements.is_empty() {
+        response(server, tx, state, "no tunnel advertisements");
+    }
+    for advertisement in advertisements {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "tunnel {}/{} #{}: {} [{}]",
+                advertisement.provider.federation.0,
+                advertisement.provider.local_id,
+                advertisement.sequence,
+                advertisement.description,
+                advertisement.endpoint_hint
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn list_pending_tunnels(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    let requests = store.list_pending_tunnel_connection_requests()?;
+    if requests.is_empty() {
+        response(server, tx, state, "no pending tunnel requests");
+    }
+    for request in requests {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "pending tunnel request from {}/{} #{}",
+                request.requester.federation.0, request.requester.local_id, request.sequence
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn list_tunnel_balances(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    let balances = store.list_tunnel_balances()?;
+    if balances.is_empty() {
+        response(server, tx, state, "no tunnel balances");
+    }
+    for balance in balances {
+        response(server, tx, state, &format!("tunnel balance: {balance:?}"));
     }
     Ok(())
 }
