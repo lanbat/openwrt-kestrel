@@ -323,9 +323,10 @@ fn invite(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
+    let group = required_group(store, options)?;
     crate::group::invite_group_member(
         store,
-        required(options, "group")?,
+        &group,
         required(options, "user")?,
         options
             .get("voting")
@@ -351,11 +352,8 @@ fn announce_topic(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
-    crate::group::announce_topic(
-        store,
-        required(options, "group")?,
-        required(options, "topic")?.to_string(),
-    )?;
+    let group = required_group(store, options)?;
+    crate::group::announce_topic(store, &group, required(options, "topic")?.to_string())?;
     response(server, tx, state, "signed group topic updated");
     Ok(())
 }
@@ -368,11 +366,8 @@ fn announce_mode(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
-    crate::group::announce_mode(
-        store,
-        required(options, "group")?,
-        required(options, "moderated")?.parse()?,
-    )?;
+    let group = required_group(store, options)?;
+    crate::group::announce_mode(store, &group, required(options, "moderated")?.parse()?)?;
     response(server, tx, state, "signed group moderation state updated");
     Ok(())
 }
@@ -385,9 +380,10 @@ fn announce_voice(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
+    let group = required_group(store, options)?;
     crate::group::announce_voice(
         store,
-        required(options, "group")?,
+        &group,
         required(options, "user")?,
         required(options, "voiced")?.parse()?,
     )?;
@@ -403,9 +399,10 @@ fn set_voting_right(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
+    let group = required_group(store, options)?;
     crate::group::set_group_voting_right(
         store,
-        required(options, "group")?,
+        &group,
         required(options, "user")?,
         required(options, "voting")?.parse()?,
         None,
@@ -422,9 +419,10 @@ fn block_user(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
+    let group = required_group(store, options)?;
     crate::group::block_group_user(
         store,
-        required(options, "group")?,
+        &group,
         required(options, "user")?,
         required(options, "reason-code")?,
         options.get("note").cloned(),
@@ -442,11 +440,8 @@ fn unblock_user(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
-    crate::group::unblock_group_user(
-        store,
-        required(options, "group")?,
-        required(options, "user")?,
-    )?;
+    let group = required_group(store, options)?;
+    crate::group::unblock_group_user(store, &group, required(options, "user")?)?;
     response(server, tx, state, "group block removed locally");
     Ok(())
 }
@@ -459,9 +454,10 @@ fn approve_join(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
+    let group = required_group(store, options)?;
     crate::group::approve_group_join(
         store,
-        required(options, "group")?,
+        &group,
         required(options, "requester")?,
         required(options, "sequence")?.parse()?,
         options
@@ -1242,6 +1238,13 @@ fn resolve_group_value(store: &StateStore, value: &str) -> Result<domain_types::
             .with_context(|| format!("unknown group `{value}`"));
     }
     crate::group::resolve_group_id(store, value)
+}
+
+fn required_group(store: &StateStore, options: &HashMap<String, String>) -> Result<String> {
+    Ok(crate::group::group_id_str(resolve_group_value(
+        store,
+        required(options, "group")?,
+    )?))
 }
 
 fn required<'a>(options: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
