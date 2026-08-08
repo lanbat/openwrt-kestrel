@@ -824,11 +824,12 @@ fn vote_policy_entry(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
+    let group = required_group(store, options)?;
     crate::shared_policy::vote_policy_entry(
         store,
         required(options, "policy-id")?,
         required(options, "entry-id")?,
-        required(options, "group")?,
+        &group,
         required(options, "stance")?,
         required(options, "reason-code")?,
         options.get("note").cloned(),
@@ -1178,9 +1179,10 @@ fn publish_fingerprint_observation(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
+    let group = required_group(store, options)?;
     crate::fingerprint::publish_observation(
         store,
-        required(options, "group")?,
+        &group,
         required(options, "fingerprint-id")?,
         required(options, "revision")?.parse()?,
         required(options, "signal-family")?,
@@ -1200,9 +1202,10 @@ fn publish_fingerprint_comment(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
+    let group = required_group(store, options)?;
     crate::fingerprint::publish_comment(
         store,
-        required(options, "group")?,
+        &group,
         required(options, "fingerprint-id")?,
         required(options, "revision")?.parse()?,
         required(options, "body")?,
