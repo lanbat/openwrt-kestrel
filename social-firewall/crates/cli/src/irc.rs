@@ -99,6 +99,7 @@ pub fn listen(
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                let remote_addr = stream.peer_addr().ok();
                 let server = Arc::clone(&server);
                 thread::spawn(move || {
                     let io: SharedIo = match &server.config.tls {
@@ -113,7 +114,7 @@ pub fn listen(
                         },
                         None => Arc::new(Mutex::new(Box::new(stream))),
                     };
-                    if let Err(error) = handle_client(server, io) {
+                    if let Err(error) = handle_client(server, io, remote_addr) {
                         eprintln!("IRC client ended: {error}");
                     }
                 });
@@ -221,10 +222,13 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<Arc<ServerConfig
     ))
 }
 
-fn handle_client(server: Arc<Server>, io: SharedIo) -> Result<()> {
+fn handle_client(server: Arc<Server>, io: SharedIo, remote_addr: Option<SocketAddr>) -> Result<()> {
     let id = server.next_client_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel::<String>();
-    let state = Arc::new(Mutex::new(SessionState::default()));
+    let state = Arc::new(Mutex::new(SessionState {
+        remote_addr,
+        ..SessionState::default()
+    }));
     let writer_io = Arc::clone(&io);
     thread::spawn(move || {
         while let Ok(line) = rx.recv() {
