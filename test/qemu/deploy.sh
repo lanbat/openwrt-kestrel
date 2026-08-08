@@ -1,6 +1,6 @@
 #!/bin/bash
-# test/qemu/deploy.sh — cross-build kestreld + nft-resolve, copy the repo into
-# the VM, and run install.sh for real against a given network config.
+# test/qemu/deploy.sh — cross-build kestreld + nft-resolve + sf + bridge, copy the repo
+# into the VM, and run the installers for real against a given network config.
 #
 # Usage:
 #   test/qemu/deploy.sh networks/configs/guest.conf [networks/configs/untrusted.conf ...]
@@ -26,12 +26,16 @@ echo "==> Cross-building kestreld + nft-resolve for ${TARGET}..."
     --manifest-path networks/kestreld-rs/Cargo.toml )
 ( cd "$REPO_ROOT" && cross build --release --target "$TARGET" \
     --manifest-path split-routing/nft-resolve-rs/Cargo.toml )
+( cd "$REPO_ROOT" && cross build --release --target "$TARGET" \
+    --manifest-path social-firewall/Cargo.toml -p sf-cli )
+( cd "$REPO_ROOT" && cross build --release --target "$TARGET" \
+    --manifest-path social-firewall/Cargo.toml -p reticulum-bridge )
 
 echo "==> Packaging networks/ + split-routing/ (excluding target/)..."
 STAGE="${WORK_DIR}/deploy-stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/openwrt-kestrel"
-for dir in networks split-routing; do
+for dir in networks split-routing social-firewall; do
     rsync -a --exclude 'target' --exclude '.git' "${REPO_ROOT}/${dir}" "${STAGE}/openwrt-kestrel/"
 done
 tar -czf "${WORK_DIR}/deploy.tar.gz" -C "$STAGE" openwrt-kestrel
@@ -40,14 +44,18 @@ echo "==> Copying into the VM..."
 $SCP "${WORK_DIR}/deploy.tar.gz" root@127.0.0.1:/tmp/
 $SCP "${REPO_ROOT}/networks/kestreld-rs/target/${TARGET}/release/kestreld" \
      "${REPO_ROOT}/split-routing/nft-resolve-rs/target/${TARGET}/release/nft-resolve" \
+     "${REPO_ROOT}/social-firewall/target/${TARGET}/release/sf" \
+     "${REPO_ROOT}/social-firewall/target/${TARGET}/release/kestrel-reticulum-bridge" \
      root@127.0.0.1:/tmp/
 
 $SSH "
     rm -rf /root/openwrt-kestrel
     tar -xzf /tmp/deploy.tar.gz -C /root
     cp /tmp/kestreld /usr/bin/kestreld
-    cp /tmp/nft-resolve /usr/bin/nft-resolve
-    chmod 0755 /usr/bin/kestreld /usr/bin/nft-resolve
+     cp /tmp/nft-resolve /usr/bin/nft-resolve
+     cp /tmp/sf /usr/bin/sf
+     cp /tmp/kestrel-reticulum-bridge /usr/bin/kestrel-reticulum-bridge
+     chmod 0755 /usr/bin/kestreld /usr/bin/nft-resolve /usr/bin/sf /usr/bin/kestrel-reticulum-bridge
 "
 
 echo "==> Wiring up uhttpd CGI (matches the real router's packaged deployment)..."
@@ -69,6 +77,9 @@ for conf in "$@"; do
     $SCP "${REPO_ROOT}/${conf}" root@127.0.0.1:/root/openwrt-kestrel/networks/configs/
     $SSH "cd /root/openwrt-kestrel && sh networks/install.sh networks/configs/${name}"
 done
+
+echo "==> Installing social-firewall and its optional services..."
+$SSH "cd /root/openwrt-kestrel && sh social-firewall/install.sh"
 
 echo "==> Verifying hostapd is actually beaconing (not just 'up')..."
 sleep 3

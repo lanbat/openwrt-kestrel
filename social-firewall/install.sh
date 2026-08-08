@@ -1,7 +1,6 @@
 #!/bin/sh
 # social-firewall/install.sh — sets up the cron-driven `sf apply` reconciliation
-# loop. Cron-only, no procd service (see split-routing/install.sh for the
-# precedent this mirrors) — social-firewall is a genuinely optional,
+# loop and optional procd listeners. social-firewall is a genuinely optional,
 # independently installable/removable package: it never touches kestreld's
 # own cron entries, config, or state, and vice versa.
 #
@@ -24,13 +23,28 @@ CRONTAB=/etc/crontabs/root
 CRON_TAG="social-firewall-apply"
 NOTIFY_CRON_TAG="social-firewall-notify"
 SYNC_CRON_TAG="social-firewall-sync"
+UI_DIR=/www/kestrel-ui
+BRIDGE_INIT=/etc/init.d/reticulum-bridge
+BRIDGE_CONFIG=/etc/config/reticulum-bridge
+LISTENER_INIT=/etc/init.d/social-firewall
+LISTENER_CONFIG=/etc/config/social-firewall
+IRC_INIT=/etc/init.d/sf-ircd
+IRC_CONFIG=/etc/config/sf-ircd
 
 if [ "${1:-}" = "remove" ]; then
+    "$IRC_INIT" stop 2>/dev/null || true
+    "$IRC_INIT" disable 2>/dev/null || true
+    "$LISTENER_INIT" stop 2>/dev/null || true
+    "$LISTENER_INIT" disable 2>/dev/null || true
+    "$BRIDGE_INIT" stop 2>/dev/null || true
+    "$BRIDGE_INIT" disable 2>/dev/null || true
+    rm -f "$IRC_INIT" "$IRC_CONFIG" "$LISTENER_INIT" "$LISTENER_CONFIG" "$BRIDGE_INIT" "$BRIDGE_CONFIG"
     sed -i "/# ${CRON_TAG}\$/d" "$CRONTAB" 2>/dev/null || true
     sed -i "/# ${NOTIFY_CRON_TAG}\$/d" "$CRONTAB" 2>/dev/null || true
     sed -i "/# ${SYNC_CRON_TAG}\$/d" "$CRONTAB" 2>/dev/null || true
     /etc/init.d/cron restart 2>/dev/null || true
     nft delete table inet social_firewall 2>/dev/null || true
+    rm -rf "$UI_DIR"
     if [ "${2:-}" = "--purge" ]; then
         rm -rf "$BASE_DIR"
         echo "Removed cron entry, live nftables table, and $BASE_DIR."
@@ -46,6 +60,24 @@ if [ ! -x /usr/bin/sf ]; then
 fi
 
 mkdir -p "$BASE_DIR" "$NFT_SCRATCH_DIR"
+
+mkdir -p /etc/config
+# The Iroh listener is optional and remains disabled until an administrator
+# enables it.
+[ -f "$LISTENER_CONFIG" ] || cp "$(dirname "$0")/social-firewall.config" "$LISTENER_CONFIG"
+cp "$(dirname "$0")/social-firewall.init" "$LISTENER_INIT"
+chmod 0755 "$LISTENER_INIT"
+[ -f "$IRC_CONFIG" ] || cp "$(dirname "$0")/sf-ircd.config" "$IRC_CONFIG"
+cp "$(dirname "$0")/sf-ircd.init" "$IRC_INIT"
+chmod 0755 "$IRC_INIT"
+
+# The bridge is optional and remains disabled until an administrator enables it.
+if [ ! -x /usr/bin/kestrel-reticulum-bridge ]; then
+    echo "WARNING: /usr/bin/kestrel-reticulum-bridge not found — install the bridge binary to enable Reticulum." >&2
+fi
+cp "$(dirname "$0")/reticulum-bridge.init" "$BRIDGE_INIT"
+chmod 0755 "$BRIDGE_INIT"
+[ -f "$BRIDGE_CONFIG" ] || cp "$(dirname "$0")/reticulum-bridge.config" "$BRIDGE_CONFIG"
 
 # ── config ───────────────────────────────────────────────────────────────────
 # Hand-edited by the admin after install — never overwritten once present,
@@ -82,7 +114,13 @@ EOF
 
 # uhttpd runs the party-line chat as a fresh CGI process per request.
 mkdir -p /www/cgi-bin
+mkdir -p "$UI_DIR"
+cp "$(dirname "$0")/ui/index.html" "$UI_DIR/index.html"
+cp "$(dirname "$0")/ui/app.js" "$UI_DIR/app.js"
+cp "$(dirname "$0")/ui/styles.css" "$UI_DIR/styles.css"
 ln -sf /usr/bin/sf /www/cgi-bin/sf-chat
+ln -sf /usr/bin/sf /www/cgi-bin/sf-partyline
+ln -sf /usr/bin/sf /www/cgi-bin/sf-groups
 ln -sf /usr/bin/sf /www/cgi-bin/sf-chat-font
 ln -sf /usr/bin/sf /www/cgi-bin/sf-policies
 ln -sf /usr/bin/sf /www/cgi-bin/sf-policy-vote
@@ -99,5 +137,9 @@ fi
 echo "Installed."
 echo "  $CONFIG"
 echo "  $STORE"
+echo "  Iroh listener: $LISTENER_CONFIG (disabled by default)"
+echo "  IRCv3 listener: $IRC_CONFIG (disabled by default; bind a trusted LAN address before enabling)"
+echo "  Reticulum bridge: $BRIDGE_CONFIG (disabled by default)"
 echo "  Cron: $(grep "$CRON_TAG" "$CRONTAB")"
-echo "  Chat: http://<router-ip>/cgi-bin/sf-chat"
+echo "  Partyline: http://<router-ip>/cgi-bin/sf-partyline"
+echo "  SPA shell: http://<router-ip>/kestrel-ui/"

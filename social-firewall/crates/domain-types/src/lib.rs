@@ -6,6 +6,7 @@ pub mod ids;
 pub mod list;
 pub mod opinion;
 pub mod policy;
+pub mod presence;
 pub mod route;
 pub mod shared_policy;
 pub mod sharing;
@@ -20,7 +21,10 @@ pub use group::{
     Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupVote, PartyLineMessage,
     MAX_JOIN_PROMPT_LEN,
 };
-pub use ids::{FederationId, Hash32, NodeId, PublicKeyBytes, SignatureBytes, UserId};
+pub use ids::{
+    DeviceId, FederationId, GlobalFingerprintId, Hash32, IdentityId, NodeId, PublicKeyBytes,
+    SignatureBytes, UserId,
+};
 pub use list::{SharedRuleEntry, SharedRuleList};
 pub use opinion::{
     FederationStatement, LocalOverride, OpinionRef, OverrideKind, PolicyOpinion, Reason,
@@ -30,6 +34,7 @@ pub use policy::{
     Contribution, Decision, DecisionTier, EffectivePolicyDecision, Explanation, IgnoredInput,
     IgnoredReason,
 };
+pub use presence::{DevicePresenceObservation, MAX_PRESENCE_NETWORK_LEN, MAX_PRESENCE_SOURCE_LEN};
 pub use route::LocalRouteProfile;
 pub use shared_policy::{LocalProfile, PolicyAction, PolicyEntry, PolicyVote, SharedPolicy};
 pub use sharing::{MessagingPublicKeyBytes, StatementRef, Visibility, WgPublicKeyBytes};

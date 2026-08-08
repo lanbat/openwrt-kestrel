@@ -28,6 +28,7 @@ pub trait PeerTransport {
     /// receiver's dispatch callback.
     fn request(&self, to: &str, envelope: &Envelope) -> Result<Envelope, TransportError>;
     /// Blocks until one envelope arrives, dispatches it, and acknowledges
-    /// the sender. `from` is authenticated by Iroh in production.
+    /// the sender. The concrete transport authenticates `from`; application
+    /// signature and follow checks still run above this boundary.
     fn recv_and_dispatch(&self, dispatch: &Dispatch<'_>) -> Result<(), TransportError>;
 }

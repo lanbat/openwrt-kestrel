@@ -18,14 +18,15 @@
 //! documented next step, not yet implemented here.
 
 use domain_types::{
-    Contribution, DeviceApprovalOpinion, FederationId, FederationStatement, FederationTrustRule,
-    FingerprintComment, FingerprintObservation, Group, GroupBlockReport, GroupId, GroupJoinRequest,
-    GroupTrustRule, GroupVote, Hash32, LocalOverride, LocalProfile, LocalRouteProfile, LocalTrustRule,
-    MessagingPublicKeyBytes, OpinionRef, OverrideKind, PartyLineMessage, PolicyAction, PolicyEntry,
-    PolicyOpinion, PolicyVote, PublicKeyBytes, Reason, ReasonCode, SharedPolicy, SharedRuleEntry,
-    SharedRuleList, SignatureBytes, Stance, StatementAuthor, StatementRef, TargetSelector,
-    TunnelAdvertisement, TunnelConnectionAccept, TunnelConnectionRequest, TunnelServiceRequest,
-    TunnelTrustRule, UserId, Visibility, WgPublicKeyBytes,
+    Contribution, DeviceApprovalOpinion, DeviceId, DevicePresenceObservation, FederationId,
+    FederationStatement, FederationTrustRule, FingerprintComment, FingerprintObservation, Group,
+    GroupBlockReport, GroupId, GroupJoinRequest, GroupTrustRule, GroupVote, Hash32, LocalOverride,
+    LocalProfile, LocalRouteProfile, LocalTrustRule, MessagingPublicKeyBytes, NodeId, OpinionRef,
+    OverrideKind, PartyLineMessage, PolicyAction, PolicyEntry, PolicyOpinion, PolicyVote,
+    PublicKeyBytes, Reason, ReasonCode, SharedPolicy, SharedRuleEntry, SharedRuleList,
+    SignatureBytes, Stance, StatementAuthor, StatementRef, TargetSelector, TunnelAdvertisement,
+    TunnelConnectionAccept, TunnelConnectionRequest, TunnelServiceRequest, TunnelTrustRule, UserId,
+    Visibility, WgPublicKeyBytes,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -97,7 +98,19 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (28, include_str!("../migrations/0028_local_profiles.sql")),
     (29, include_str!("../migrations/0029_route_profiles.sql")),
-    (30, include_str!("../migrations/0030_group_fingerprint_keys.sql")),
+    (
+        30,
+        include_str!("../migrations/0030_group_fingerprint_keys.sql"),
+    ),
+    (31, include_str!("../migrations/0031_device_presence.sql")),
+    (
+        32,
+        include_str!("../migrations/0032_reticulum_addresses.sql"),
+    ),
+    (
+        33,
+        include_str!("../migrations/0033_party_line_received_at.sql"),
+    ),
 ];
 
 #[derive(thiserror::Error, Debug)]
@@ -114,6 +127,8 @@ pub enum StoreError {
     Unauthorized(String),
     #[error("{0}")]
     InvalidGroup(String),
+    #[error("{0}")]
+    InvalidPresence(String),
 }
 
 pub struct StateStore {
@@ -130,6 +145,16 @@ pub struct OutboxEnvelope {
     pub next_retry: i64,
     pub last_error: Option<String>,
     pub delivered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerTransportAddress {
+    pub peer: UserId,
+    pub transport: String,
+    pub address: String,
+    pub enabled: bool,
+    pub verified: bool,
+    pub updated_at: i64,
 }
 
 impl StateStore {
@@ -593,6 +618,36 @@ impl StateStore {
             .query_row(
                 "SELECT federation_id, local_id FROM follows WHERE iroh_node_id = ?1",
                 params![node_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?
+            .map(|(fed, local)| {
+                Ok(UserId {
+                    federation: FederationId(bytes_to_hash32(&fed)?),
+                    local_id: bytes_to_hash32(&local)?,
+                })
+            })
+            .transpose()
+    }
+
+    /// Reverse lookup of a configured peer transport address. Transport
+    /// identities are only accepted for users this router already follows.
+    pub fn find_follow_by_transport_address(
+        &self,
+        transport: &str,
+        address: &str,
+    ) -> Result<Option<UserId>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT addresses.federation_id, addresses.local_id
+                 FROM peer_transport_addresses AS addresses
+                 INNER JOIN follows
+                   ON follows.federation_id = addresses.federation_id
+                  AND follows.local_id = addresses.local_id
+                 WHERE addresses.transport = ?1
+                   AND addresses.address = ?2
+                   AND addresses.enabled = 1",
+                params![transport, address],
                 |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )
             .optional()?
@@ -1100,6 +1155,106 @@ impl StateStore {
             .flatten()
             .map(|v| bytes_to_32(&v))
             .transpose()
+    }
+
+    /// Reticulum's identity seed is deliberately separate from every other
+    /// transport and application key.
+    pub fn set_reticulum_identity_seed(&self, seed: &[u8; 32]) -> Result<(), StoreError> {
+        let rows = self.conn.execute(
+            "UPDATE users SET reticulum_secret_seed = ?1 WHERE is_self = 1",
+            params![seed.as_slice()],
+        )?;
+        if rows == 0 {
+            return Err(StoreError::NoSelfIdentity);
+        }
+        Ok(())
+    }
+
+    pub fn get_reticulum_identity_seed(&self) -> Result<Option<[u8; 32]>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT reticulum_secret_seed FROM users WHERE is_self = 1",
+                [],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|value| bytes_to_32(&value))
+            .transpose()
+    }
+
+    pub fn set_peer_transport_address(
+        &self,
+        peer: UserId,
+        transport: &str,
+        address: &str,
+        enabled: bool,
+        verified: bool,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO peer_transport_addresses (federation_id, local_id, transport, address, enabled, verified, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(federation_id, local_id, transport) DO UPDATE SET
+               address = excluded.address, enabled = excluded.enabled,
+               verified = excluded.verified, updated_at = excluded.updated_at",
+            params![
+                peer.federation.0 .0.as_slice(),
+                peer.local_id.0.as_slice(),
+                transport,
+                address,
+                enabled as i64,
+                verified as i64,
+                now_unix()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn peer_transport_address(
+        &self,
+        peer: UserId,
+        transport: &str,
+    ) -> Result<Option<PeerTransportAddress>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT address, enabled, verified, updated_at
+                 FROM peer_transport_addresses
+                 WHERE federation_id = ?1 AND local_id = ?2 AND transport = ?3",
+                params![
+                    peer.federation.0 .0.as_slice(),
+                    peer.local_id.0.as_slice(),
+                    transport
+                ],
+                |row| {
+                    Ok(PeerTransportAddress {
+                        peer,
+                        transport: transport.to_string(),
+                        address: row.get(0)?,
+                        enabled: row.get::<_, i64>(1)? != 0,
+                        verified: row.get::<_, i64>(2)? != 0,
+                        updated_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn delete_peer_transport_address(
+        &self,
+        peer: UserId,
+        transport: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM peer_transport_addresses
+             WHERE federation_id = ?1 AND local_id = ?2 AND transport = ?3",
+            params![
+                peer.federation.0 .0.as_slice(),
+                peer.local_id.0.as_slice(),
+                transport
+            ],
+        )?;
+        Ok(())
     }
 
     /// Rejects outright (not just zero-weight, the way an unfollowed
@@ -2171,13 +2326,108 @@ impl StateStore {
             .find(|profile| profile.active))
     }
 
-    pub fn upsert_local_route_profile(&self, profile: &LocalRouteProfile) -> Result<(), StoreError> {
+    pub fn upsert_device_presence(
+        &self,
+        observation: &DevicePresenceObservation,
+    ) -> Result<(), StoreError> {
+        observation
+            .validate()
+            .map_err(StoreError::InvalidPresence)?;
+        self.conn.execute(
+            "INSERT INTO device_presence_observations (observation_id, device_id, observer_node_id, network, source, first_seen, last_seen, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(observation_id) DO UPDATE SET
+                device_id = COALESCE(excluded.device_id, device_presence_observations.device_id),
+                observer_node_id = excluded.observer_node_id,
+                network = excluded.network,
+                source = excluded.source,
+                first_seen = MIN(device_presence_observations.first_seen, excluded.first_seen),
+                last_seen = MAX(device_presence_observations.last_seen, excluded.last_seen),
+                expires_at = excluded.expires_at",
+            params![
+                observation.observation_id.0.as_slice(),
+                observation.device_id.map(|id| id.0 .0.to_vec()),
+                observation.observer.0 .0.as_slice(),
+                observation.network,
+                observation.source,
+                observation.first_seen,
+                observation.last_seen,
+                observation.expires_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_device_presence(&self) -> Result<Vec<DevicePresenceObservation>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT observation_id, device_id, observer_node_id, network, source, first_seen, last_seen, expires_at
+             FROM device_presence_observations ORDER BY last_seen DESC, observation_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (
+                observation_id,
+                device_id,
+                observer,
+                network,
+                source,
+                first_seen,
+                last_seen,
+                expires_at,
+            ) = row?;
+            Ok(DevicePresenceObservation {
+                observation_id: bytes_to_hash32(&observation_id)?,
+                device_id: device_id
+                    .as_deref()
+                    .map(bytes_to_hash32)
+                    .transpose()?
+                    .map(DeviceId),
+                observer: NodeId(bytes_to_hash32(&observer)?),
+                network,
+                source,
+                first_seen,
+                last_seen,
+                expires_at,
+            })
+        })
+        .collect()
+    }
+
+    pub fn delete_device_presence(&self, observation_id: Hash32) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM device_presence_observations WHERE observation_id = ?1",
+            params![observation_id.0.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_local_route_profile(
+        &self,
+        profile: &LocalRouteProfile,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO local_route_profiles (name, table_id, interface, enabled, vpn)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(name) DO UPDATE SET table_id = excluded.table_id,
                interface = excluded.interface, enabled = excluded.enabled, vpn = excluded.vpn",
-            params![profile.name, profile.table as i64, profile.interface, profile.enabled as i64, profile.vpn as i64],
+            params![
+                profile.name,
+                profile.table as i64,
+                profile.interface,
+                profile.enabled as i64,
+                profile.vpn as i64
+            ],
         )?;
         Ok(())
     }
@@ -2195,11 +2445,15 @@ impl StateStore {
                 vpn: row.get::<_, i64>(4)? != 0,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn local_route_profile(&self, name: &str) -> Result<Option<LocalRouteProfile>, StoreError> {
-        Ok(self.list_local_route_profiles()?.into_iter().find(|p| p.name == name))
+        Ok(self
+            .list_local_route_profiles()?
+            .into_iter()
+            .find(|p| p.name == name))
     }
 
     pub fn list_active_shared_policies(&self) -> Result<Vec<SharedPolicy>, StoreError> {
@@ -4440,8 +4694,8 @@ impl StateStore {
     ) -> Result<(), StoreError> {
         let reply_target = msg.in_reply_to.as_ref().map(target_to_kv).transpose()?;
         self.conn.execute(
-            "INSERT INTO party_line_messages (group_id, author_federation_id, author_local_id, sequence, body, in_reply_to_target_kind, in_reply_to_target_value, issued_at, signature, ingested_at, author_pubkey)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO party_line_messages (group_id, author_federation_id, author_local_id, sequence, body, in_reply_to_target_kind, in_reply_to_target_value, issued_at, signature, ingested_at, author_pubkey, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(group_id, author_federation_id, author_local_id, sequence) DO NOTHING",
             params![
                 msg.group_id.0 .0.as_slice(),
@@ -4455,6 +4709,7 @@ impl StateStore {
                 msg.signature.0.as_slice(),
                 now_unix(),
                 author_pubkey.map(|key| key.0.as_slice()),
+                now_unix(),
             ],
         )?;
         Ok(())
@@ -4469,6 +4724,25 @@ impl StateStore {
             params![msg.group_id.0 .0.as_slice(), msg.author.federation.0 .0.as_slice(), msg.author.local_id.0.as_slice(), msg.sequence as i64],
             |row| row.get::<_, Option<Vec<u8>>>(0),
         ).optional()?.flatten().map(|bytes| bytes_to_32(&bytes).map(PublicKeyBytes)).transpose()
+    }
+
+    pub fn party_line_message_received_at(
+        &self,
+        msg: &PartyLineMessage,
+    ) -> Result<Option<i64>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT received_at FROM party_line_messages WHERE group_id = ?1 AND author_federation_id = ?2 AND author_local_id = ?3 AND sequence = ?4",
+                params![
+                    msg.group_id.0 .0.as_slice(),
+                    msg.author.federation.0 .0.as_slice(),
+                    msg.author.local_id.0.as_slice(),
+                    msg.sequence as i64,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     /// Filters against the group's *current* posting permissions
@@ -4953,10 +5227,7 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn group_fingerprint_key(
-        &self,
-        group_id: GroupId,
-    ) -> Result<Option<[u8; 32]>, StoreError> {
+    pub fn group_fingerprint_key(&self, group_id: GroupId) -> Result<Option<[u8; 32]>, StoreError> {
         let key = self
             .conn
             .query_row(
@@ -5413,8 +5684,13 @@ mod tests {
         assert_eq!(store.group_fingerprint_key(first).unwrap(), Some(key));
         assert!(store.group_fingerprint_key(second).unwrap().is_none());
         let replacement = [14; 32];
-        store.set_group_fingerprint_key(first, &replacement).unwrap();
-        assert_eq!(store.group_fingerprint_key(first).unwrap(), Some(replacement));
+        store
+            .set_group_fingerprint_key(first, &replacement)
+            .unwrap();
+        assert_eq!(
+            store.group_fingerprint_key(first).unwrap(),
+            Some(replacement)
+        );
     }
 
     #[test]
@@ -6581,6 +6857,40 @@ mod tests {
             store.set_iroh_keypair_seed(&[8; 32]),
             Err(StoreError::NoSelfIdentity)
         ));
+    }
+
+    #[test]
+    fn reticulum_identity_seed_round_trips() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .set_self_identity(user(1, 1), PublicKeyBytes([1; 32]), &[4; 32], None)
+            .unwrap();
+        assert_eq!(store.get_reticulum_identity_seed().unwrap(), None);
+        store.set_reticulum_identity_seed(&[9; 32]).unwrap();
+        assert_eq!(store.get_reticulum_identity_seed().unwrap(), Some([9; 32]));
+    }
+
+    #[test]
+    fn peer_transport_address_round_trips_and_deletes() {
+        let store = StateStore::open_in_memory().unwrap();
+        let peer = user(1, 2);
+        store
+            .set_peer_transport_address(peer, "reticulum", "0123456789abcdef", true, true)
+            .unwrap();
+        let address = store
+            .peer_transport_address(peer, "reticulum")
+            .unwrap()
+            .unwrap();
+        assert_eq!(address.address, "0123456789abcdef");
+        assert!(address.enabled);
+        assert!(address.verified);
+        store
+            .delete_peer_transport_address(peer, "reticulum")
+            .unwrap();
+        assert!(store
+            .peer_transport_address(peer, "reticulum")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -9158,5 +9468,32 @@ mod tests {
         assert_eq!(due[0].last_error.as_deref(), Some("offline"));
         store.mark_outbox_success(id).unwrap();
         assert!(store.list_due_outbox(10_000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn device_presence_round_trips_updates_and_deletion() {
+        let store = StateStore::open_in_memory().unwrap();
+        let observation = DevicePresenceObservation {
+            observation_id: Hash32([21; 32]),
+            device_id: Some(DeviceId(Hash32([22; 32]))),
+            observer: NodeId(Hash32([23; 32])),
+            network: "guest".into(),
+            source: "dhcp".into(),
+            first_seen: 10,
+            last_seen: 20,
+            expires_at: Some(100),
+        };
+        store.upsert_device_presence(&observation).unwrap();
+        let mut update = observation.clone();
+        update.first_seen = 5;
+        update.last_seen = 30;
+        store.upsert_device_presence(&update).unwrap();
+
+        let got = store.list_device_presence().unwrap();
+        assert_eq!(got, vec![update]);
+        store
+            .delete_device_presence(observation.observation_id)
+            .unwrap();
+        assert!(store.list_device_presence().unwrap().is_empty());
     }
 }

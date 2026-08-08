@@ -25,7 +25,7 @@ PKG_VERSION := 0.0.1
 PKG_RELEASE := 1
 
 # GitHub release tarball: social-firewall-<version>-aarch64-musl.tar.gz
-# containing a single file: sf (the stripped static binary)
+# containing the stripped `sf` and `kestrel-reticulum-bridge` binaries.
 PKG_SOURCE_URL  := https://github.com/lanbat/openwrt-kestrel/releases/download/sf-v$(PKG_VERSION)
 PKG_SOURCE      := $(PKG_NAME)-$(PKG_VERSION)-aarch64-musl.tar.gz
 PKG_HASH        := skip  # replace with sha256sum output after first release
@@ -64,6 +64,7 @@ endef
 define Package/$(PKG_NAME)/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/sf $(1)/usr/bin/sf
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/kestrel-reticulum-bridge $(1)/usr/bin/kestrel-reticulum-bridge
 endef
 
 $(eval $(call BuildPackage,$(PKG_NAME)))

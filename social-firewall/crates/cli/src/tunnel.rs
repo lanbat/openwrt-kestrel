@@ -120,11 +120,11 @@ pub(crate) enum DeliveryOutcome {
     Failed(String),
 }
 
-/// Attempts real delivery via Iroh if `recipient`'s `iroh_node_id` is
-/// known; the caller is responsible for writing the fallback file in
-/// every case except `Delivered` — this function never writes to disk
-/// itself, keeping "how to fall back" a caller decision (each call site
-/// already has its own `--out`/`--out-dir` convention to preserve).
+/// Attempts real delivery via Iroh, then the explicitly configured Reticulum
+/// bridge when Iroh is unavailable. The caller is responsible for writing the
+/// fallback file in every case except `Delivered` — this function never writes
+/// to disk itself, keeping "how to fall back" a caller decision (each call
+/// site already has its own `--out`/`--out-dir` convention to preserve).
 /// One Iroh keypair/endpoint is generated per call — acceptable for this
 /// phase's request/accept cadence (a handful of sends per reconciliation
 /// run, not a hot path); reusing a single long-lived endpoint across
@@ -136,41 +136,81 @@ pub(crate) fn try_deliver(
     kind: p2p_transport::StatementKind,
     payload: &[u8],
 ) -> DeliveryOutcome {
-    let Ok(Some(rule)) = store.get_follow(recipient) else {
+    let destinations = match delivery_destinations(store, recipient) {
+        Ok(destinations) => destinations,
+        Err(error) => return DeliveryOutcome::Failed(error.to_string()),
+    };
+    if destinations.is_empty() {
         return DeliveryOutcome::NoKnownAddress;
-    };
-    let Some(node_id) = rule.iroh_node_id else {
-        return DeliveryOutcome::NoKnownAddress;
-    };
-    let seed = match store.get_iroh_keypair_seed() {
-        Ok(Some(seed)) => seed,
-        // Distinct from the error case below: this one is a normal
-        // "you haven't set this up yet" with an obvious fix, not a
-        // malfunction. Collapsing the two would have reported a corrupt
-        // or unreadable database as a missing keypair.
-        Ok(None) => {
-            return DeliveryOutcome::Failed(
-                "no local Iroh keypair yet — run `sf listen` once to generate one".to_string(),
-            )
-        }
-        Err(e) => {
-            return DeliveryOutcome::Failed(format!(
-                "could not read the local Iroh keypair from the store: {e}"
-            ))
-        }
-    };
-    let transport = match p2p_transport::IrohTransport::new(seed, b"social-firewall/1") {
-        Ok(t) => t,
-        Err(e) => return DeliveryOutcome::Failed(e.to_string()),
-    };
+    }
     let envelope = p2p_transport::Envelope {
         kind,
         payload: payload.to_vec(),
     };
-    match transport.send(&node_id, &envelope) {
-        Ok(()) => DeliveryOutcome::Delivered,
-        Err(e) => DeliveryOutcome::Failed(e.to_string()),
+    let mut failures = Vec::new();
+    for destination in destinations {
+        match send_to_destination(store, &destination, &envelope) {
+            Ok(()) => return DeliveryOutcome::Delivered,
+            Err(error) => failures.push(format!("{destination}: {error}")),
+        }
     }
+    DeliveryOutcome::Failed(failures.join("; "))
+}
+
+fn send_to_destination(
+    store: &StateStore,
+    destination: &str,
+    envelope: &p2p_transport::Envelope,
+) -> Result<()> {
+    if let Some(address) = destination.strip_prefix("reticulum:") {
+        let socket = std::env::var_os("SF_RETICULUM_SOCKET")
+            .unwrap_or_else(|| "/run/kestrel/reticulum.sock".into());
+        let transport = p2p_transport::ReticulumTransport::new(socket)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        return transport
+            .send(address, envelope)
+            .map_err(|error| anyhow::anyhow!(error.to_string()));
+    }
+
+    let node_id = destination.strip_prefix("iroh:").unwrap_or(destination);
+    let seed = store
+        .get_iroh_keypair_seed()?
+        .context("no local Iroh keypair yet — run `sf listen` once to generate one")?;
+    let transport = p2p_transport::IrohTransport::new(seed, b"social-firewall/1")
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    transport
+        .send(node_id, envelope)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+fn delivery_destinations(store: &StateStore, recipient: &UserId) -> Result<Vec<String>> {
+    let Some(rule) = store.get_follow(recipient)? else {
+        return Ok(Vec::new());
+    };
+    let iroh = rule.iroh_node_id;
+    let reticulum = store
+        .peer_transport_address(*recipient, "reticulum")?
+        .filter(|address| address.enabled)
+        .map(|address| address.address);
+    Ok(ordered_destinations(iroh.as_deref(), reticulum.as_deref()))
+}
+
+fn ordered_destinations(iroh: Option<&str>, reticulum: Option<&str>) -> Vec<String> {
+    let mut destinations = Vec::with_capacity(2);
+    if let Some(node_id) = iroh {
+        destinations.push(format!("iroh:{node_id}"));
+    }
+    if let Some(address) = reticulum {
+        destinations.push(format!("reticulum:{address}"));
+    }
+    destinations
+}
+
+pub(crate) fn preferred_destination(
+    store: &StateStore,
+    recipient: &UserId,
+) -> Result<Option<String>> {
+    Ok(delivery_destinations(store, recipient)?.into_iter().next())
 }
 
 pub(crate) fn deliver_to_node(
@@ -193,6 +233,54 @@ pub(crate) fn deliver_to_node(
             },
         )
         .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+pub(crate) fn deliver_to_destination(
+    store: &StateStore,
+    destination: &str,
+    kind: p2p_transport::StatementKind,
+    payload: &[u8],
+) -> Result<()> {
+    let envelope = p2p_transport::Envelope {
+        kind,
+        payload: payload.to_vec(),
+    };
+    if let Some(address) = destination.strip_prefix("reticulum:") {
+        let socket = std::env::var_os("SF_RETICULUM_SOCKET")
+            .unwrap_or_else(|| "/run/kestrel/reticulum.sock".into());
+        let transport = p2p_transport::ReticulumTransport::new(socket)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        return transport
+            .send(address, &envelope)
+            .map_err(|error| anyhow::anyhow!(error.to_string()));
+    }
+    let node_id = destination.strip_prefix("iroh:").unwrap_or(destination);
+    deliver_to_node(store, node_id, kind, payload)
+}
+
+pub(crate) fn request_to_destination(
+    store: &StateStore,
+    destination: &str,
+    envelope: &p2p_transport::Envelope,
+) -> Result<p2p_transport::Envelope> {
+    if let Some(address) = destination.strip_prefix("reticulum:") {
+        let socket = std::env::var_os("SF_RETICULUM_SOCKET")
+            .unwrap_or_else(|| "/run/kestrel/reticulum.sock".into());
+        let transport = p2p_transport::ReticulumTransport::new(socket)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        return transport
+            .request(address, envelope)
+            .map_err(|error| anyhow::anyhow!(error.to_string()));
+    }
+    let seed = store
+        .get_iroh_keypair_seed()?
+        .context("no local Iroh keypair yet — run `sf listen` once")?;
+    let transport = p2p_transport::IrohTransport::new(seed, b"social-firewall/1")
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let node_id = destination.strip_prefix("iroh:").unwrap_or(destination);
+    transport
+        .request(node_id, envelope)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 /// Reports a `try_deliver` outcome to the operator and answers the one
@@ -219,7 +307,7 @@ pub(crate) fn needs_file_fallback(outcome: DeliveryOutcome, peer: &UserId) -> bo
         }
         DeliveryOutcome::NoKnownAddress => {
             println!(
-                "no Iroh node_id on record for {} — falling back to file export",
+                "no Iroh or Reticulum address on record for {} — falling back to file export",
                 user_id_str(peer)
             );
             true
@@ -1266,6 +1354,39 @@ pub(crate) fn known_follow_for_node_id(store: &StateStore, from: &str) -> Option
     }
 }
 
+pub(crate) fn known_follow_for_reticulum_address(store: &StateStore, from: &str) -> Option<UserId> {
+    match store.find_follow_by_transport_address("reticulum", from) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!(
+                "could not check whether {from} is a known Reticulum address ({e}) — refusing the envelope"
+            );
+            None
+        }
+    }
+}
+
+fn dispatch_received_envelope(
+    store: &StateStore,
+    from: &str,
+    envelope: &p2p_transport::Envelope,
+    peer: UserId,
+) -> Result<Option<p2p_transport::Envelope>, String> {
+    if envelope.kind == p2p_transport::StatementKind::SyncGroupRequest {
+        let response =
+            crate::group::handle_sync_group_request(store, peer, from, &envelope.payload)
+                .map_err(|e| e.to_string())?;
+        return Ok(Some(response));
+    }
+    dispatch_envelope(store, envelope.kind, &envelope.payload).map_err(|e| e.to_string())?;
+    println!(
+        "dispatched {:?} from {} ({from})",
+        envelope.kind,
+        user_id_str(&peer)
+    );
+    Ok(None)
+}
+
 /// The first genuinely persistent process in this codebase — accepts
 /// inbound Iroh connections and dispatches each received envelope via
 /// `dispatch_envelope`. A malformed envelope, a decode failure, an
@@ -1293,20 +1414,7 @@ pub fn listen(store: &StateStore) -> Result<()> {
         match transport.recv_and_dispatch(&|from, envelope| {
             let peer = known_follow_for_node_id(store, from)
                 .ok_or_else(|| format!("unrecognized node {from}"))?;
-            if envelope.kind == p2p_transport::StatementKind::SyncGroupRequest {
-                let response =
-                    crate::group::handle_sync_group_request(store, peer, from, &envelope.payload)
-                        .map_err(|e| e.to_string())?;
-                return Ok(Some(response));
-            }
-            dispatch_envelope(store, envelope.kind, &envelope.payload)
-                .map_err(|e| e.to_string())?;
-            println!(
-                "dispatched {:?} from {} ({from})",
-                envelope.kind,
-                user_id_str(&peer)
-            );
-            Ok(None)
+            dispatch_received_envelope(store, from, envelope, peer)
         }) {
             Ok(()) => {}
             Err(p2p_transport::TransportError::ApplicationRejected(reason)) => {
@@ -1315,6 +1423,33 @@ pub fn listen(store: &StateStore) -> Result<()> {
             Err(e) => {
                 eprintln!("transport closed: {e}");
                 return Ok(());
+            }
+        }
+    }
+}
+
+/// Accepts inbound Reticulum connections through the optional bridge. This
+/// runs as a separate service because the bridge's Unix socket receive stream
+/// is blocking and must not prevent the Iroh listener from accepting peers.
+pub fn reticulum_listen(store: &StateStore) -> Result<()> {
+    let socket = std::env::var_os("SF_RETICULUM_SOCKET")
+        .unwrap_or_else(|| "/run/kestrel/reticulum.sock".into());
+    let transport = p2p_transport::ReticulumTransport::new(socket)
+        .map_err(|e| anyhow::anyhow!("failed to start Reticulum transport: {e}"))?;
+    println!("listening for Reticulum envelopes");
+    loop {
+        match transport.recv_and_dispatch(&|from, envelope| {
+            let peer = known_follow_for_reticulum_address(store, from)
+                .ok_or_else(|| format!("unrecognized Reticulum address {from}"))?;
+            dispatch_received_envelope(store, from, envelope, peer)
+        }) {
+            Ok(()) => {}
+            Err(p2p_transport::TransportError::ApplicationRejected(reason)) => {
+                eprintln!("rejected inbound Reticulum envelope: {reason}");
+            }
+            Err(e) => {
+                eprintln!("Reticulum transport closed: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
     }
@@ -1732,6 +1867,27 @@ mod sync_tunnels_tests {
             dnsmasq_dir: dir.to_path_buf(),
             ..wg_tunnel::WgTunnelConfig::default()
         }
+    }
+
+    #[test]
+    fn delivery_destinations_prefer_iroh_but_retain_reticulum_fallback() {
+        assert_eq!(
+            ordered_destinations(Some("node"), Some("address")),
+            vec!["iroh:node", "reticulum:address"]
+        );
+    }
+
+    #[test]
+    fn delivery_destinations_use_reticulum_when_iroh_is_unconfigured() {
+        assert_eq!(
+            ordered_destinations(None, Some("address")),
+            vec!["reticulum:address"]
+        );
+    }
+
+    #[test]
+    fn delivery_destinations_are_empty_without_configured_transports() {
+        assert!(ordered_destinations(None, None).is_empty());
     }
 
     #[test]

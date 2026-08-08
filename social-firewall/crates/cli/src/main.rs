@@ -13,6 +13,7 @@
 //! against the embedded key; it does not verify that the embedded key is
 //! actually the one the federation has on record for that user.
 
+mod auth;
 mod cgi;
 mod device;
 mod fingerprint;
@@ -62,6 +63,14 @@ enum Command {
     /// Set or clear this node's local nickname used in party-line displays.
     #[command(visible_alias = "nick")]
     SetIdentityName {
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Change the nickname and publish an IRC-style NICK event to the group.
+    #[command(hide = true)]
+    AnnounceNick {
+        #[arg(long)]
+        group: String,
         #[arg(long)]
         name: Option<String>,
     },
@@ -126,6 +135,15 @@ enum Command {
         user: String,
         #[arg(long)]
         node_id: Option<String>,
+    },
+    /// Set or clear a followed user's explicit Reticulum destination address.
+    SetFollowReticulumAddress {
+        #[arg(long)]
+        federation: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        address: Option<String>,
     },
     /// Set or clear the optional plain-HTTP ntfy notification topic.
     SetNtfyTopic {
@@ -367,6 +385,47 @@ enum Command {
     /// identity (generated on first use, same as `sf init-identity`'s
     /// signing keypair).
     Listen,
+    /// Accept inbound Reticulum envelopes through the local bridge and
+    /// dispatch them to the normal ingest path.
+    ReticulumListen,
+    /// Serve the signed partyline through an IRCv3-compatible LAN listener.
+    Ircd {
+        /// Specific trusted-LAN address and port, never a wildcard address.
+        #[arg(long)]
+        listen: String,
+        #[arg(long, default_value = "kestrel.local")]
+        server_name: String,
+        #[arg(long, default_value = "/etc/kestrel/social-firewall/chat-out")]
+        out_dir: PathBuf,
+        /// PEM certificate chain. Both TLS paths must be supplied together.
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+        /// PEM private key matching `tls_cert`.
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
+        /// Authentik OAuth2 token-introspection URL. Enables mandatory SASL
+        /// OAUTHBEARER authentication when all OIDC options are supplied.
+        #[arg(long)]
+        oidc_introspection_url: Option<String>,
+        #[arg(long)]
+        oidc_client_id: Option<String>,
+        /// File containing the Authentik OAuth2 client secret.
+        #[arg(long)]
+        oidc_client_secret_file: Option<PathBuf>,
+        /// PEM CA certificate used to trust a private Authentik HTTPS endpoint.
+        #[arg(long)]
+        oidc_ca_file: Option<PathBuf>,
+        #[arg(long)]
+        oidc_issuer: Option<String>,
+        #[arg(long)]
+        oidc_audience: Option<String>,
+        #[arg(long)]
+        oidc_required_group: Option<String>,
+        #[arg(long)]
+        oidc_write_entitlement: Option<String>,
+        #[arg(long)]
+        oidc_operator_entitlement: Option<String>,
+    },
     /// Retry due real-time group and party-line deliveries. Full catch-up
     /// reconciliation is intentionally deferred to the next reliability slice.
     Sync,
@@ -540,11 +599,16 @@ enum Command {
     ListProfileEffects,
     /// Register a local route profile used by shared route actions.
     AddRouteProfile {
-        #[arg(long)] name: String,
-        #[arg(long)] table: u32,
-        #[arg(long)] interface: String,
-        #[arg(long, default_value_t = false)] enabled: bool,
-        #[arg(long, default_value_t = false)] vpn: bool,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        table: u32,
+        #[arg(long)]
+        interface: String,
+        #[arg(long, default_value_t = false)]
+        enabled: bool,
+        #[arg(long, default_value_t = false)]
+        vpn: bool,
     },
     /// List local route profiles.
     ListRouteProfiles,
@@ -731,6 +795,14 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Set the topic and publish the IRC TOPIC event to the party line.
+    #[command(hide = true)]
+    AnnounceTopic {
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        topic: String,
+    },
     /// Toggle the party line between open (any member may post) and
     /// moderated (only owners/admins and voiced members may post) — the
     /// IRC `+m`/`-m` analogue.
@@ -741,6 +813,14 @@ enum Command {
         moderated: bool,
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Set party-line moderation and publish an IRC MODE event.
+    #[command(hide = true)]
+    AnnounceMode {
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        moderated: bool,
     },
     /// Grant or revoke a member's voice on the party line — the IRC
     /// `+v`/`-v` analogue, only consulted while moderated.
@@ -753,6 +833,16 @@ enum Command {
         voiced: bool,
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Set voice and publish an IRC MODE event.
+    #[command(hide = true)]
+    AnnounceVoice {
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        voiced: bool,
     },
     /// Grant or revoke an existing member's voting rights.
     SetGroupVotingRight {
@@ -924,6 +1014,7 @@ fn main() -> Result<()> {
                     .unwrap_or_else(|| "cleared".to_string())
             );
         }
+        Command::AnnounceNick { group, name } => announce_nick(&store, &group, name)?,
         Command::SetFederationName { name } => {
             store.set_home_federation_display_name(name.as_deref())?;
             println!(
@@ -964,6 +1055,11 @@ fn main() -> Result<()> {
             user,
             node_id,
         } => set_follow_node_id(&store, &federation, &user, node_id)?,
+        Command::SetFollowReticulumAddress {
+            federation,
+            user,
+            address,
+        } => set_follow_reticulum_address(&store, &federation, &user, address)?,
         Command::SetNtfyTopic { url } => {
             store.set_ntfy_topic_url(url.as_deref())?;
             match url {
@@ -1327,9 +1423,10 @@ fn main() -> Result<()> {
         Command::SetFingerprintKey { group, key_hex } => {
             fingerprint::set_group_key(&store, &group, &key_hex)?
         }
-        Command::DeriveFingerprintId { group, material_file } => {
-            fingerprint::derive_shared_id(&store, &group, &material_file)?
-        }
+        Command::DeriveFingerprintId {
+            group,
+            material_file,
+        } => fingerprint::derive_shared_id(&store, &group, &material_file)?,
         Command::CreateProfile { name, description } => {
             profile::create(&store, &name, &description)?
         }
@@ -1341,8 +1438,13 @@ fn main() -> Result<()> {
         Command::ListProfiles => profile::list(&store)?,
         Command::ListActivePolicies => profile::list_active_policies(&store)?,
         Command::ListProfileEffects => profile::effects(&store)?,
-        Command::AddRouteProfile { name, table, interface, enabled, vpn } =>
-            profile::add_route_profile(&store, &name, table, &interface, enabled, vpn)?,
+        Command::AddRouteProfile {
+            name,
+            table,
+            interface,
+            enabled,
+            vpn,
+        } => profile::add_route_profile(&store, &name, table, &interface, enabled, vpn)?,
         Command::ListRouteProfiles => profile::list_route_profiles(&store)?,
         Command::PreviewRoutes => profile::route_preview(&store)?,
         Command::SetFollowCategoryFilter {
@@ -1416,17 +1518,26 @@ fn main() -> Result<()> {
         Command::SetGroupTopic { group, topic, out } => {
             group::set_group_topic(&store, &group, topic, out)?
         }
+        Command::AnnounceTopic { group, topic } => group::announce_topic(&store, &group, topic)?,
         Command::SetGroupPartyLineModeration {
             group,
             moderated,
             out,
         } => group::set_group_party_line_moderation(&store, &group, moderated, out)?,
+        Command::AnnounceMode { group, moderated } => {
+            group::announce_mode(&store, &group, moderated)?
+        }
         Command::SetGroupVoice {
             group,
             user,
             voiced,
             out,
         } => group::set_group_voice(&store, &group, &user, voiced, out)?,
+        Command::AnnounceVoice {
+            group,
+            user,
+            voiced,
+        } => group::announce_voice(&store, &group, &user, voiced)?,
         Command::SetGroupVotingRight {
             group,
             user,
@@ -1712,6 +1823,31 @@ fn refresh_enforced_decision_contributors(
     Ok(())
 }
 
+fn announce_nick(store: &StateStore, group: &str, name: Option<String>) -> Result<()> {
+    let (user, _) = store
+        .get_self_identity()?
+        .context("no identity yet — run `sf init-identity` first")?;
+    let old = store
+        .get_user_display_name(&user)?
+        .unwrap_or_else(|| crate::tunnel::user_id_str(&user));
+    store.set_self_display_name(name.as_deref())?;
+    let new = name
+        .clone()
+        .unwrap_or_else(|| crate::tunnel::user_id_str(&user));
+    let out_dir = std::env::var_os("SF_CHAT_OUT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("social-firewall-chat-out"));
+    crate::group::publish_party_line(
+        store,
+        group,
+        &format!("*** {old} is now known as {new}"),
+        None,
+        &out_dir,
+    )?;
+    println!("nickname changed from {old} to {new}");
+    Ok(())
+}
+
 fn init_identity(store: &StateStore, display_name: Option<String>) -> Result<()> {
     if store.get_self_identity()?.is_some() {
         bail!("an identity already exists in this database — refusing to overwrite it");
@@ -1879,6 +2015,41 @@ fn set_follow_node_id(
             "Iroh node id cleared for {}/{}",
             target_user.federation.0, target_user.local_id
         ),
+    }
+    Ok(())
+}
+
+fn set_follow_reticulum_address(
+    store: &StateStore,
+    federation: &str,
+    user: &str,
+    address: Option<String>,
+) -> Result<()> {
+    let target_user = UserId {
+        federation: FederationId(parse_hash32(federation)?),
+        local_id: parse_hash32(user)?,
+    };
+    if store.get_follow(&target_user)?.is_none() {
+        bail!("not following this user yet — run `add-follow` first");
+    }
+    match address {
+        Some(address) => {
+            if address.len() != 32 || !address.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                bail!("Reticulum address must be exactly 32 hexadecimal characters");
+            }
+            store.set_peer_transport_address(target_user, "reticulum", &address, true, true)?;
+            println!(
+                "{}/{} is now reachable via Reticulum address {address}",
+                target_user.federation.0, target_user.local_id
+            );
+        }
+        None => {
+            store.delete_peer_transport_address(target_user, "reticulum")?;
+            println!(
+                "Reticulum address cleared for {}/{}",
+                target_user.federation.0, target_user.local_id
+            );
+        }
     }
     Ok(())
 }

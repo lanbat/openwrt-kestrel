@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+USE_PROCD=1
+
+start_service() {
+    config_load reticulum-bridge
+    config_get_bool enabled main enabled 0
+    [ "$enabled" = 1 ] || return 0
+    [ -x /usr/bin/kestrel-reticulum-bridge ] || return 0
+
+    config_get socket_path main socket /run/kestrel/reticulum.sock
+    config_get identity main identity /etc/kestrel/social-firewall/reticulum.identity
+    config_get tcp_listen main tcp_listen
+    config_get tcp_connect main tcp_connect
+    config_get udp_bind main udp_bind
+    config_get udp_forward main udp_forward
+    config_get db main db /etc/kestrel/social-firewall/social-firewall.sqlite
+
+    procd_open_instance
+    procd_set_param command /usr/bin/kestrel-reticulum-bridge \
+        --socket "$socket_path" --identity "$identity"
+    [ -n "$tcp_listen" ] && procd_append_param command --tcp-listen "$tcp_listen"
+    [ -n "$tcp_connect" ] && procd_append_param command --tcp-connect "$tcp_connect"
+    [ -n "$udp_bind" ] && procd_append_param command --udp-bind "$udp_bind"
+    [ -n "$udp_forward" ] && procd_append_param command --udp-forward "$udp_forward"
+    procd_set_param respawn 3600 5 5
+    procd_set_param file /etc/config/reticulum-bridge
+    procd_close_instance
+
+    [ -x /usr/bin/sf ] || return 0
+    procd_open_instance listener
+    procd_set_param command /usr/bin/sf --db "$db" reticulum-listen
+    procd_set_param respawn 3600 5 5
+    procd_set_param file /etc/config/reticulum-bridge
+    procd_close_instance
+}
