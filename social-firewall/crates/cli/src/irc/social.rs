@@ -23,6 +23,8 @@ pub(crate) fn handle(
         "groups" | "list-groups" => list_groups(server, tx, state, store)?,
         "voters" | "voting-members" => list_voters(server, tx, state, store, &options)?,
         "follows" | "list-follows" => list_follows(server, tx, state, store)?,
+        "follow" | "add-follow" => add_follow(server, tx, state, store, &options)?,
+        "follow-category" => set_follow_category(server, tx, state, store, &options)?,
         "history" | "list-party-line" => history(server, tx, state, store, &options)?,
         "create-group" => create_group(server, tx, state, store, &options)?,
         "invite" => invite(server, tx, state, store, &options)?,
@@ -188,6 +190,8 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
     for line in [
         "/sf groups | follows | history [--group GROUP]",
         "/sf voters --group GROUP",
+        "/sf follow --user FEDERATION/LOCAL --allow-weight N --deny-weight N [--advisory true|false] [--excluded true|false] [--name NAME] [--iroh-node-id ID]",
+        "/sf follow-category --user FEDERATION/LOCAL [--category NAME]",
         "/sf opinion --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf evaluate --target-kind KIND --target-value VALUE [--threshold NUMBER]",
         "/sf create-group --name NAME --description TEXT [--join-prompt TEXT]",
@@ -308,6 +312,50 @@ fn list_voters(
             &format!("voter {}/{}{}", voter.federation.0, voter.local_id, marker),
         );
     }
+    Ok(())
+}
+
+fn add_follow(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    let user = crate::tunnel::parse_user_ref(required(options, "user")?)?;
+    let rule = domain_types::LocalTrustRule {
+        user,
+        allow_weight: required(options, "allow-weight")?.parse()?,
+        deny_weight: required(options, "deny-weight")?.parse()?,
+        advisory_only: parse_bool_or(options, "advisory", false)?,
+        excluded: parse_bool_or(options, "excluded", false)?,
+        category_filter: None,
+        display_name: options.get("name").cloned(),
+        iroh_node_id: options.get("iroh-node-id").cloned(),
+        expires_at: None,
+        created_at: crate::now_unix(),
+    };
+    store.upsert_follow(&rule)?;
+    response(server, tx, state, "local follow/trust rule updated");
+    Ok(())
+}
+
+fn set_follow_category(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    let user = crate::tunnel::parse_user_ref(required(options, "user")?)?;
+    let mut rule = store
+        .get_follow(&user)?
+        .context("not following this user yet")?;
+    rule.category_filter = options.get("category").cloned();
+    store.upsert_follow(&rule)?;
+    response(server, tx, state, "local follow category filter updated");
     Ok(())
 }
 
