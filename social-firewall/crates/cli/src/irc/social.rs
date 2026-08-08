@@ -25,6 +25,9 @@ pub(crate) fn handle(
         "follows" | "list-follows" => list_follows(server, tx, state, store)?,
         "follow" | "add-follow" => add_follow(server, tx, state, store, &options)?,
         "follow-category" => set_follow_category(server, tx, state, store, &options)?,
+        "follow-name" => update_follow_name(server, tx, state, store, &options)?,
+        "follow-node" => update_follow_node(server, tx, state, store, &options)?,
+        "follow-reticulum" => update_follow_reticulum(server, tx, state, store, &options)?,
         "history" | "list-party-line" => history(server, tx, state, store, &options)?,
         "create-group" => create_group(server, tx, state, store, &options)?,
         "invite" => invite(server, tx, state, store, &options)?,
@@ -192,6 +195,9 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf voters --group GROUP",
         "/sf follow --user FEDERATION/LOCAL --allow-weight N --deny-weight N [--advisory true|false] [--excluded true|false] [--name NAME] [--iroh-node-id ID]",
         "/sf follow-category --user FEDERATION/LOCAL [--category NAME]",
+        "/sf follow-name --user FEDERATION/LOCAL [--name NAME]",
+        "/sf follow-node --user FEDERATION/LOCAL [--iroh-node-id ID]",
+        "/sf follow-reticulum --user FEDERATION/LOCAL [--address ADDRESS]",
         "/sf opinion --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf evaluate --target-kind KIND --target-value VALUE [--threshold NUMBER]",
         "/sf create-group --name NAME --description TEXT [--join-prompt TEXT]",
@@ -356,6 +362,94 @@ fn set_follow_category(
     rule.category_filter = options.get("category").cloned();
     store.upsert_follow(&rule)?;
     response(server, tx, state, "local follow category filter updated");
+    Ok(())
+}
+
+fn update_follow_name(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    update_follow_field(
+        server,
+        tx,
+        state,
+        store,
+        options,
+        "name",
+        |rule, value| rule.display_name = value,
+        "follow display name updated",
+    )
+}
+
+fn update_follow_node(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    update_follow_field(
+        server,
+        tx,
+        state,
+        store,
+        options,
+        "iroh-node-id",
+        |rule, value| rule.iroh_node_id = value,
+        "follow Iroh node ID updated",
+    )
+}
+
+fn update_follow_reticulum(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    let user = crate::tunnel::parse_user_ref(required(options, "user")?)?;
+    require_operator_access(server, tx, state)?;
+    if store.get_follow(&user)?.is_none() {
+        anyhow::bail!("not following this user yet");
+    }
+    match options.get("address") {
+        Some(address) => {
+            if address.len() != 32 || !address.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                anyhow::bail!("Reticulum address must be exactly 32 hexadecimal characters");
+            }
+            store.set_peer_transport_address(user, "reticulum", address, true, true)?;
+        }
+        None => store.delete_peer_transport_address(user, "reticulum")?,
+    }
+    response(server, tx, state, "follow Reticulum address updated");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_follow_field<F>(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+    key: &str,
+    update: F,
+    message: &str,
+) -> Result<()>
+where
+    F: FnOnce(&mut domain_types::LocalTrustRule, Option<String>),
+{
+    let user = crate::tunnel::parse_user_ref(required(options, "user")?)?;
+    require_operator_access(server, tx, state)?;
+    let mut rule = store
+        .get_follow(&user)?
+        .context("not following this user yet")?;
+    update(&mut rule, options.get(key).cloned());
+    store.upsert_follow(&rule)?;
+    response(server, tx, state, message);
     Ok(())
 }
 
