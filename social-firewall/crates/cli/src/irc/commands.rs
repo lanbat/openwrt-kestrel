@@ -122,6 +122,9 @@ fn handle_message(
     if params[0].eq_ignore_ascii_case(super::LOCAL_CHANNEL) {
         return handle_local_message(server, client_id, tx, state, store, body, notice);
     }
+    if !params[0].starts_with('#') {
+        return handle_direct_message(server, client_id, tx, state, &params[0], body, notice);
+    }
     if body.is_empty() {
         if !notice {
             super::send_error(
@@ -248,6 +251,73 @@ fn handle_message(
             server.config.server_name
         );
         super::broadcast_channel_except(server, &channel, client_id, &line);
+        super::send_line(tx, &line);
+    }
+    Ok(())
+}
+
+fn handle_direct_message(
+    server: &Server,
+    client_id: u64,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    target: &str,
+    body: &str,
+    notice: bool,
+) -> Result<()> {
+    if body.is_empty() || body.len() > 4096 {
+        if !notice {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                417,
+                "* :Message length is invalid",
+            );
+        }
+        return Ok(());
+    }
+    let sender = state
+        .lock()
+        .unwrap()
+        .nick
+        .clone()
+        .unwrap_or_else(|| "*".into());
+    let recipient = server
+        .clients
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|client| {
+            client
+                .state
+                .lock()
+                .unwrap()
+                .nick
+                .as_deref()
+                .map(|nick| nick.eq_ignore_ascii_case(target))
+                .unwrap_or(false)
+        })
+        .map(|client| (client.id, client.tx.clone()));
+    let Some((recipient_id, recipient_tx)) = recipient else {
+        if !notice {
+            super::send_error(
+                tx,
+                &server.config.server_name,
+                state,
+                401,
+                &format!("{target} :No such nickname"),
+            );
+        }
+        return Ok(());
+    };
+    let command = if notice { "NOTICE" } else { "PRIVMSG" };
+    let line = format!(
+        ":{sender}!local@{} {command} {target} :{body}",
+        server.config.server_name
+    );
+    super::send_line(&recipient_tx, &line);
+    if recipient_id != client_id {
         super::send_line(tx, &line);
     }
     Ok(())
