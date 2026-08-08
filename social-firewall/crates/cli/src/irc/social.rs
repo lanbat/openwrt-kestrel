@@ -2,6 +2,7 @@ use super::{Server, SessionState};
 use anyhow::{Context, Result};
 use state_store::StateStore;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 
 pub(crate) fn handle(
@@ -32,6 +33,8 @@ pub(crate) fn handle(
         "approve" => approve_join(server, tx, state, store, &options)?,
         "reject" => reject_join(server, tx, state, store, &options)?,
         "blocked" => list_blocked(server, tx, state, store, &options)?,
+        "apply" => apply(server, tx, state, store, &options)?,
+        "sync" => sync(server, tx, state, store, &options)?,
         "opinion" | "publish-opinion" => publish_opinion(server, tx, state, store, &options)?,
         "evaluate" | "evaluate-target" => evaluate_target(server, tx, state, store, &options)?,
         "vote" | "cast-group-vote" => cast_group_vote(server, tx, state, store, &options)?,
@@ -81,6 +84,8 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf create-group --name NAME --description TEXT [--join-prompt TEXT]",
         "/sf topic|mode|voice|voting-right|block|unblock ...",
         "/sf approve|reject|blocked ...",
+        "/sf apply --dry-run true|false [--confirm true]",
+        "/sf sync [--group GROUP]",
         "/sf vote --group GROUP --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policy-vote --policy-id ID --entry-id ID --group GROUP --stance STANCE --reason-code CODE [--note TEXT]",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
@@ -364,6 +369,66 @@ fn list_blocked(
             ),
         );
     }
+    Ok(())
+}
+
+fn apply(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    if !super::has_operator_access(server, state) {
+        response(server, tx, state, "IRC operator access is required");
+        anyhow::bail!("IRC operator access denied")
+    }
+    let dry_run = options
+        .get("dry-run")
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(true);
+    if !dry_run && options.get("confirm").map(String::as_str) != Some("true") {
+        anyhow::bail!("non-dry-run apply requires --confirm true")
+    }
+    let protected = crate::ProtectedDestinations::default().with_defaults();
+    crate::apply_all(
+        store,
+        &crate::SystemCommandRunner,
+        protected,
+        PathBuf::from("/tmp/social-firewall-irc-apply"),
+        1.0,
+        dry_run,
+        crate::now_unix(),
+    )?;
+    crate::profile::apply_dns(store, dry_run)?;
+    response(
+        server,
+        tx,
+        state,
+        if dry_run {
+            "policy apply dry-run completed"
+        } else {
+            "local firewall policy applied"
+        },
+    );
+    Ok(())
+}
+
+fn sync(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    if let Some(group) = options.get("group") {
+        crate::group::sync_group(store, group)?;
+    } else {
+        crate::group::sync_outbox(store)?;
+    }
+    response(server, tx, state, "synchronization completed");
     Ok(())
 }
 

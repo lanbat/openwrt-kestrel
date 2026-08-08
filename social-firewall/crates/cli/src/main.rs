@@ -1673,7 +1673,7 @@ fn list_enforced_decisions(store: &StateStore) -> Result<()> {
 /// The real `sf apply` logic, factored out so tests can pass a
 /// `FakeCommandRunner` and never touch a real `nft` — same testability
 /// pattern `nft-enforcer`'s own controller tests use.
-fn apply_all(
+pub(crate) fn apply_all(
     store: &StateStore,
     runner: &dyn CommandRunner,
     protected: ProtectedDestinations,
