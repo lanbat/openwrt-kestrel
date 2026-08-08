@@ -660,6 +660,56 @@ pub fn approve_group_join(
     export_group(store, &group, &identity_pubkey, out)
 }
 
+/// Explicitly invites an existing identity into a group. This is an owner or
+/// admin operation: unlike a join request, the group publisher is choosing the
+/// membership directly and the resulting signed snapshot is delivered to the
+/// invited router when it has a configured transport address.
+pub fn invite_group_member(
+    store: &StateStore,
+    group_id: &str,
+    user: &str,
+    voting: bool,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let group_id = parse_group_id(group_id)?;
+    let invited_user = parse_user_ref(user)?;
+    let current = store
+        .get_group(group_id)?
+        .context("unknown group — ingest it first")?;
+    if current.owners.contains(&invited_user)
+        || current.admins.contains(&invited_user)
+        || current.voting_members.contains(&invited_user)
+        || current.non_voting_members.contains(&invited_user)
+    {
+        bail!("user is already a member of this group");
+    }
+    let mut voting_members = current.voting_members.clone();
+    let mut non_voting_members = current.non_voting_members.clone();
+    if voting {
+        voting_members.push(invited_user);
+    } else {
+        non_voting_members.push(invited_user);
+    }
+    let template = Group {
+        voting_members,
+        non_voting_members,
+        supersedes: Some(current.sequence),
+        ..current
+    };
+    let (group, identity_pubkey) = build_and_store_group(store, template)?;
+    println!(
+        "invited {} to {} ({})",
+        user_id_str(&invited_user),
+        group_id_str(group_id),
+        if voting {
+            "voting member"
+        } else {
+            "non-voting member"
+        }
+    );
+    export_group(store, &group, &identity_pubkey, out)
+}
+
 /// Denies one specific pending request without any lasting consequence —
 /// the requester is free to submit a new request later. See
 /// `block_group_user` for the permanent alternative.

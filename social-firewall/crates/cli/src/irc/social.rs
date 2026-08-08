@@ -24,6 +24,7 @@ pub(crate) fn handle(
         "follows" | "list-follows" => list_follows(server, tx, state, store)?,
         "history" | "list-party-line" => history(server, tx, state, store, &options)?,
         "create-group" => create_group(server, tx, state, store, &options)?,
+        "invite" => invite(server, tx, state, store, &options)?,
         "topic" => announce_topic(server, tx, state, store, &options)?,
         "mode" => announce_mode(server, tx, state, store, &options)?,
         "voice" => announce_voice(server, tx, state, store, &options)?,
@@ -84,6 +85,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf opinion --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf evaluate --target-kind KIND --target-value VALUE [--threshold NUMBER]",
         "/sf create-group --name NAME --description TEXT [--join-prompt TEXT]",
+        "/sf invite --group GROUP --user FEDERATION/LOCAL [--voting true|false]",
         "/sf topic|mode|voice|voting-right|block|unblock ...",
         "/sf approve|reject|blocked ...",
         "/sf apply --dry-run true|false [--confirm true]",
@@ -199,6 +201,34 @@ fn create_group(
             "signed group created: {}",
             crate::group::group_id_str(group_id)
         ),
+    );
+    Ok(())
+}
+
+fn invite(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::group::invite_group_member(
+        store,
+        required(options, "group")?,
+        required(options, "user")?,
+        options
+            .get("voting")
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or(false),
+        None,
+    )?;
+    response(
+        server,
+        tx,
+        state,
+        "signed group invitation recorded and queued for delivery",
     );
     Ok(())
 }
