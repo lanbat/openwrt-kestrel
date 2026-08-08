@@ -795,7 +795,7 @@ fn run_sf_subprocess(args: &[&str]) -> SubprocessOutput {
 
 fn build_argv(input: &str, current_group_hex: &str) -> Result<Vec<String>> {
     if let Some(command) = input.strip_prefix('/') {
-        let words = shell_words::split(command)?;
+        let words = crate::command_args::split(command)?;
         if words.is_empty() {
             return Ok(vec!["--help".into()]);
         }

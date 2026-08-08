@@ -12,7 +12,7 @@ pub(crate) fn handle(
     store: &StateStore,
     body: &str,
 ) -> Result<()> {
-    let words = shell_words::split(body.trim_start_matches("/sf").trim())?;
+    let words = crate::command_args::split(body.trim_start_matches("/sf").trim())?;
     let Some(command) = words.first().map(String::as_str) else {
         help(server, tx, state);
         return Ok(());
@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn parses_quoted_social_command_options() {
-        let words = shell_words::split(
+        let words = crate::command_args::split(
             "--group neighborhood --target-kind domain --target-value ads.example --note \"known tracker\"",
         )
         .unwrap();
