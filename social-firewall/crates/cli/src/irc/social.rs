@@ -35,6 +35,8 @@ pub(crate) fn handle(
         "blocked" => list_blocked(server, tx, state, store, &options)?,
         "apply" => apply(server, tx, state, store, &options)?,
         "sync" => sync(server, tx, state, store, &options)?,
+        "request-tunnel" => request_tunnel(server, tx, state, store, &options)?,
+        "accept-tunnel" => accept_tunnel(server, tx, state, store, &options)?,
         "opinion" | "publish-opinion" => publish_opinion(server, tx, state, store, &options)?,
         "evaluate" | "evaluate-target" => evaluate_target(server, tx, state, store, &options)?,
         "vote" | "cast-group-vote" => cast_group_vote(server, tx, state, store, &options)?,
@@ -86,6 +88,8 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf approve|reject|blocked ...",
         "/sf apply --dry-run true|false [--confirm true]",
         "/sf sync [--group GROUP]",
+        "/sf request-tunnel --advertisement ADVERTISEMENT",
+        "/sf accept-tunnel --requester USER --sequence NUMBER",
         "/sf vote --group GROUP --target-kind KIND --target-value VALUE --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policy-vote --policy-id ID --entry-id ID --group GROUP --stance STANCE --reason-code CODE [--note TEXT]",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
@@ -429,6 +433,37 @@ fn sync(
         crate::group::sync_outbox(store)?;
     }
     response(server, tx, state, "synchronization completed");
+    Ok(())
+}
+
+fn request_tunnel(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::tunnel::request_tunnel(store, required(options, "advertisement")?, None)?;
+    response(server, tx, state, "signed tunnel request recorded");
+    Ok(())
+}
+
+fn accept_tunnel(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::tunnel::accept_tunnel_request(
+        store,
+        required(options, "requester")?,
+        required(options, "sequence")?.parse()?,
+        None,
+    )?;
+    response(server, tx, state, "signed tunnel acceptance recorded");
     Ok(())
 }
 
