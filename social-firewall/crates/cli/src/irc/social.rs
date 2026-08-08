@@ -282,9 +282,11 @@ fn list_voters(
         return Ok(());
     }
     for voter in &group.voting_members {
-        let marker = (self_user.as_ref() == Some(voter))
-            .then_some(" (this router)")
-            .unwrap_or("");
+        let marker = if self_user.as_ref() == Some(voter) {
+            " (this router)"
+        } else {
+            ""
+        };
         response(
             server,
             tx,
