@@ -58,10 +58,22 @@ uci commit sf-ircd
 
 It supports IRC registration, `CAP LS 302`, `message-tags`, `server-time`,
 `JOIN`, `PART`, `NAMES`, `LIST`, `WHO`, `WHOIS`, `PRIVMSG`, `NOTICE`,
-`TOPIC`, and moderated-channel `MODE`. Channels are existing social-firewall
-groups named `#sf-<group-id>`. IRC access is local-only; Iroh and Reticulum
-never expose this listener. Newly ingested remote party-line messages are
-also pushed to already-connected clients in the matching channel.
+`TOPIC`, `INVITE`, and moderated-channel `MODE`. Channels are existing
+social-firewall groups named `#sf-<group-id>`. IRC access is local-only; Iroh and Reticulum
+ never expose this listener. Newly ingested remote party-line messages are
+ also pushed to already-connected clients in the matching channel.
+
+Native IRC `INVITE` accepts a social-firewall user ID and publishes a signed
+non-voting group invitation:
+
+```text
+INVITE FEDERATION_ID/LOCAL_ID #sf-GROUP_ID
+```
+
+The `/sf` command namespace exposes signed group, policy, opinion, vote,
+synchronization, tunnel, and guarded local-apply operations without spawning a
+shell command. Local apply is dry-run by default and requires explicit
+confirmation for mutation.
 
 The service creates one `fw4` accept rule for the configured `firewall_zone`
 (default `lan`) and removes it when stopped. Other OpenWrt zones are not

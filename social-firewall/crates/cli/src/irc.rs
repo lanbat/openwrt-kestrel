@@ -776,6 +776,10 @@ mod tests {
             parse_line("JOIN #one,#two").unwrap().params,
             vec!["#one,#two"]
         );
+        assert_eq!(
+            parse_line("INVITE fed/local #group").unwrap().params,
+            vec!["fed/local", "#group"]
+        );
     }
 
     #[test]
