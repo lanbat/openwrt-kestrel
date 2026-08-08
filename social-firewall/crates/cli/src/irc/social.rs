@@ -52,6 +52,9 @@ pub(crate) fn handle(
         "tunnels" | "list-tunnels" => list_tunnels(server, tx, state, store)?,
         "pending-tunnels" => list_pending_tunnels(server, tx, state, store)?,
         "tunnel-balance" => list_tunnel_balances(server, tx, state, store)?,
+        "lists" | "list-lists" => list_shared_lists(server, tx, state, store)?,
+        "profiles" => list_profiles(server, tx, state, store)?,
+        "routes" => list_routes(server, tx, state, store)?,
         _ => response(
             server,
             tx,
@@ -184,6 +187,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf policy-vote --policy-id ID --entry-id ID --group GROUP --stance STANCE --reason-code CODE [--note TEXT]",
         "/sf policies | policy-explain --policy-id ID --entry-id ID --group GROUP",
         "/sf tunnels | pending-tunnels | tunnel-balance",
+        "/sf lists | profiles | routes",
         "Mutating commands publish signed records; replication uses Iroh, Reticulum, or file fallback.",
     ] {
         response(server, tx, state, line);
@@ -949,6 +953,87 @@ fn list_tunnel_balances(
     }
     for balance in balances {
         response(server, tx, state, &format!("tunnel balance: {balance:?}"));
+    }
+    Ok(())
+}
+
+fn list_shared_lists(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    let lists = store.list_shared_rule_lists()?;
+    if lists.is_empty() {
+        response(server, tx, state, "no shared rule lists");
+    }
+    for list in lists {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "list {}/{} #{}: {} ({} entries)",
+                list.author.federation.0,
+                list.author.local_id,
+                list.sequence,
+                list.name,
+                list.entries.len()
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn list_profiles(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    let profiles = store.list_local_profiles()?;
+    if profiles.is_empty() {
+        response(server, tx, state, "no local profiles");
+    }
+    for profile in profiles {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "profile {}: {} [{}]",
+                profile.profile_id,
+                profile.name,
+                if profile.active { "active" } else { "inactive" }
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn list_routes(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+) -> Result<()> {
+    let routes = store.list_local_route_profiles()?;
+    if routes.is_empty() {
+        response(server, tx, state, "no local route profiles");
+    }
+    for route in routes {
+        response(
+            server,
+            tx,
+            state,
+            &format!(
+                "route {}: table={} interface={} [{}]",
+                route.name,
+                route.table,
+                route.interface,
+                if route.enabled { "enabled" } else { "disabled" }
+            ),
+        );
     }
     Ok(())
 }
