@@ -74,15 +74,47 @@ pub fn publish_observation(
         &observation.signing_bytes(),
     );
     store.store_fingerprint_observation(&observation)?;
+    let payload = serde_json::to_vec(&observation_json(&observation, &keypair.public_key().0))?;
     if let Some(path) = out {
         std::fs::write(
             &path,
             serde_json::to_vec_pretty(&observation_json(&observation, &keypair.public_key().0))?,
         )?;
     }
+    let group = store.get_group(group_id)?.context("unknown group")?;
+    let mut queued = 0;
+    for member in group
+        .owners
+        .iter()
+        .chain(&group.admins)
+        .chain(&group.voting_members)
+        .chain(&group.non_voting_members)
+        .copied()
+        .filter(|member| *member != observer)
+    {
+        if let Some(destination) = crate::tunnel::preferred_destination(store, &member)? {
+            store.enqueue_outbox(
+                &destination,
+                i64::from(p2p_transport::StatementKind::FingerprintObservation.wire_tag()),
+                &payload,
+                now_unix(),
+            )?;
+            queued += 1;
+        } else if matches!(
+            crate::tunnel::try_deliver(
+                store,
+                &member,
+                p2p_transport::StatementKind::FingerprintObservation,
+                &payload,
+            ),
+            crate::tunnel::DeliveryOutcome::Delivered
+        ) {
+            queued += 1;
+        }
+    }
     println!(
-        "published fingerprint observation for {}",
-        observation.fingerprint_id
+        "published fingerprint observation for {} and queued delivery to {} group member(s)",
+        observation.fingerprint_id, queued
     );
     Ok(())
 }
