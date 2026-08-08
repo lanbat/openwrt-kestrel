@@ -14,7 +14,10 @@
 use crypto_box::{
     aead::rand_core::OsRng as BoxOsRng, PublicKey as BoxPublicKey, SecretKey as BoxSecretKey,
 };
-use domain_types::{Hash32, MessagingPublicKeyBytes, PublicKeyBytes, SignatureBytes};
+use domain_types::{
+    DeviceId, GlobalFingerprintId, Hash32, IdentityId, MessagingPublicKeyBytes, PublicKeyBytes,
+    SignatureBytes,
+};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 
@@ -179,6 +182,24 @@ pub fn hash(data: &[u8]) -> Hash32 {
     Hash32(*blake3::hash(data).as_bytes())
 }
 
+pub fn derive_identity_id(public_key: &PublicKeyBytes) -> IdentityId {
+    IdentityId(hash(
+        &[b"kestrel-identity-v1".as_slice(), &public_key.0].concat(),
+    ))
+}
+
+pub fn derive_device_id(public_key: &PublicKeyBytes) -> DeviceId {
+    DeviceId(hash(
+        &[b"kestrel-device-v1".as_slice(), &public_key.0].concat(),
+    ))
+}
+
+pub fn derive_global_fingerprint_id(material: &[u8]) -> GlobalFingerprintId {
+    GlobalFingerprintId(hash(
+        &[b"kestrel-fingerprint-v1".as_slice(), material].concat(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +215,22 @@ mod tests {
             &sig
         )
         .is_ok());
+    }
+
+    #[test]
+    fn stable_subject_derivation_is_deterministic_and_domain_separated() {
+        let key = Keypair::from_seed(&[3; 32]).public_key();
+        assert_eq!(derive_identity_id(&key), derive_identity_id(&key));
+        assert_eq!(derive_device_id(&key), derive_device_id(&key));
+        assert_ne!(derive_identity_id(&key).0, derive_device_id(&key).0);
+        assert_eq!(
+            derive_global_fingerprint_id(b"signals"),
+            derive_global_fingerprint_id(b"signals")
+        );
+        assert_ne!(
+            derive_global_fingerprint_id(b"signals").0,
+            derive_global_fingerprint_id(b"other-signals").0
+        );
     }
 
     #[test]

@@ -87,6 +87,58 @@ impl CanonicalEncode for NodeId {
     }
 }
 
+/// A stable identity subject derived from a canonical public signing key.
+/// This is intentionally independent of a federation or local nickname.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IdentityId(pub Hash32);
+
+impl CanonicalEncode for IdentityId {
+    fn canonical_encode(&self, out: &mut Vec<u8>) {
+        self.0.canonical_encode(out);
+    }
+}
+
+impl std::fmt::Display for IdentityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A stable device subject. A device without a device key may still have a
+/// router-local record, but it cannot claim this cross-network identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DeviceId(pub Hash32);
+
+impl CanonicalEncode for DeviceId {
+    fn canonical_encode(&self, out: &mut Vec<u8>) {
+        self.0.canonical_encode(out);
+    }
+}
+
+impl std::fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A reproducible fingerprint ID derived only from explicitly shareable,
+/// canonical fingerprint material. Group-keyed FingerprintObservation IDs
+/// remain separate privacy-scoped identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GlobalFingerprintId(pub Hash32);
+
+impl CanonicalEncode for GlobalFingerprintId {
+    fn canonical_encode(&self, out: &mut Vec<u8>) {
+        self.0.canonical_encode(out);
+    }
+}
+
+impl std::fmt::Display for GlobalFingerprintId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +160,16 @@ mod tests {
     fn hash32_display_is_lowercase_hex() {
         let h = Hash32([0xabu8; 32]);
         assert_eq!(h.to_string(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn stable_subject_ids_encode_as_their_hash() {
+        let hash = Hash32([7; 32]);
+        assert_eq!(crate::canonical::encode(&IdentityId(hash)), vec![7; 32]);
+        assert_eq!(crate::canonical::encode(&DeviceId(hash)), vec![7; 32]);
+        assert_eq!(
+            crate::canonical::encode(&GlobalFingerprintId(hash)),
+            vec![7; 32]
+        );
     }
 }

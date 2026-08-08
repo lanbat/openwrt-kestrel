@@ -4,9 +4,8 @@
 //! group-scoped "party line" broadcast. Reuses `tunnel.rs`'s identity/
 //! sealing helpers rather than duplicating them.
 //!
-//! The outbox retries point-to-point delivery; a durable catch-up protocol
-//! for messages missed while a node was offline is the next reliability
-//! slice and is intentionally not implemented here.
+//! The outbox retries point-to-point delivery, while `sync-group` provides
+//! durable per-author catch-up for messages missed while a node was offline.
 
 use crate::tunnel::{
     bytes32, bytes64, maybe_sealed_bytes, needs_file_fallback, parse_user_ref, read_maybe_sealed,
@@ -18,9 +17,14 @@ use domain_types::{
     Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupTrustRule, GroupVote, Hash32,
     PartyLineMessage, PublicKeyBytes, Reason, UserId,
 };
-use p2p_transport::PeerTransport;
 use state_store::StateStore;
 use std::path::{Path, PathBuf};
+
+fn party_line_out_dir() -> PathBuf {
+    std::env::var_os("SF_CHAT_OUT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("social-firewall-chat-out"))
+}
 
 // ── id parsing ───────────────────────────────────────────────────────────
 
@@ -233,10 +237,10 @@ fn export_group(
         .filter(|u| *u != group.published_by)
         .collect();
     for recipient in &recipients {
-        let node_id = store.get_follow(recipient)?.and_then(|f| f.iroh_node_id);
-        if let Some(node_id) = node_id {
+        let destination = crate::tunnel::preferred_destination(store, recipient)?;
+        if let Some(destination) = destination {
             store.enqueue_outbox(
-                &node_id,
+                &destination,
                 i64::from(p2p_transport::StatementKind::Group.wire_tag()),
                 &plaintext,
                 now_unix(),
@@ -892,6 +896,18 @@ pub fn set_group_topic(
     export_group(store, &group, &identity_pubkey, out)
 }
 
+pub fn announce_topic(store: &StateStore, group_id: &str, topic: String) -> Result<()> {
+    let group = resolve_group_id(store, group_id)?;
+    set_group_topic(store, group_id, topic.clone(), None)?;
+    publish_party_line(
+        store,
+        &group_id_str(group),
+        &format!("*** topic changed to: {topic}"),
+        None,
+        &party_line_out_dir(),
+    )
+}
+
 /// Toggles the party line between open (any current member may post,
 /// the default) and moderated (only owners/admins and explicitly voiced
 /// members may post) — the IRC `+m`/`-m` analogue. Owner/admin-only,
@@ -919,6 +935,22 @@ pub fn set_group_party_line_moderation(
         if moderated { "moderated" } else { "open" }
     );
     export_group(store, &group, &identity_pubkey, out)
+}
+
+pub fn announce_mode(store: &StateStore, group_id: &str, moderated: bool) -> Result<()> {
+    let group = parse_group_id(group_id)?;
+    set_group_party_line_moderation(store, group_id, moderated, None)?;
+    publish_party_line(
+        store,
+        &group_id_str(group),
+        if moderated {
+            "*** mode +m: party line is now moderated"
+        } else {
+            "*** mode -m: party line is now open"
+        },
+        None,
+        &party_line_out_dir(),
+    )
 }
 
 /// Grants or revokes a member's voice (the IRC `+v`/`-v` analogue) —
@@ -959,6 +991,23 @@ pub fn set_group_voice(
         group_id_str(group_id)
     );
     export_group(store, &group, &identity_pubkey, out)
+}
+
+pub fn announce_voice(store: &StateStore, group_id: &str, user: &str, voiced: bool) -> Result<()> {
+    let group = parse_group_id(group_id)?;
+    let target = parse_user_ref(user)?;
+    set_group_voice(store, group_id, user, voiced, None)?;
+    publish_party_line(
+        store,
+        &group_id_str(group),
+        &format!(
+            "*** mode {}v {}",
+            if voiced { "+" } else { "-" },
+            user_id_str(&target)
+        ),
+        None,
+        &party_line_out_dir(),
+    )
 }
 
 /// Moves an existing member between `voting_members`/`non_voting_members`
@@ -1222,10 +1271,10 @@ pub fn publish_party_line(
             Ok(pubkey) => {
                 let path = out_dir.join(format!("{}.json", user_id_str(&member).replace('/', "_")));
                 let payload = maybe_sealed_bytes(&plaintext, Some(&pubkey))?;
-                let node_id = store.get_follow(&member)?.and_then(|f| f.iroh_node_id);
-                if let Some(node_id) = node_id {
+                let destination = crate::tunnel::preferred_destination(store, &member)?;
+                if let Some(destination) = destination {
                     store.enqueue_outbox(
-                        &node_id,
+                        &destination,
                         i64::from(p2p_transport::StatementKind::PartyLineMessage.wire_tag()),
                         &payload,
                         now_unix(),
@@ -1264,8 +1313,12 @@ pub fn sync_outbox(store: &StateStore) -> Result<()> {
             5 => p2p_transport::StatementKind::PartyLineMessage,
             _ => continue,
         };
-        match crate::tunnel::deliver_to_node(store, &item.destination_node_id, kind, &item.payload)
-        {
+        match crate::tunnel::deliver_to_destination(
+            store,
+            &item.destination_node_id,
+            kind,
+            &item.payload,
+        ) {
             Ok(()) => {
                 store.mark_outbox_success(item.id)?;
                 delivered += 1;
@@ -1406,14 +1459,9 @@ pub fn sync_group(store: &StateStore, group_id: &str) -> Result<()> {
         .copied()
         .filter(|user| *user != self_user)
         .collect::<Vec<_>>();
-    let seed = store
-        .get_iroh_keypair_seed()?
-        .context("no local Iroh keypair yet — run `sf listen` once")?;
-    let transport = p2p_transport::IrohTransport::new(seed, b"social-firewall/1")
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let mut imported = 0;
     for member in members {
-        let Some(node_id) = store.get_follow(&member)?.and_then(|f| f.iroh_node_id) else {
+        let Some(destination) = crate::tunnel::preferred_destination(store, &member)? else {
             continue;
         };
         loop {
@@ -1430,15 +1478,14 @@ pub fn sync_group(store: &StateStore, group_id: &str) -> Result<()> {
                 }
             }
             let request = serde_json::json!({"version": 1, "group_id": group_id_str(group_id), "inventory": inventory.iter().map(|(author, next)| serde_json::json!({"author": user_id_str(author), "next_sequence": next})).collect::<Vec<_>>() });
-            let response = transport
-                .request(
-                    &node_id,
-                    &p2p_transport::Envelope {
-                        kind: p2p_transport::StatementKind::SyncGroupRequest,
-                        payload: serde_json::to_vec(&request)?,
-                    },
-                )
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            let response = crate::tunnel::request_to_destination(
+                store,
+                &destination,
+                &p2p_transport::Envelope {
+                    kind: p2p_transport::StatementKind::SyncGroupRequest,
+                    payload: serde_json::to_vec(&request)?,
+                },
+            )?;
             if response.kind != p2p_transport::StatementKind::SyncGroupResponse {
                 bail!("peer returned the wrong group sync response kind")
             }
