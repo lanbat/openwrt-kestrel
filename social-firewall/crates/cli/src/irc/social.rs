@@ -41,6 +41,7 @@ pub(crate) fn handle(
         "reject" => reject_join(server, tx, state, store, &options)?,
         "blocked" => list_blocked(server, tx, state, store, &options)?,
         "apply" => apply(server, tx, state, store, &options)?,
+        "override" | "set-override" => set_override(server, tx, state, store, &options)?,
         "sync" => sync(server, tx, state, store, &options)?,
         "request-tunnel" => request_tunnel(server, tx, state, store, &options)?,
         "accept-tunnel" => accept_tunnel(server, tx, state, store, &options)?,
@@ -205,6 +206,7 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf topic|mode|voice|voting-right|block|unblock ...",
         "/sf approve|reject|blocked ...",
         "/sf apply --dry-run true|false [--confirm true]",
+        "/sf override --target-kind KIND --target-value VALUE --stance STANCE [--emergency true|false] [--note TEXT] [--ttl-seconds N]",
         "/sf sync [--group GROUP]",
         "/sf request-tunnel --advertisement ADVERTISEMENT",
         "/sf accept-tunnel --requester USER --sequence NUMBER",
@@ -749,6 +751,39 @@ fn apply(
             "local firewall policy applied"
         },
     );
+    Ok(())
+}
+
+fn set_override(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_operator_access(server, tx, state)?;
+    let target = crate::parse_target(
+        required(options, "target-kind")?,
+        required(options, "target-value")?,
+    )?;
+    let override_record = domain_types::LocalOverride {
+        target,
+        stance: crate::parse_stance(required(options, "stance")?)?,
+        kind: if parse_bool_or(options, "emergency", false)? {
+            domain_types::OverrideKind::Emergency
+        } else {
+            domain_types::OverrideKind::Normal
+        },
+        note: options.get("note").cloned(),
+        created_at: crate::now_unix(),
+        expires_at: options
+            .get("ttl-seconds")
+            .map(|value| value.parse())
+            .transpose()?
+            .map(|ttl: i64| crate::now_unix() + ttl),
+    };
+    store.set_local_override(&override_record)?;
+    response(server, tx, state, "local policy override set");
     Ok(())
 }
 
