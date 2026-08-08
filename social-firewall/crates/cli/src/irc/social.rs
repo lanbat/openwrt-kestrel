@@ -63,6 +63,9 @@ pub(crate) fn handle(
         "fingerprint" => list_fingerprint(server, tx, state, store, &options)?,
         "fingerprint-session" => fingerprint_session(server, tx, state)?,
         "fingerprint-users" => fingerprint_users(server, tx, state, store, &options)?,
+        "device-approval" => publish_device_approval(server, tx, state, store, &options)?,
+        "device-approvals" => list_device_approvals(server, tx, state, store, &options)?,
+        "device-evaluate" => evaluate_device(server, tx, state, store, &options)?,
         "fingerprint-observe" => {
             publish_fingerprint_observation(server, tx, state, store, &options)?
         }
@@ -208,6 +211,9 @@ fn help(server: &Server, tx: &mpsc::Sender<String>, state: &Arc<Mutex<SessionSta
         "/sf fingerprint --group GROUP --fingerprint-id ID --revision NUMBER",
         "/sf fingerprint-session (IRC operator only)",
         "/sf fingerprint-users --group GROUP --fingerprint-id ID (IRC operator only)",
+        "/sf device-approval --mac MAC --stance STANCE --reason-code CODE [--note TEXT] [--label TEXT] [--ttl-seconds N]",
+        "/sf device-approvals --mac MAC",
+        "/sf device-evaluate --mac MAC [--threshold NUMBER]",
         "/sf fingerprint-observe --group GROUP --fingerprint-id ID --revision NUMBER --signal-family NAME --evidence-digest HASH --confidence 0-100",
         "/sf fingerprint-comment --group GROUP --fingerprint-id ID --revision NUMBER --body TEXT",
         "Signed voting requires IRC authentication and currently signs as the local router identity.",
@@ -1306,6 +1312,73 @@ fn fingerprint_users(
             ),
         );
     }
+    Ok(())
+}
+
+fn publish_device_approval(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    require_write_access(server, tx, state)?;
+    crate::device::publish_device_approval(
+        store,
+        required(options, "mac")?,
+        required(options, "stance")?,
+        required(options, "reason-code")?,
+        options.get("note").cloned(),
+        options.get("label").cloned(),
+        options
+            .get("ttl-seconds")
+            .map(|value| value.parse())
+            .transpose()?,
+        None,
+    )?;
+    response(server, tx, state, "signed device-approval opinion recorded");
+    Ok(())
+}
+
+fn list_device_approvals(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    crate::device::list_device_approvals(store, required(options, "mac")?)?;
+    response(
+        server,
+        tx,
+        state,
+        "device-approval opinions listed in the router log",
+    );
+    Ok(())
+}
+
+fn evaluate_device(
+    server: &Server,
+    tx: &mpsc::Sender<String>,
+    state: &Arc<Mutex<SessionState>>,
+    store: &StateStore,
+    options: &HashMap<String, String>,
+) -> Result<()> {
+    crate::device::evaluate_device(
+        store,
+        required(options, "mac")?,
+        options
+            .get("threshold")
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or(1.0),
+    )?;
+    response(
+        server,
+        tx,
+        state,
+        "device-approval aggregate evaluated in the router log",
+    );
     Ok(())
 }
 
