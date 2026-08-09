@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use domain_types::{DirectMessage, PublicKeyBytes, SignatureBytes, UserId, MAX_DIRECT_MESSAGE_LEN};
-use state_store::StateStore;
+use state_store::{LocalIrcIdentity, StateStore};
 use std::path::Path;
 
 use crate::tunnel::{
@@ -13,11 +13,15 @@ pub(crate) fn send(
     recipient: UserId,
     body: &str,
     out_dir: &Path,
+    local_identity: Option<&LocalIrcIdentity>,
 ) -> Result<()> {
     if body.is_empty() || body.len() > MAX_DIRECT_MESSAGE_LEN {
         bail!("direct message body must be 1-{MAX_DIRECT_MESSAGE_LEN} bytes");
     }
-    let (sender, seed) = self_identity(store)?;
+    let (sender, seed) = match local_identity {
+        Some(identity) => (identity.user, identity.signing_secret_seed),
+        None => self_identity(store)?,
+    };
     if sender == recipient {
         bail!("cannot send a direct message to the local identity");
     }
@@ -68,7 +72,11 @@ pub fn ingest_bytes(store: &StateStore, payload: &[u8]) -> Result<()> {
     let message = from_json(&json)?;
     message.validate().map_err(anyhow::Error::msg)?;
     let self_user = store.get_self_identity()?.context("no local identity")?.0;
-    if message.recipient != self_user {
+    let local_identity = store
+        .list_local_irc_identities()?
+        .into_iter()
+        .any(|identity| identity.user == message.recipient);
+    if message.recipient != self_user && !local_identity {
         bail!("direct message is addressed to another identity");
     }
     if message.sender != self_user && store.get_follow(&message.sender)?.is_none() {

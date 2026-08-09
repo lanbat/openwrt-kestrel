@@ -21,12 +21,13 @@ use domain_types::{
     Contribution, DeviceApprovalOpinion, DeviceId, DevicePresenceObservation, DirectMessage,
     FederationId, FederationStatement, FederationTrustRule, FingerprintComment,
     FingerprintObservation, Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupTrustRule,
-    GroupVote, Hash32, LocalOverride, LocalProfile, LocalRouteProfile, LocalTrustRule,
-    MessagingPublicKeyBytes, NodeId, OpinionRef, OverrideKind, PartyLineMessage, PolicyAction,
-    PolicyEntry, PolicyOpinion, PolicyVote, PublicKeyBytes, Reason, ReasonCode, SharedPolicy,
-    SharedRuleEntry, SharedRuleList, SignatureBytes, Stance, StatementAuthor, StatementRef,
-    TargetSelector, TunnelAdvertisement, TunnelConnectionAccept, TunnelConnectionRequest,
-    TunnelServiceRequest, TunnelTrustRule, UserId, Visibility, WgPublicKeyBytes,
+    GroupVote, Hash32, IrcIdentityAdvertisement, LocalOverride, LocalProfile, LocalRouteProfile,
+    LocalTrustRule, MessagingPublicKeyBytes, NodeId, OpinionRef, OverrideKind, PartyLineMessage,
+    PolicyAction, PolicyEntry, PolicyOpinion, PolicyVote, PublicKeyBytes, Reason, ReasonCode,
+    SharedPolicy, SharedRuleEntry, SharedRuleList, SignatureBytes, Stance, StatementAuthor,
+    StatementRef, TargetSelector, TunnelAdvertisement, TunnelConnectionAccept,
+    TunnelConnectionRequest, TunnelServiceRequest, TunnelTrustRule, UserId, Visibility,
+    WgPublicKeyBytes,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -113,7 +114,27 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (34, include_str!("../migrations/0034_local_irc_history.sql")),
     (35, include_str!("../migrations/0035_direct_messages.sql")),
+    (
+        36,
+        include_str!("../migrations/0036_local_irc_identities.sql"),
+    ),
+    (
+        37,
+        include_str!("../migrations/0037_irc_identity_advertisements.sql"),
+    ),
+    (
+        38,
+        include_str!("../migrations/0038_author_scoped_own_opinions.sql"),
+    ),
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalIrcIdentity {
+    pub user: UserId,
+    pub oidc_subject: String,
+    pub signing_secret_seed: [u8; 32],
+    pub messaging_secret_seed: [u8; 32],
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum StoreError {
@@ -327,6 +348,139 @@ impl StateStore {
             .transpose()
     }
 
+    pub fn provision_local_irc_identity(
+        &self,
+        user: UserId,
+        oidc_subject: &str,
+        signing_secret_seed: &[u8; 32],
+        messaging_secret_seed: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        if oidc_subject.is_empty() {
+            return Err(StoreError::Encoding(
+                "OIDC subject must not be empty".into(),
+            ));
+        }
+        self.conn.execute(
+            "INSERT INTO local_irc_identities (federation_id, local_id, oidc_subject, signing_secret_seed, messaging_secret_seed, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                user.federation.0 .0.as_slice(),
+                user.local_id.0.as_slice(),
+                oidc_subject,
+                signing_secret_seed.as_slice(),
+                messaging_secret_seed.as_slice(),
+                now_unix(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_local_irc_identity_by_subject(
+        &self,
+        oidc_subject: &str,
+    ) -> Result<Option<LocalIrcIdentity>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT federation_id, local_id, signing_secret_seed, messaging_secret_seed FROM local_irc_identities WHERE oidc_subject = ?1",
+                params![oidc_subject],
+                |row| {
+                    let federation: Vec<u8> = row.get(0)?;
+                    let local: Vec<u8> = row.get(1)?;
+                    let signing: Vec<u8> = row.get(2)?;
+                    let messaging: Vec<u8> = row.get(3)?;
+                    Ok((federation, local, signing, messaging))
+                },
+            )
+            .optional()?
+            .map(|(federation, local, signing, messaging)| {
+                Ok(LocalIrcIdentity {
+                    user: UserId {
+                        federation: FederationId(bytes_to_hash32(&federation)?),
+                        local_id: bytes_to_hash32(&local)?,
+                    },
+                    oidc_subject: oidc_subject.to_string(),
+                    signing_secret_seed: bytes_to_32(&signing)?,
+                    messaging_secret_seed: bytes_to_32(&messaging)?,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn list_local_irc_identities(&self) -> Result<Vec<LocalIrcIdentity>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT federation_id, local_id, oidc_subject, signing_secret_seed, messaging_secret_seed FROM local_irc_identities ORDER BY oidc_subject",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let federation: Vec<u8> = row.get(0)?;
+            let local: Vec<u8> = row.get(1)?;
+            let subject: String = row.get(2)?;
+            let signing: Vec<u8> = row.get(3)?;
+            let messaging: Vec<u8> = row.get(4)?;
+            Ok((federation, local, subject, signing, messaging))
+        })?;
+        rows.map(|row| {
+            let (federation, local, subject, signing, messaging) = row?;
+            Ok(LocalIrcIdentity {
+                user: UserId {
+                    federation: FederationId(bytes_to_hash32(&federation)?),
+                    local_id: bytes_to_hash32(&local)?,
+                },
+                oidc_subject: subject,
+                signing_secret_seed: bytes_to_32(&signing)?,
+                messaging_secret_seed: bytes_to_32(&messaging)?,
+            })
+        })
+        .collect()
+    }
+
+    pub fn store_irc_identity_advertisement(
+        &self,
+        advertisement: &IrcIdentityAdvertisement,
+        signing_pubkey: PublicKeyBytes,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO irc_identity_advertisements (federation_id, local_id, sequence, messaging_pubkey, issued_at, signing_pubkey, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(federation_id, local_id, sequence) DO UPDATE SET messaging_pubkey = excluded.messaging_pubkey, issued_at = excluded.issued_at, signing_pubkey = excluded.signing_pubkey, signature = excluded.signature",
+            params![
+                advertisement.user.federation.0 .0.as_slice(),
+                advertisement.user.local_id.0.as_slice(),
+                advertisement.sequence,
+                advertisement.messaging_pubkey.0.as_slice(),
+                advertisement.issued_at,
+                signing_pubkey.0.as_slice(),
+                advertisement.signature.0.as_slice(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_irc_identity_messaging_pubkey(
+        &self,
+        user: &UserId,
+    ) -> Result<Option<MessagingPublicKeyBytes>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT messaging_pubkey FROM irc_identity_advertisements WHERE federation_id = ?1 AND local_id = ?2 ORDER BY sequence DESC LIMIT 1",
+                params![user.federation.0 .0.as_slice(), user.local_id.0.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(|bytes| Ok(MessagingPublicKeyBytes(bytes_to_32(&bytes)?)))
+            .transpose()
+    }
+
+    pub fn next_irc_identity_advertisement_sequence(
+        &self,
+        user: &UserId,
+    ) -> Result<u64, StoreError> {
+        let next: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) + 1 FROM irc_identity_advertisements WHERE federation_id = ?1 AND local_id = ?2",
+            params![user.federation.0 .0.as_slice(), user.local_id.0.as_slice()],
+            |row| row.get(0),
+        )?;
+        next.unwrap_or(0)
+            .try_into()
+            .map_err(|_| StoreError::Encoding("invalid IRC identity advertisement sequence".into()))
+    }
+
     /// Returns the locally stored public nickname for a known user. For the
     /// local identity this is the name supplied to `init-identity`; foreign
     /// users may have a value if a future identity/profile exchange stores
@@ -342,6 +496,18 @@ impl StateStore {
             .optional()
             .map(|name| name.flatten())
             .map_err(Into::into)
+    }
+
+    pub fn get_user_public_key(&self, user: &UserId) -> Result<Option<PublicKeyBytes>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT current_pubkey FROM users WHERE federation_id = ?1 AND local_id = ?2",
+                params![user.federation.0 .0.as_slice(), user.local_id.0.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(|bytes| Ok(PublicKeyBytes(bytes_to_32(&bytes)?)))
+            .transpose()
     }
 
     pub fn set_self_display_name(&self, display_name: Option<&str>) -> Result<(), StoreError> {
@@ -545,11 +711,19 @@ impl StateStore {
     }
 
     pub fn next_own_sequence(&self) -> Result<u64, StoreError> {
-        let max: Option<i64> =
-            self.conn
-                .query_row("SELECT MAX(sequence) FROM own_opinion_log", [], |row| {
-                    row.get(0)
-                })?;
+        let user = self
+            .get_self_identity()?
+            .ok_or(StoreError::NoSelfIdentity)?
+            .0;
+        self.next_own_sequence_for(&user)
+    }
+
+    pub fn next_own_sequence_for(&self, author: &UserId) -> Result<u64, StoreError> {
+        let max: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM own_opinion_log WHERE author_federation_id = ?1 AND author_local_id = ?2",
+            params![author.federation.0 .0.as_slice(), author.local_id.0.as_slice()],
+            |row| row.get(0),
+        )?;
         Ok(max.map(|m| m as u64 + 1).unwrap_or(0))
     }
 
@@ -920,9 +1094,11 @@ impl StateStore {
     pub fn append_own_opinion(&self, o: &PolicyOpinion) -> Result<(), StoreError> {
         let (kind, value) = target_to_kv(&o.target)?;
         self.conn.execute(
-            "INSERT INTO own_opinion_log (sequence, target_kind, target_value, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO own_opinion_log (author_federation_id, author_local_id, sequence, target_kind, target_value, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
+                o.author.federation.0 .0.as_slice(),
+                o.author.local_id.0.as_slice(),
                 o.sequence as i64,
                 kind,
                 value,
@@ -943,28 +1119,31 @@ impl StateStore {
         &self,
         target: &TargetSelector,
     ) -> Result<Vec<PolicyOpinion>, StoreError> {
-        let self_id = self.get_self_identity()?.map(|(u, _)| u);
         let (kind, value) = target_to_kv(target)?;
         let mut stmt = self.conn.prepare(
-            "SELECT sequence, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, signature
+            "SELECT author_federation_id, author_local_id, sequence, stance, reason_code, reason_note, reason_evidence, issued_at, expires_at, supersedes_sequence, signature
              FROM own_opinion_log WHERE target_kind = ?1 AND target_value = ?2",
         )?;
         let rows = stmt.query_map(params![kind, value], |row| {
             Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
                 row.get::<_, i64>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, Vec<u8>>(8)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Vec<u8>>(10)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
             let (
+                author_federation,
+                author_local,
                 sequence,
                 stance,
                 reason_code,
@@ -975,9 +1154,12 @@ impl StateStore {
                 supersedes_sequence,
                 signature,
             ) = r?;
+            let author = UserId {
+                federation: FederationId(bytes_to_hash32(&author_federation)?),
+                local_id: bytes_to_hash32(&author_local)?,
+            };
             out.push(PolicyOpinion {
-                author: self_id
-                    .ok_or_else(|| StoreError::Encoding("no self identity set".into()))?,
+                author,
                 sequence: sequence as u64,
                 target: target.clone(),
                 stance: stance_from_i64(stance)?,
@@ -989,7 +1171,7 @@ impl StateStore {
                 issued_at,
                 expires_at,
                 supersedes: supersedes_sequence.map(|s| OpinionRef {
-                    author: self_id.unwrap(),
+                    author,
                     sequence: s as u64,
                 }),
                 signature: SignatureBytes(bytes_to_64(&signature)?),
@@ -5894,6 +6076,47 @@ mod tests {
         assert_eq!(
             store.get_user_display_name(&u).unwrap().as_deref(),
             Some("me")
+        );
+    }
+
+    #[test]
+    fn local_irc_identity_round_trips_by_oidc_subject() {
+        let store = StateStore::open_in_memory().unwrap();
+        let u = user(3, 4);
+        store
+            .set_self_identity(u, PublicKeyBytes([8; 32]), &[7; 32], None)
+            .unwrap();
+        store
+            .provision_local_irc_identity(u, "oidc-alice", &[1; 32], &[2; 32])
+            .unwrap();
+
+        let identity = store
+            .get_local_irc_identity_by_subject("oidc-alice")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.user, u);
+        assert_eq!(identity.oidc_subject, "oidc-alice");
+        assert_eq!(identity.signing_secret_seed, [1; 32]);
+        assert_eq!(identity.messaging_secret_seed, [2; 32]);
+    }
+
+    #[test]
+    fn irc_identity_advertisement_key_round_trips() {
+        let store = StateStore::open_in_memory().unwrap();
+        let u = user(5, 6);
+        let advertisement = IrcIdentityAdvertisement {
+            user: u,
+            sequence: 0,
+            messaging_pubkey: MessagingPublicKeyBytes([3; 32]),
+            issued_at: 10,
+            signature: SignatureBytes([4; 64]),
+        };
+        store
+            .store_irc_identity_advertisement(&advertisement, PublicKeyBytes([5; 32]))
+            .unwrap();
+        assert_eq!(
+            store.get_irc_identity_messaging_pubkey(&u).unwrap(),
+            Some(MessagingPublicKeyBytes([3; 32]))
         );
     }
 

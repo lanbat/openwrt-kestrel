@@ -25,6 +25,7 @@ start_service() {
     config_get oidc_required_group main oidc_required_group
     config_get oidc_write_entitlement main oidc_write_entitlement
     config_get oidc_operator_entitlement main oidc_operator_entitlement
+    config_get oidc_social_identity_claim main oidc_social_identity_claim
     [ -n "$listen_addr" ] || return 0
     case "$listen_addr" in
         0.0.0.0:*|\[::\]:*|::* )
@@ -78,6 +79,7 @@ start_service() {
         [ -n "$oidc_required_group" ] && procd_append_param command --oidc-required-group "$oidc_required_group"
         [ -n "$oidc_write_entitlement" ] && procd_append_param command --oidc-write-entitlement "$oidc_write_entitlement"
         [ -n "$oidc_operator_entitlement" ] && procd_append_param command --oidc-operator-entitlement "$oidc_operator_entitlement"
+        [ -n "$oidc_social_identity_claim" ] && procd_append_param command --oidc-social-identity-claim "$oidc_social_identity_claim"
     fi
     procd_set_param stdout 1
     procd_set_param stderr 1

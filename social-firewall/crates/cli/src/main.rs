@@ -22,6 +22,7 @@ mod direct_message;
 mod fingerprint;
 mod group;
 mod irc;
+mod irc_identity;
 mod list;
 mod notify;
 mod ntfy;
@@ -41,8 +42,8 @@ use nft_enforcer::{
     ProtectedDestinations, SystemCommandRunner,
 };
 use policy_engine::PolicyInputs;
-use state_store::StateStore;
-use std::path::PathBuf;
+use state_store::{LocalIrcIdentity, StateStore};
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "sf", about = "Social firewall local-node CLI")]
@@ -62,6 +63,30 @@ enum Command {
     InitIdentity {
         #[arg(long)]
         display_name: Option<String>,
+    },
+    /// Provision a known social identity for one OIDC-authenticated IRC user.
+    ProvisionIrcIdentity {
+        /// Existing FEDERATION/LOCAL identity reference.
+        #[arg(long)]
+        user: String,
+        /// OIDC `sub` claim that will be bound to this identity.
+        #[arg(long)]
+        oidc_subject: String,
+        /// Optional 32-byte hex signing seed for a separately provisioned identity.
+        #[arg(long)]
+        signing_seed_file: Option<PathBuf>,
+    },
+    /// Export a signed messaging-key advertisement for a provisioned IRC identity.
+    PublishIrcIdentity {
+        #[arg(long)]
+        oidc_subject: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Ingest a signed IRC identity messaging-key advertisement.
+    IngestIrcIdentity {
+        #[arg(long)]
+        file: PathBuf,
     },
     /// Set or clear this node's local nickname used in party-line displays.
     #[command(visible_alias = "nick")]
@@ -428,6 +453,9 @@ enum Command {
         oidc_write_entitlement: Option<String>,
         #[arg(long)]
         oidc_operator_entitlement: Option<String>,
+        /// Introspection claim containing the bound FEDERATION/LOCAL social identity.
+        #[arg(long)]
+        oidc_social_identity_claim: Option<String>,
     },
     /// Retry due real-time group and party-line deliveries. Full catch-up
     /// reconciliation is intentionally deferred to the next reliability slice.
@@ -1009,6 +1037,15 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::InitIdentity { display_name } => init_identity(&store, display_name)?,
+        Command::ProvisionIrcIdentity {
+            user,
+            oidc_subject,
+            signing_seed_file,
+        } => provision_irc_identity(&store, &user, &oidc_subject, signing_seed_file.as_deref())?,
+        Command::PublishIrcIdentity { oidc_subject, out } => {
+            irc_identity::publish(&store, &oidc_subject, &out)?
+        }
+        Command::IngestIrcIdentity { file } => irc_identity::ingest(&store, &file)?,
         Command::SetIdentityName { name } => {
             store.set_self_display_name(name.as_deref())?;
             println!(
@@ -1288,6 +1325,7 @@ fn main() -> Result<()> {
             oidc_required_group,
             oidc_write_entitlement,
             oidc_operator_entitlement,
+            oidc_social_identity_claim,
         } => {
             let listen = listen
                 .parse()
@@ -1316,6 +1354,7 @@ fn main() -> Result<()> {
                             required_group: oidc_required_group,
                             write_entitlement: oidc_write_entitlement,
                             operator_entitlement: oidc_operator_entitlement,
+                            social_identity_claim: oidc_social_identity_claim,
                         })
                     }
                     _ => anyhow::bail!("OIDC authentication requires introspection URL, client ID, and client-secret file"),
@@ -1877,6 +1916,42 @@ fn init_identity(store: &StateStore, display_name: Option<String>) -> Result<()>
     Ok(())
 }
 
+fn provision_irc_identity(
+    store: &StateStore,
+    user: &str,
+    oidc_subject: &str,
+    signing_seed_file: Option<&Path>,
+) -> Result<()> {
+    let user = tunnel::parse_user_ref(user)?;
+    let signing_seed = match signing_seed_file {
+        Some(path) => hex::decode(std::fs::read_to_string(path)?.trim())?
+            .try_into()
+            .map_err(|_| {
+                anyhow::anyhow!("signing seed file must contain exactly 32 bytes of hex")
+            })?,
+        None => {
+            let self_user = store.get_self_identity()?.context("no local identity")?.0;
+            if user != self_user {
+                anyhow::bail!("a non-router identity requires --signing-seed-file");
+            }
+            store.get_self_seed()?.context("no local signing seed")?
+        }
+    };
+    let messaging = crypto::MessagingKeypair::generate();
+    store.provision_local_irc_identity(
+        user,
+        oidc_subject,
+        &signing_seed,
+        &messaging.seed_bytes(),
+    )?;
+    println!(
+        "provisioned IRC identity {} with messaging public key {}",
+        tunnel::user_id_str(&user),
+        hex::encode(messaging.public_key().0)
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn add_follow(
     store: &StateStore,
@@ -2167,6 +2242,46 @@ pub(crate) fn publish_opinion(
         std::fs::write(&path, serde_json::to_string_pretty(&json)?)
             .with_context(|| format!("writing {}", path.display()))?;
         println!("exported to {}", path.display());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_opinion_as_identity(
+    store: &StateStore,
+    identity: &LocalIrcIdentity,
+    target_kind: &str,
+    target_value: &str,
+    stance: &str,
+    reason_code: &str,
+    note: Option<String>,
+    ttl_seconds: Option<i64>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let kp = crypto::Keypair::from_seed(&identity.signing_secret_seed);
+    let target = parse_target(target_kind, target_value)?;
+    let mut opinion = PolicyOpinion {
+        author: identity.user,
+        sequence: store.next_own_sequence_for(&identity.user)?,
+        target,
+        stance: parse_stance(stance)?,
+        reason: Reason {
+            code: parse_reason_code(reason_code)?,
+            note,
+            evidence: vec![],
+        },
+        issued_at: now_unix(),
+        expires_at: ttl_seconds.map(|seconds| now_unix() + seconds),
+        supersedes: None,
+        signature: SignatureBytes([0; 64]),
+    };
+    opinion.signature = kp.sign(crypto::contexts::POLICY_OPINION, &opinion.signing_bytes());
+    store.append_own_opinion(&opinion)?;
+    if let Some(path) = out {
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&opinion_to_json(&opinion, &kp.public_key()))?,
+        )?;
     }
     Ok(())
 }

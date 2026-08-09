@@ -3,7 +3,7 @@ use domain_types::{
     CanonicalEncode, PolicyAction, PolicyEntry, PolicyVote, Reason, SharedPolicy, SignatureBytes,
     Visibility,
 };
-use state_store::StateStore;
+use state_store::{LocalIrcIdentity, StateStore};
 use std::path::{Path, PathBuf};
 
 use crate::tunnel::{
@@ -352,6 +352,70 @@ pub fn vote_policy_entry(
         policy_id,
         entry_id
     );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn vote_policy_entry_as_identity(
+    store: &StateStore,
+    identity: &LocalIrcIdentity,
+    policy_id: &str,
+    entry_id: &str,
+    group: &str,
+    stance: &str,
+    reason_code: &str,
+    note: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let policy_id = parse_hash32(policy_id)?;
+    let entry_id = parse_hash32(entry_id)?;
+    let group_id = crate::group::resolve_group_id(store, group)?;
+    let group_state = store.get_group(group_id)?.context("unknown group")?;
+    if !group_state.voting_members.contains(&identity.user) {
+        bail!("this identity is not a voting member of the group");
+    }
+    let policy = store
+        .list_shared_policies()?
+        .into_iter()
+        .find(|policy| policy.policy_id == policy_id && policy.entry(&entry_id).is_some())
+        .context("unknown policy or entry")?;
+    let kp = crypto::Keypair::from_seed(&identity.signing_secret_seed);
+    let mut vote = PolicyVote {
+        policy_id,
+        entry_id,
+        policy_sequence: policy.sequence,
+        group_id,
+        voter: identity.user,
+        sequence: store.next_policy_vote_sequence(
+            policy_id,
+            entry_id,
+            policy.sequence,
+            group_id,
+            &identity.user,
+        )?,
+        stance: crate::parse_stance(stance)?,
+        reason: Reason {
+            code: crate::parse_reason_code(reason_code)?,
+            note,
+            evidence: vec![],
+        },
+        issued_at: now_unix(),
+        expires_at: None,
+        signature: SignatureBytes([0; 64]),
+    };
+    vote.signature = kp.sign(crypto::contexts::POLICY_VOTE, &vote.signing_bytes());
+    store.store_policy_vote(&vote)?;
+    if let Some(path) = out {
+        let json = serde_json::json!({
+            "policy_id": vote.policy_id.to_string(), "entry_id": vote.entry_id.to_string(),
+            "policy_sequence": vote.policy_sequence, "group_id": vote.group_id.0.to_string(),
+            "voter": user_id_str(&vote.voter), "sequence": vote.sequence,
+            "stance": crate::stance_str(vote.stance), "reason_code": crate::reason_code_str(vote.reason.code),
+            "reason_note": vote.reason.note, "issued_at": vote.issued_at, "expires_at": vote.expires_at,
+            "identity_pubkey": hex::encode(kp.public_key().0), "signature": hex::encode(vote.signature.0),
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&json)?)?;
+    }
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use base64::Engine;
+use domain_types::UserId;
 use std::fs::read;
 use std::path::PathBuf;
 
@@ -14,6 +15,7 @@ pub struct OidcSettings {
     pub required_group: Option<String>,
     pub write_entitlement: Option<String>,
     pub operator_entitlement: Option<String>,
+    pub social_identity_claim: Option<String>,
 }
 
 pub(crate) struct OidcAuthenticator {
@@ -26,6 +28,7 @@ pub(crate) struct OidcAuthenticator {
     pub(crate) required_group: Option<String>,
     pub(crate) write_entitlement: Option<String>,
     pub(crate) operator_entitlement: Option<String>,
+    pub(crate) social_identity_claim: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +37,7 @@ pub(crate) struct AuthenticatedIdentity {
     pub(crate) username: String,
     pub(crate) groups: Vec<String>,
     pub(crate) entitlements: Vec<String>,
+    pub(crate) social_identity: Option<UserId>,
 }
 
 impl OidcAuthenticator {
@@ -58,6 +62,7 @@ impl OidcAuthenticator {
             required_group: settings.required_group,
             write_entitlement: settings.write_entitlement,
             operator_entitlement: settings.operator_entitlement,
+            social_identity_claim: settings.social_identity_claim,
         })
     }
 
@@ -116,6 +121,10 @@ impl OidcAuthenticator {
             username: username.to_string(),
             groups: string_claims(claims.get("groups")),
             entitlements: string_claims(claims.get("entitlements")),
+            social_identity: parse_social_identity_claim(
+                &claims,
+                self.social_identity_claim.as_deref(),
+            )?,
         };
         if !required_group_allowed(self.required_group.as_deref(), &identity.groups) {
             anyhow::bail!("Authentik group requirement not met");
@@ -156,6 +165,20 @@ fn string_claims(value: Option<&serde_json::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_social_identity_claim(
+    claims: &serde_json::Value,
+    claim: Option<&str>,
+) -> Result<Option<UserId>> {
+    match claim {
+        Some(claim) => claims
+            .get(claim)
+            .and_then(|value| value.as_str())
+            .map(crate::tunnel::parse_user_ref)
+            .transpose(),
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn decode_oauthbearer(value: &str) -> Result<String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(value)
@@ -170,4 +193,31 @@ pub(crate) fn decode_oauthbearer(value: &str) -> Result<String> {
         anyhow::bail!("invalid OAUTHBEARER token length");
     }
     Ok(token.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_social_identity_claim;
+
+    #[test]
+    fn social_identity_claim_is_optional() {
+        let claims = serde_json::json!({"social_user": "not-used"});
+        assert!(parse_social_identity_claim(&claims, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn social_identity_claim_requires_a_valid_user_reference() {
+        let claims = serde_json::json!({"social_user": "invalid"});
+        assert!(parse_social_identity_claim(&claims, Some("social_user")).is_err());
+    }
+
+    #[test]
+    fn missing_social_identity_claim_fails_closed_to_no_binding() {
+        let claims = serde_json::json!({});
+        assert!(parse_social_identity_claim(&claims, Some("social_user"))
+            .unwrap()
+            .is_none());
+    }
 }

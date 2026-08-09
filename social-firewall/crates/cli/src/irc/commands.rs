@@ -293,7 +293,14 @@ fn handle_direct_message(
             return Ok(());
         }
         let recipient = crate::tunnel::parse_user_ref(target)?;
-        crate::direct_message::send(store, recipient, body, &server.config.out_dir)?;
+        let local_identity = state.lock().unwrap().local_irc_identity.clone();
+        crate::direct_message::send(
+            store,
+            recipient,
+            body,
+            &server.config.out_dir,
+            local_identity.as_ref(),
+        )?;
         super::send_line(
             tx,
             &format!(

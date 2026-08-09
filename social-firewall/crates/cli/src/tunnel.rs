@@ -91,13 +91,21 @@ pub(crate) fn parse_maybe_sealed_bytes(
             .and_then(|v| v.as_str())
             .context("missing `ciphertext_hex`")?;
         let ciphertext = hex::decode(ciphertext_hex)?;
-        let kp = own_messaging_keypair(store)?;
-        let plaintext = kp.unseal(&ciphertext).map_err(|_| {
-            anyhow::anyhow!(
-                "unsealing failed — not addressed to this router, or the file was tampered with"
-            )
-        })?;
-        Ok(serde_json::from_slice(&plaintext)?)
+        let mut keypairs = vec![own_messaging_keypair(store)?];
+        keypairs.extend(
+            store
+                .list_local_irc_identities()?
+                .into_iter()
+                .map(|identity| {
+                    crypto::MessagingKeypair::from_seed(&identity.messaging_secret_seed)
+                }),
+        );
+        for keypair in keypairs {
+            if let Ok(plaintext) = keypair.unseal(&ciphertext) {
+                return Ok(serde_json::from_slice(&plaintext)?);
+            }
+        }
+        bail!("unsealing failed — not addressed to this router, or the file was tampered with")
     } else {
         Ok(json)
     }
@@ -575,6 +583,18 @@ pub(crate) fn recipient_messaging_pubkey(
     store: &StateStore,
     recipient: &UserId,
 ) -> Result<MessagingPublicKeyBytes> {
+    if let Some(identity) = store
+        .list_local_irc_identities()?
+        .into_iter()
+        .find(|identity| identity.user == *recipient)
+    {
+        return Ok(
+            crypto::MessagingKeypair::from_seed(&identity.messaging_secret_seed).public_key(),
+        );
+    }
+    if let Some(key) = store.get_irc_identity_messaging_pubkey(recipient)? {
+        return Ok(key);
+    }
     for ad in store.list_tunnel_advertisements()? {
         if ad.provider == *recipient {
             return Ok(ad.messaging_pubkey);
@@ -1321,6 +1341,9 @@ pub fn dispatch_envelope(
         }
         p2p_transport::StatementKind::DirectMessage => {
             crate::direct_message::ingest_bytes(store, payload)
+        }
+        p2p_transport::StatementKind::IrcIdentityAdvertisement => {
+            crate::irc_identity::ingest_bytes(store, payload)
         }
     }
 }

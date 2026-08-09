@@ -162,6 +162,64 @@ fn seed_seen_messages(server: &Server, store: &StateStore) {
     }
 }
 
+fn poll_direct_messages(server: &Server, store: &StateStore, self_user: Option<UserId>) {
+    let mut recipients = self_user.into_iter().collect::<Vec<_>>();
+    for identity in store.list_local_irc_identities().unwrap_or_default() {
+        if !recipients.contains(&identity.user) {
+            recipients.push(identity.user);
+        }
+    }
+    for recipient in recipients {
+        for message in store
+            .list_direct_messages_for(&recipient)
+            .unwrap_or_default()
+        {
+            let key = format!(
+                "{}/{}",
+                crate::tunnel::user_id_str(&message.sender),
+                message.sequence
+            );
+            if store
+                .has_been_notified("irc_direct_message", &key)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let sender = crate::tunnel::user_id_str(&message.sender);
+            let clients = server.clients.lock().unwrap();
+            let mut delivered = false;
+            for client in clients.iter() {
+                let state = client.state.lock().unwrap();
+                let bound_user = state
+                    .local_irc_identity
+                    .as_ref()
+                    .map(|identity| identity.user)
+                    .or_else(|| {
+                        state
+                            .authenticated
+                            .as_ref()
+                            .and_then(|identity| identity.social_identity)
+                    });
+                if bound_user != Some(message.recipient) {
+                    continue;
+                }
+                let Some(nickname) = state.nick.as_deref() else {
+                    continue;
+                };
+                send_line(
+                    &client.tx,
+                    &format!(":sf/{sender} PRIVMSG {nickname} :{}", message.body),
+                );
+                delivered = true;
+            }
+            drop(clients);
+            if delivered {
+                let _ = store.mark_notified("irc_direct_message", &key, crate::now_unix());
+            }
+        }
+    }
+}
+
 fn poll_messages(server: &Server, store: &StateStore) {
     let self_user = store
         .get_self_identity()
@@ -200,6 +258,7 @@ fn poll_messages(server: &Server, store: &StateStore) {
             }
         }
     }
+    poll_direct_messages(server, store, self_user);
 }
 
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<Arc<ServerConfig>> {
@@ -490,10 +549,15 @@ fn handle_authenticate(
             Ok(identity) => {
                 let username = identity.username.clone();
                 let subject = identity.subject.clone();
+                let local_irc_identity = store
+                    .get_local_irc_identity_by_subject(&identity.subject)
+                    .ok()
+                    .flatten();
                 let mut session = state.lock().unwrap();
                 session.sasl_pending = false;
                 session.auth_groups = identity.groups.clone();
                 session.auth_entitlements = identity.entitlements.clone();
+                session.local_irc_identity = local_irc_identity;
                 session.authenticated = Some(identity);
                 if session.username.is_none() {
                     session.username = Some(username);
@@ -932,6 +996,7 @@ mod tests {
             username: "alice".into(),
             groups: vec!["router-users".into()],
             entitlements: vec!["router:write".into()],
+            social_identity: None,
         };
         let client = reqwest::blocking::Client::new();
         let auth = OidcAuthenticator {
@@ -944,6 +1009,7 @@ mod tests {
             required_group: Some("router-users".into()),
             write_entitlement: Some("router:write".into()),
             operator_entitlement: Some("router:admin".into()),
+            social_identity_claim: None,
         };
         assert!(auth::required_group_allowed(
             Some("router-users"),

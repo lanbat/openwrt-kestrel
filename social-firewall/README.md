@@ -97,6 +97,8 @@ uci set sf-ircd.main.oidc_audience='client-id'
 uci set sf-ircd.main.oidc_required_group='router-users'
 uci set sf-ircd.main.oidc_write_entitlement='router:write'
 uci set sf-ircd.main.oidc_operator_entitlement='router:write'
+# Optional: claim containing the bound FEDERATION/LOCAL social identity.
+uci set sf-ircd.main.oidc_social_identity_claim='social_firewall_user'
 uci commit sf-ircd
 ```
 
@@ -106,6 +108,27 @@ tokens are rejected before IRC registration completes.
 
 When OIDC is enabled, `oidc_write_entitlement` controls `PRIVMSG`/`NOTICE`,
 while `oidc_operator_entitlement` controls `TOPIC` and channel `MODE` changes.
+When `oidc_social_identity_claim` is configured, its value must be a valid
+`FEDERATION/LOCAL` identity reference. Stored remote direct messages are then
+delivered only to authenticated sessions carrying the matching claim. Claim-only
+bindings do not provision independent signing keys, so votes remain attributed
+to the router identity.
+
+For a provisioned per-user IRC identity, bind the OIDC `sub` claim to a known
+social identity. The command generates separate signing and messaging keys and
+prints the messaging public key for the identity's normal federation
+advertisement path:
+
+```sh
+sf --db /etc/kestrel/social-firewall.sqlite provision-irc-identity \
+  --user FEDERATION/LOCAL --oidc-subject authentik-user-subject
+sf --db /etc/kestrel/social-firewall.sqlite publish-irc-identity \
+  --oidc-subject authentik-user-subject \
+  --out /etc/kestrel/social-firewall/irc-identity.json
+```
+
+The signed identity advertisement can be delivered through the existing
+authenticated statement/file-ingest paths with `ingest-irc-identity`.
 
 ### Optional Reticulum Bridge
 

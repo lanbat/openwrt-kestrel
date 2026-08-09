@@ -1,6 +1,7 @@
 use super::auth::AuthenticatedIdentity;
 use crate::device_fingerprint::DeviceFingerprint;
 use domain_types::GroupId;
+use state_store::LocalIrcIdentity;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
@@ -20,4 +21,5 @@ pub(crate) struct SessionState {
     pub(crate) authenticated: Option<AuthenticatedIdentity>,
     pub(crate) auth_groups: Vec<String>,
     pub(crate) auth_entitlements: Vec<String>,
+    pub(crate) local_irc_identity: Option<LocalIrcIdentity>,
 }

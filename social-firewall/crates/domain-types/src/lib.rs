@@ -4,6 +4,7 @@ pub mod direct_message;
 pub mod fingerprint;
 pub mod group;
 pub mod ids;
+pub mod irc_identity;
 pub mod list;
 pub mod opinion;
 pub mod policy;
@@ -27,6 +28,7 @@ pub use ids::{
     DeviceId, FederationId, GlobalFingerprintId, Hash32, IdentityId, NodeId, PublicKeyBytes,
     SignatureBytes, UserId,
 };
+pub use irc_identity::IrcIdentityAdvertisement;
 pub use list::{SharedRuleEntry, SharedRuleList};
 pub use opinion::{
     FederationStatement, LocalOverride, OpinionRef, OverrideKind, PolicyOpinion, Reason,

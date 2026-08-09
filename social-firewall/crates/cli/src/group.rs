@@ -17,7 +17,7 @@ use domain_types::{
     Group, GroupBlockReport, GroupId, GroupJoinRequest, GroupTrustRule, GroupVote, Hash32,
     PartyLineMessage, PublicKeyBytes, Reason, UserId,
 };
-use state_store::StateStore;
+use state_store::{LocalIrcIdentity, StateStore};
 use std::path::{Path, PathBuf};
 
 fn party_line_out_dir() -> PathBuf {
@@ -1200,6 +1200,61 @@ pub fn cast_group_vote(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn cast_group_vote_as_identity(
+    store: &StateStore,
+    identity: &LocalIrcIdentity,
+    group_id: &str,
+    target_kind: &str,
+    target_value: &str,
+    stance: &str,
+    reason_code: &str,
+    note: Option<String>,
+    ttl_seconds: Option<i64>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let group_id = parse_group_id(group_id)?;
+    let kp = crypto::Keypair::from_seed(&identity.signing_secret_seed);
+    let target = parse_target(target_kind, target_value)?;
+    let sequence = store.next_group_vote_sequence(group_id, &identity.user)?;
+    let now = now_unix();
+    let mut vote = GroupVote {
+        group_id,
+        voter: identity.user,
+        sequence,
+        target,
+        stance: parse_stance(stance)?,
+        reason: Reason {
+            code: parse_reason_code(reason_code)?,
+            note,
+            evidence: vec![],
+        },
+        issued_at: now,
+        expires_at: ttl_seconds.map(|seconds| now + seconds),
+        signature: domain_types::SignatureBytes([0; 64]),
+    };
+    vote.signature = kp.sign(crypto::contexts::GROUP_VOTE, &vote.signing_bytes());
+    store.store_group_vote(&vote)?;
+    if let Some(path) = out {
+        let json = serde_json::json!({
+            "group_id": group_id_str(vote.group_id),
+            "voter": user_id_str(&vote.voter),
+            "identity_pubkey": hex::encode(kp.public_key().0),
+            "sequence": vote.sequence,
+            "target_kind": target_kind,
+            "target_value": target_value,
+            "stance": stance_str(vote.stance),
+            "reason_code": reason_code_str(vote.reason.code),
+            "reason_note": vote.reason.note,
+            "issued_at": vote.issued_at,
+            "expires_at": vote.expires_at,
+            "signature": hex::encode(vote.signature.0),
+        });
+        write_maybe_sealed(&serde_json::to_vec(&json)?, None, &path)?;
+    }
+    Ok(())
+}
+
 pub fn ingest_group_vote(store: &StateStore, file: &Path) -> Result<()> {
     let json = read_maybe_sealed(store, file)?;
     let get_str = |key: &str| -> Result<&str> {
@@ -1373,6 +1428,7 @@ pub fn sync_outbox(store: &StateStore) -> Result<()> {
             4 => p2p_transport::StatementKind::Group,
             5 => p2p_transport::StatementKind::PartyLineMessage,
             15 => p2p_transport::StatementKind::DirectMessage,
+            16 => p2p_transport::StatementKind::IrcIdentityAdvertisement,
             _ => continue,
         };
         match crate::tunnel::deliver_to_destination(

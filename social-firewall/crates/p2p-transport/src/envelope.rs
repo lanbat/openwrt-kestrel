@@ -20,6 +20,7 @@ pub enum StatementKind {
     FingerprintObservation,
     FingerprintComment,
     DirectMessage,
+    IrcIdentityAdvertisement,
 }
 
 impl StatementKind {
@@ -40,6 +41,7 @@ impl StatementKind {
             StatementKind::FingerprintObservation => 13,
             StatementKind::FingerprintComment => 14,
             StatementKind::DirectMessage => 15,
+            StatementKind::IrcIdentityAdvertisement => 16,
         }
     }
 
@@ -60,6 +62,7 @@ impl StatementKind {
             13 => Some(StatementKind::FingerprintObservation),
             14 => Some(StatementKind::FingerprintComment),
             15 => Some(StatementKind::DirectMessage),
+            16 => Some(StatementKind::IrcIdentityAdvertisement),
             _ => None,
         }
     }

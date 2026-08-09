@@ -1095,25 +1095,57 @@ fn cast_group_vote(
     require_authenticated_identity(server, tx, state)?;
     require_write_access(server, tx, state)?;
     let group = group_option(state, store, options)?;
-    let self_user = store.get_self_identity()?.context("no router identity")?.0;
+    let local_identity = state.lock().unwrap().local_irc_identity.clone();
+    let self_user = local_identity
+        .as_ref()
+        .map(|identity| identity.user)
+        .or_else(|| {
+            store
+                .get_self_identity()
+                .ok()
+                .flatten()
+                .map(|(user, _)| user)
+        })
+        .context("no social identity")?;
     let group_state = store.get_group(group)?.context("unknown group")?;
     if !group_state.voting_members.contains(&self_user) {
         anyhow::bail!("this identity is not a voting member of the group");
     }
-    crate::group::cast_group_vote(
-        store,
-        &crate::group::group_id_str(group),
-        required(options, "target-kind")?,
-        required(options, "target-value")?,
-        required(options, "stance")?,
-        required(options, "reason-code")?,
-        options.get("note").cloned(),
-        options
-            .get("ttl-seconds")
-            .map(|value| value.parse())
-            .transpose()?,
-        None,
-    )?;
+    let group_id = crate::group::group_id_str(group);
+    let target_kind = required(options, "target-kind")?;
+    let target_value = required(options, "target-value")?;
+    let stance = required(options, "stance")?;
+    let reason_code = required(options, "reason-code")?;
+    let note = options.get("note").cloned();
+    let ttl_seconds = options
+        .get("ttl-seconds")
+        .map(|value| value.parse())
+        .transpose()?;
+    match local_identity.as_ref() {
+        Some(identity) => crate::group::cast_group_vote_as_identity(
+            store,
+            identity,
+            &group_id,
+            target_kind,
+            target_value,
+            stance,
+            reason_code,
+            note,
+            ttl_seconds,
+            None,
+        )?,
+        None => crate::group::cast_group_vote(
+            store,
+            &group_id,
+            target_kind,
+            target_value,
+            stance,
+            reason_code,
+            note,
+            ttl_seconds,
+            None,
+        )?,
+    }
     response(server, tx, state, "signed group vote recorded");
     Ok(())
 }
@@ -1126,19 +1158,39 @@ fn publish_opinion(
     options: &HashMap<String, String>,
 ) -> Result<()> {
     require_write_access(server, tx, state)?;
-    crate::publish_opinion(
-        store,
-        required(options, "target-kind")?,
-        required(options, "target-value")?,
-        required(options, "stance")?,
-        required(options, "reason-code")?,
-        options.get("note").cloned(),
-        options
-            .get("ttl-seconds")
-            .map(|value| value.parse())
-            .transpose()?,
-        None,
-    )?;
+    let local_identity = state.lock().unwrap().local_irc_identity.clone();
+    let target_kind = required(options, "target-kind")?;
+    let target_value = required(options, "target-value")?;
+    let stance = required(options, "stance")?;
+    let reason_code = required(options, "reason-code")?;
+    let note = options.get("note").cloned();
+    let ttl_seconds = options
+        .get("ttl-seconds")
+        .map(|value| value.parse())
+        .transpose()?;
+    match local_identity.as_ref() {
+        Some(identity) => crate::publish_opinion_as_identity(
+            store,
+            identity,
+            target_kind,
+            target_value,
+            stance,
+            reason_code,
+            note,
+            ttl_seconds,
+            None,
+        )?,
+        None => crate::publish_opinion(
+            store,
+            target_kind,
+            target_value,
+            stance,
+            reason_code,
+            note,
+            ttl_seconds,
+            None,
+        )?,
+    }
     response(server, tx, state, "signed opinion recorded");
     Ok(())
 }
@@ -1179,16 +1231,35 @@ fn vote_policy_entry(
     require_authenticated_identity(server, tx, state)?;
     require_write_access(server, tx, state)?;
     let group = required_group(store, options)?;
-    crate::shared_policy::vote_policy_entry(
-        store,
-        required(options, "policy-id")?,
-        required(options, "entry-id")?,
-        &group,
-        required(options, "stance")?,
-        required(options, "reason-code")?,
-        options.get("note").cloned(),
-        None,
-    )?;
+    let local_identity = state.lock().unwrap().local_irc_identity.clone();
+    let policy_id = required(options, "policy-id")?;
+    let entry_id = required(options, "entry-id")?;
+    let stance = required(options, "stance")?;
+    let reason_code = required(options, "reason-code")?;
+    let note = options.get("note").cloned();
+    match local_identity.as_ref() {
+        Some(identity) => crate::shared_policy::vote_policy_entry_as_identity(
+            store,
+            identity,
+            policy_id,
+            entry_id,
+            &group,
+            stance,
+            reason_code,
+            note,
+            None,
+        )?,
+        None => crate::shared_policy::vote_policy_entry(
+            store,
+            policy_id,
+            entry_id,
+            &group,
+            stance,
+            reason_code,
+            note,
+            None,
+        )?,
+    }
     response(server, tx, state, "signed policy vote recorded");
     Ok(())
 }
@@ -1949,6 +2020,7 @@ mod tests {
                 username: "user".into(),
                 groups: vec![],
                 entitlements: vec![],
+                social_identity: None,
             }),
             ..SessionState::default()
         }));
