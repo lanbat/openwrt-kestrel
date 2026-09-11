@@ -70,6 +70,23 @@ curl -4 ifconfig.co   # returns your VPN IP if the domain is in a routing set
 curl -4 icanhazip.com # returns your home WAN IP (not in any set)
 ```
 
+## IPv4 works through a tier but IPv6 doesn't
+
+Check whether the tier's zone actually masquerades both families:
+
+```sh
+uci show firewall | grep -A6 "name='mv_bg'"   # replace mv_bg with your tier
+```
+
+If `masq6` is missing or `'0'`, IPv6 packets leave the tunnel with their original LAN/ULA source address untranslated, the VPN endpoint has nowhere to send the reply, and every IPv6 connection through that tier hangs or fails outright — while IPv4 keeps working normally (masquerading is set per-family, so a missing `masq6` doesn't touch IPv4 at all). This is easy to introduce if a zone was set up by hand and `masq6='1'` was left off — see [mullvad-routing.md Step 3](mullvad-routing.md#step-3--firewall-zones).
+
+Fix and reload:
+
+```sh
+uci set firewall.@zone[N].masq6='1'
+uci commit firewall && fw4 reload
+```
+
 ## dns category reports "No domains — skipping"
 
 The local file for that category (`/etc/kestrel/split-routing/local-dns-<tier>_<cat>.txt`) is empty or contains only comments, and no `DNS_URLS_<cat>` is set in the `vpn-*.conf`. Add at least one domain to the local file and re-run `update-routing-sets`.

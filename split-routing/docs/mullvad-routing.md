@@ -81,6 +81,8 @@ uci set firewall.@zone[-1].network='mv_bg'
 uci set firewall.@zone[-1].input='REJECT'
 uci set firewall.@zone[-1].output='ACCEPT'
 uci set firewall.@zone[-1].forward='REJECT'
+uci set firewall.@zone[-1].masq='1'
+uci set firewall.@zone[-1].masq6='1'
 
 uci add firewall forwarding
 uci set firewall.@forwarding[-1].src='lan'
@@ -88,6 +90,8 @@ uci set firewall.@forwarding[-1].dest='mv_bg'
 
 uci commit firewall && fw4 reload
 ```
+
+`masq`/`masq6` are required, not optional — the tunnel's assigned address (Mullvad hands out both a private IPv4 and a ULA IPv6 address per peer) has to be translated to that address on the way out, or the VPN endpoint has no way to route the reply. Skipping `masq6` specifically is easy to miss because IPv4 will still work (LAN traffic silently rides out on whatever other zone happens to share the interface, if any) — the failure only shows up as IPv6 connectivity through the tunnel being completely dead, with no error anywhere.
 
 Repeat for each additional VPN tier (e.g. `mv_uk`).
 
@@ -207,7 +211,7 @@ RESOLVE_URLS_torrenttrackers="url=https://example.com/trackers.txt domain=https:
 ### Routing one device's traffic through a tier, per rule
 
 The above sections route by domain/category for everyone. `networks`'
-device-control feature (see [its README](../../networks/README.md#per-device-control))
+device-control feature (see [approvals and device control](../../networks/docs/approvals-and-device-control.md))
 can instead route a single approved device's traffic through a configured
 VPN tier, one domain rule at a time — no editing `vpn-*.conf` or local
 files required:
