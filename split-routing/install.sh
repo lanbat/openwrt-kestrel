@@ -263,6 +263,14 @@ EOF
 grep -qF "/etc/capabilities/dnsmasq.json" /etc/sysupgrade.conf 2>/dev/null || \
   echo "/etc/capabilities/dnsmasq.json" >>/etc/sysupgrade.conf
 
+# Adblock may collapse the .fun TLD into a local NXDOMAIN rule. This
+# domain-specific rule is more specific and sends Torrentio to dnsmasq's
+# normal upstream resolvers; its answers are still added to the mv_bg nft set
+# by local-dns-bg_torrentsites.txt.
+cat >/etc/dnsmasq.d/90-split-routing-stremio.conf <<'EOF'
+server=/torrentio.strem.fun/#
+EOF
+
 /etc/init.d/dnsmasq restart 2>/dev/null || true
 
 # ── nftables.d include (mark chain — survives every fw4 reload) ────────────────

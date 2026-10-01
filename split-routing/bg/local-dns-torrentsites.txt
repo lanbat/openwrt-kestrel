@@ -2,3 +2,12 @@
 # Examples:
 # example-torrent-site.com
 # another-example.org
+
+# Stremio torrent/debrid add-ons.
+torrentio.strem.fun
+torrentio.elfhosted.com
+comet.elfhosted.com
+mediafusion.elfhosted.com
+jackettio.elfhosted.com
+stremthru.elfhosted.com
+aiostreams.elfhosted.com
