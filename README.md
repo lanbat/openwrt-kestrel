@@ -1,27 +1,42 @@
-# openwrt-router
+# openwrt-kestrel
 
-Two cooperating toolkits for OpenWrt routers, managed from a single repo: one segments your WiFi into isolated trust zones with approval workflows and live monitoring, the other selectively routes traffic through a VPN by domain or category instead of tunneling everything.
+**Give every device on your WiFi the trust it deserves, and send only the traffic you choose through a VPN.**
 
-## Sub-projects
+Two cooperating toolkits for OpenWrt routers, installed with plain shell scripts on top of
+fw4/nftables and dnsmasq. No LuCI and no extra daemons to babysit.
 
-### [extra-networks](extra-networks/README.md)
+- **[extra-networks](extra-networks/README.md):** isolated WiFi trust zones for guests, IoT and
+  misbehaving gadgets, each with its own subnet, firewall zone, filtered DNS and rate limit. Optionally
+  new devices wait for your approval, which arrives as a push notification with an **Approve** button.
+- **[split-routing](split-routing/docs/mullvad-routing.md):** route chosen domains and IP ranges
+  through a WireGuard VPN without moving your default gateway. Domain lists come in many formats,
+  resolve lazily through dnsmasq and update daily.
 
-Isolated WiFi networks (guest, untrusted IoT) with push notifications,
-join approval, per-device outbound control, password rotation, and a
-web dashboard. Uses fw4/nftables and dnsmasq.
+Part of [LAN BAT](https://lanbat.github.io/), open home infrastructure. Pairs well with
+[lanbat/nixconf](https://github.com/lanbat/nixconf), a NixOS homelab behind the same router.
 
-### [split-routing](split-routing/docs/mullvad-routing.md)
+## Why
 
-Routes specific domains and IPs through a WireGuard VPN without
-moving the default gateway. Supports domain lists in many formats,
-dnsmasq-based lazy resolution, and daily auto-updates.
+Most home routers offer two levels of trust: on the WiFi, or off it. Real households need more.
+Your laptop, a smart plug that phones home, and a visitor's phone should not share a network,
+and you should not have to choose between "everything through the VPN" and "nothing through it".
+
+| | extra-networks | split-routing |
+|---|---|---|
+| **One command** | `sh install.sh configs/guest.conf` deploys a complete zone | `sh install.sh` reads `/etc/split-routing/` |
+| **Isolation** | Internet-only by default, WiFi client isolation, optional MAC allowlist | VPN marks skip isolated bridges, so guests never use your tunnel |
+| **DNS** | Cloudflare for Families filtering, bypass blocked at the firewall, optional DoT | dnsmasq resolves listed domains on demand into nft sets |
+| **Control** | Join approval, per-device outbound rules, access windows, password rotation | Named VPN tiers (e.g. one exit per country), each with its own domain categories |
+| **Visibility** | Live web dashboard and ntfy push notifications | Daily list updates and a troubleshooting guide |
 
 Supplementary docs: [supported formats](split-routing/docs/supported-formats.md) · [troubleshooting](split-routing/docs/troubleshooting.md) · [WireGuard VPN server](split-routing/docs/wireguard-vpn.md)
 
 ## Install
 
+On the router:
+
 ```sh
-git clone <repo-url> /root/openwrt-router
+git clone https://github.com/lanbat/openwrt-kestrel /root/openwrt-router
 cd /root/openwrt-router
 ```
 
