@@ -1,0 +1,41 @@
+name: check
+
+on:
+  push:
+    branches: [main, rust-rewrite]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - networks/kestreld-rs
+          - split-routing/nft-resolve-rs
+          - social-firewall
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Unit and logic tests only. Changes that touch real system state also
+      # need the QEMU tests in test/qemu (see CONTRIBUTING.md).
+      - name: cargo test
+        working-directory: ${{ matrix.crate }}
+        run: cargo test --workspace
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck the scripts
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck -S error

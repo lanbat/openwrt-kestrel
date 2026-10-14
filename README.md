@@ -1,5 +1,11 @@
 # openwrt-kestrel
 
+[![check](https://github.com/lanbat/openwrt-kestrel/actions/workflows/check.yml/badge.svg)](https://github.com/lanbat/openwrt-kestrel/actions/workflows/check.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![IRC: #lanbat on Libera.Chat](https://img.shields.io/badge/IRC-%23lanbat%20on%20Libera.Chat-2f4bff.svg)](https://web.libera.chat/#lanbat)
+
+**[Take the tour →](https://lanbat.github.io/kestrel/)** · part of [LAN BAT](https://lanbat.github.io/), open home infrastructure
+
 Two cooperating toolkits for OpenWrt routers, delivered as a single native package. One segments your WiFi into isolated trust zones with push notifications, approval workflows, and live monitoring. The other selectively routes traffic through a WireGuard VPN by domain or category, without tunneling everything.
 
 ## Features
