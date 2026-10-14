@@ -1,4 +1,9 @@
-# openwrt-router
+# openwrt-kestrel
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![IRC: #lanbat on Libera.Chat](https://img.shields.io/badge/IRC-%23lanbat%20on%20Libera.Chat-2f4bff.svg)](https://web.libera.chat/#lanbat)
+
+Part of [LAN BAT](https://lanbat.github.io/), open home infrastructure you can read, fork and borrow from.
 
 Two cooperating toolkits for OpenWrt routers, managed from a single repo: one segments your WiFi into isolated trust zones with approval workflows and live monitoring, the other selectively routes traffic through a VPN by domain or category instead of tunneling everything.
 
